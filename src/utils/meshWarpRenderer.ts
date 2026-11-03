@@ -15,13 +15,25 @@
  */
 import type { FaceTopology } from './faceMesh.ts';
 
+export interface FacialLightingZones {
+  forehead: [number, number, number];
+  leftCheek: [number, number, number];
+  rightCheek: [number, number, number];
+  nose: [number, number, number];
+  chin: [number, number, number];
+}
+
 export interface WarpFrameOptions {
   /** Flat [x, y, ...] pixel positions for 468+ vertices in output canvas space. */
   positions: Float32Array;
   /** Overall opacity 0..1 (transformation strength). */
   opacity: number;
-  /** Per-channel RGB multiplier for lighting adaptation. */
+  /** Global per-channel RGB multiplier for lighting adaptation. */
   colorGain: [number, number, number];
+  /** Multi-zone directional lighting adaptation across 5 facial regions. */
+  zoneLighting?: FacialLightingZones;
+  /** Bounding box of the face [minX, minY, width, height] for spatial lighting interpolation. */
+  faceBounds?: [number, number, number, number];
   /** Paint persona eyes over the wearer's eyes (otherwise the wearer's real eyes show). */
   drawPersonaEyes: boolean;
 }
@@ -30,28 +42,71 @@ const VERTEX_SHADER = `
 attribute vec2 aPosition;
 attribute vec2 aUv;
 attribute float aFeather;
+
 uniform vec2 uResolution;
+uniform vec4 uFaceBounds;
+uniform vec3 uGainForehead;
+uniform vec3 uGainLeftCheek;
+uniform vec3 uGainRightCheek;
+uniform vec3 uGainNose;
+uniform vec3 uGainChin;
+
 varying vec2 vUv;
 varying float vFeather;
+varying vec3 vLighting;
+
 void main() {
   vec2 clip = vec2(aPosition.x / uResolution.x * 2.0 - 1.0, 1.0 - aPosition.y / uResolution.y * 2.0);
   gl_Position = vec4(clip, 0.0, 1.0);
   vUv = aUv;
   vFeather = aFeather;
+
+  // Normalized position relative to face bounding box [0, 1]
+  vec2 nPos = clamp((aPosition - uFaceBounds.xy) / max(uFaceBounds.zw, vec2(1.0)), 0.0, 1.0);
+
+  // Smooth spatial basis functions across forehead, cheeks, nose, and chin/jaw
+  float wForehead = clamp((0.45 - nPos.y) / 0.45, 0.0, 1.0);
+  float wChin = clamp((nPos.y - 0.65) / 0.35, 0.0, 1.0);
+  float midY = clamp(1.0 - abs(nPos.y - 0.5) / 0.35, 0.0, 1.0);
+  float wLeftCheek = midY * clamp((0.45 - nPos.x) / 0.45, 0.0, 1.0);
+  float wRightCheek = midY * clamp((nPos.x - 0.55) / 0.45, 0.0, 1.0);
+  float wNose = clamp(1.0 - length((nPos - vec2(0.5, 0.5)) * vec2(2.5, 2.5)), 0.0, 1.0);
+
+  float totalW = wForehead + wChin + wLeftCheek + wRightCheek + wNose + 0.001;
+  vLighting = (wForehead * uGainForehead +
+               wLeftCheek * uGainLeftCheek +
+               wRightCheek * uGainRightCheek +
+               wNose * uGainNose +
+               wChin * uGainChin) / totalW;
 }`;
 
 const FRAGMENT_SHADER = `
 precision mediump float;
 uniform sampler2D uTexture;
-uniform vec3 uGain;
 uniform float uOpacity;
+
 varying vec2 vUv;
 varying float vFeather;
+varying vec3 vLighting;
+
 void main() {
   vec4 c = texture2D(uTexture, vUv);
-  vec3 rgb = clamp(c.rgb * uGain, 0.0, 1.0);
-  float a = uOpacity * vFeather * c.a;
-  gl_FragColor = vec4(rgb * a, a);
+  if (c.a < 0.02) discard;
+
+  // Multi-zone directional lighting adaptation
+  vec3 lit = c.rgb * vLighting;
+
+  // Subsurface skin scattering: warm diffusion in transitions to eliminate plastic look
+  float lum = dot(lit, vec3(0.299, 0.587, 0.114));
+  vec3 sss = lit * vec3(1.04, 0.99, 0.95);
+  float sssWeight = clamp((0.4 - abs(lum - 0.45)) * 0.5, 0.0, 0.2);
+  vec3 naturalSkin = mix(lit, sss, sssWeight);
+
+  // Smooth Hermite feathering curve for boundary
+  float f = smoothstep(0.0, 1.0, vFeather);
+  float a = uOpacity * f * c.a;
+
+  gl_FragColor = vec4(clamp(naturalSkin, 0.0, 1.0) * a, a);
 }`;
 
 export class MeshWarpRenderer {
@@ -72,7 +127,12 @@ export class MeshWarpRenderer {
     aFeather: number;
     uResolution: WebGLUniformLocation | null;
     uTexture: WebGLUniformLocation | null;
-    uGain: WebGLUniformLocation | null;
+    uFaceBounds: WebGLUniformLocation | null;
+    uGainForehead: WebGLUniformLocation | null;
+    uGainLeftCheek: WebGLUniformLocation | null;
+    uGainRightCheek: WebGLUniformLocation | null;
+    uGainNose: WebGLUniformLocation | null;
+    uGainChin: WebGLUniformLocation | null;
     uOpacity: WebGLUniformLocation | null;
   } | null = null;
 
@@ -131,7 +191,12 @@ export class MeshWarpRenderer {
       aFeather: gl.getAttribLocation(program, 'aFeather'),
       uResolution: gl.getUniformLocation(program, 'uResolution'),
       uTexture: gl.getUniformLocation(program, 'uTexture'),
-      uGain: gl.getUniformLocation(program, 'uGain'),
+      uFaceBounds: gl.getUniformLocation(program, 'uFaceBounds'),
+      uGainForehead: gl.getUniformLocation(program, 'uGainForehead'),
+      uGainLeftCheek: gl.getUniformLocation(program, 'uGainLeftCheek'),
+      uGainRightCheek: gl.getUniformLocation(program, 'uGainRightCheek'),
+      uGainNose: gl.getUniformLocation(program, 'uGainNose'),
+      uGainChin: gl.getUniformLocation(program, 'uGainChin'),
       uOpacity: gl.getUniformLocation(program, 'uOpacity'),
     };
     this.positionBuffer = gl.createBuffer();
@@ -225,7 +290,24 @@ export class MeshWarpRenderer {
     gl.bindTexture(gl.TEXTURE_2D, this.texture);
     gl.uniform1i(loc.uTexture, 0);
     gl.uniform2f(loc.uResolution, this.canvas.width, this.canvas.height);
-    gl.uniform3f(loc.uGain, opts.colorGain[0], opts.colorGain[1], opts.colorGain[2]);
+
+    // Multi-zone directional lighting
+    const z = opts.zoneLighting;
+    const base = opts.colorGain;
+    const fGain = z?.forehead ?? base;
+    const lGain = z?.leftCheek ?? base;
+    const rGain = z?.rightCheek ?? base;
+    const nGain = z?.nose ?? base;
+    const cGain = z?.chin ?? base;
+
+    gl.uniform3f(loc.uGainForehead, fGain[0], fGain[1], fGain[2]);
+    gl.uniform3f(loc.uGainLeftCheek, lGain[0], lGain[1], lGain[2]);
+    gl.uniform3f(loc.uGainRightCheek, rGain[0], rGain[1], rGain[2]);
+    gl.uniform3f(loc.uGainNose, nGain[0], nGain[1], nGain[2]);
+    gl.uniform3f(loc.uGainChin, cGain[0], cGain[1], cGain[2]);
+
+    const bounds = opts.faceBounds ?? [0, 0, this.canvas.width, this.canvas.height];
+    gl.uniform4f(loc.uFaceBounds, bounds[0], bounds[1], bounds[2], bounds[3]);
     gl.uniform1f(loc.uOpacity, opts.opacity);
 
     gl.bindBuffer(gl.ELEMENT_ARRAY_BUFFER, this.indexBuffer);

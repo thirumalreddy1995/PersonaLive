@@ -2,7 +2,10 @@ import test from 'node:test';
 import assert from 'node:assert/strict';
 import { FaceLandmarker } from '@mediapipe/tasks-vision';
 import {
+  applyEyelidKinematics,
+  applyGazeIrisTracking,
   applySmileBias,
+  applySpeechAnatomy,
   buildFaceTopology,
   computeKinematics,
   fanTriangles,
@@ -151,4 +154,29 @@ test('smoothingToFilterParams maps the slider to a monotonic cutoff range', () =
   assert.ok(steady.minCutoff > 0.5);
   const clampedLow = smoothingToFilterParams(-50);
   assert.deepEqual(clampedLow, responsive);
+});
+
+test('applySpeechAnatomy stabilizes upper lip and mustache landmarks during speech', () => {
+  const pts = syntheticFace({ eyesOpen: true, mouthOpen: true });
+  const beforeY = pts[LM.MOUTH.upperInner * 2 + 1];
+  applySpeechAnatomy(pts, 0.25, 200);
+  const afterY = pts[LM.MOUTH.upperInner * 2 + 1];
+  assert.ok(afterY <= beforeY, 'upper lip descent was restrained');
+});
+
+test('applyEyelidKinematics folds eyelid landmarks down when blinking', () => {
+  const pts = syntheticFace({ eyesOpen: true, mouthOpen: false });
+  const beforeL = pts[385 * 2 + 1];
+  const beforeR = pts[158 * 2 + 1];
+  // Blink with near-zero EAR
+  applyEyelidKinematics(pts, 0.05, 0.05, 0.9, 0.9);
+  assert.ok(pts[385 * 2 + 1] > beforeL, 'left upper eyelid moved down');
+  assert.ok(pts[158 * 2 + 1] > beforeR, 'right upper eyelid moved down');
+});
+
+test('applyGazeIrisTracking shifts irises according to gaze vector', () => {
+  const pts = syntheticFace({ eyesOpen: true, mouthOpen: false });
+  const beforeX = pts[LM.LEFT_IRIS_CENTER * 2];
+  applyGazeIrisTracking(pts, 0.8, 0, 200);
+  assert.ok(pts[LM.LEFT_IRIS_CENTER * 2] > beforeX, 'left iris shifted rightwards with gaze');
 });

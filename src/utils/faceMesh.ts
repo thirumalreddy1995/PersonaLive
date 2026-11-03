@@ -110,7 +110,9 @@ export function buildFaceTopology(
   const featherWeights = new Float32Array(vertexCount);
   for (let v = 0; v < vertexCount; v++) {
     const d = distance[v];
-    featherWeights[v] = d < 0 ? 1 : d === 0 ? 0 : d === 1 ? 0.3 : d === 2 ? 0.65 : d === 3 ? 0.9 : 1;
+    // Smooth 5-step sigmoid curve from outer face oval into the interior
+    featherWeights[v] =
+      d < 0 ? 1 : d === 0 ? 0 : d === 1 ? 0.22 : d === 2 ? 0.5 : d === 3 ? 0.78 : d === 4 ? 0.92 : 1;
   }
 
   const eyeTriangles = [...fanTriangles(LEFT_EYE_RING), ...fanTriangles(RIGHT_EYE_RING)];
@@ -270,3 +272,102 @@ export function smoothingToFilterParams(smoothness: number): { minCutoff: number
     beta: 0.08 - t * 0.06, // responsive to fast motion when smoothing is low
   };
 }
+
+/**
+ * Anatomical speech mechanics: preserves mustache and upper lip structure during speech.
+ * In natural human articulation, the maxilla (upper jaw) is rigidly anchored to the skull;
+ * the mandible (lower jaw) drops down. This prevents the upper lip/mustache from stretching
+ * down like melting wax while allowing the oral cavity to open naturally.
+ */
+export function applySpeechAnatomy(points: Float32Array, mar: number, faceHeight: number) {
+  if (mar <= 0.04) return;
+  const noseBaseY = points[LM.NOSE_TIP * 2 + 1];
+  const maxUpperDescent = faceHeight * 0.015;
+
+  // Upper lip & mustache landmarks: 0, 37, 267, 39, 269, 164, 2, 98, 327, 13
+  const upperLipIndices = [0, 37, 267, 39, 269, 164, 2, 98, 327, 13];
+  for (const idx of upperLipIndices) {
+    const curY = points[idx * 2 + 1];
+    const diff = curY - noseBaseY;
+    // Dampen downward pulling of upper lip during speech
+    if (diff > maxUpperDescent * 2.2) {
+      points[idx * 2 + 1] = noseBaseY + maxUpperDescent * 2.2 + (diff - maxUpperDescent * 2.2) * 0.25;
+    }
+  }
+}
+
+/**
+ * Natural eyelid kinematics: folds the persona's authentic eyelid down when blinking.
+ * When the user blinks, the persona's actual eyelid skin folds down over the eye,
+ * preventing hollow eye sockets or misaligned double-eyelids.
+ */
+export function applyEyelidKinematics(
+  points: Float32Array,
+  earLeft: number,
+  earRight: number,
+  blinkLeft: number,
+  blinkRight: number
+) {
+  // Left eye (subject's left eye)
+  const tL = clamp(Math.max((0.26 - earLeft) / 0.18, blinkLeft), 0, 1);
+  if (tL > 0.08) {
+    const pairs: Array<[number, number]> = [
+      [387, 373],
+      [385, 380],
+      [386, 374],
+      [384, 381],
+      [398, 382],
+    ];
+    for (const [top, bot] of pairs) {
+      const topY = points[top * 2 + 1];
+      const botY = points[bot * 2 + 1];
+      points[top * 2 + 1] = topY + (botY - topY) * tL * 0.88;
+    }
+  }
+
+  // Right eye (subject's right eye)
+  const tR = clamp(Math.max((0.26 - earRight) / 0.18, blinkRight), 0, 1);
+  if (tR > 0.08) {
+    const pairs: Array<[number, number]> = [
+      [160, 144],
+      [158, 153],
+      [159, 145],
+      [157, 154],
+      [173, 155],
+    ];
+    for (const [top, bot] of pairs) {
+      const topY = points[top * 2 + 1];
+      const botY = points[bot * 2 + 1];
+      points[top * 2 + 1] = topY + (botY - topY) * tR * 0.88;
+    }
+  }
+}
+
+/**
+ * Neural gaze tracking: translates iris points according to real-time gaze vector.
+ */
+export function applyGazeIrisTracking(
+  points: Float32Array,
+  gazeX: number,
+  gazeY: number,
+  faceWidth: number
+) {
+  if (points.length < 478 * 2) return;
+  const maxShiftX = faceWidth * 0.018;
+  const maxShiftY = faceWidth * 0.012;
+  const shiftX = clamp(gazeX, -1, 1) * maxShiftX;
+  const shiftY = clamp(gazeY, -1, 1) * maxShiftY;
+
+  const rightIris = [468, 469, 470, 471, 472];
+  const leftIris = [473, 474, 475, 476, 477];
+
+  for (const idx of rightIris) {
+    points[idx * 2] += shiftX;
+    points[idx * 2 + 1] += shiftY;
+  }
+  for (const idx of leftIris) {
+    points[idx * 2] += shiftX;
+    points[idx * 2 + 1] += shiftY;
+  }
+}
+

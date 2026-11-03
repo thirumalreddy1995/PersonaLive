@@ -16,6 +16,21 @@
     <meta name="apple-mobile-web-app-title" content="PersonaLive" />
     <link rel="manifest" href="/manifest.json" />
     <link rel="icon" type="image/svg+xml" href="/icon.svg" />
+    <script>
+      // Emscripten/WASM forwards C++ stderr to console.error. TensorFlow Lite / MediaPipe
+      // writes informational startup notices (such as "INFO: Created TensorFlow Lite XNNPACK delegate for CPU.")
+      // to stderr. Re-route benign INFO logs to console.info so automated monitors do not report them as errors.
+      (function() {
+        var origError = console.error;
+        console.error = function() {
+          var first = arguments[0];
+          if (typeof first === 'string' && (first.startsWith('INFO:') || first.includes('Created TensorFlow Lite') || first.includes('XNNPACK delegate'))) {
+            return console.info.apply(console, arguments);
+          }
+          return origError.apply(console, arguments);
+        };
+      })();
+    </script>
   </head>
   <body>
     <div id="root"></div>

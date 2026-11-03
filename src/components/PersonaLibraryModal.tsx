@@ -366,6 +366,28 @@ export const PersonaLibraryModal: React.FC<PersonaLibraryModalProps> = ({
                     type="button"
                     onClick={() =>
                       handleSelectPreset(
+                        '/assets/aistudio/WhatsApp_Image_2026-11-03_at_4.39.43_PM_bff2bf8c.jpeg',
+                        'Arshad',
+                        'Verified Presenter',
+                        'men'
+                      )
+                    }
+                    className="p-2 rounded bg-slate-950 border border-slate-800 hover:border-sky-500 text-left flex items-center gap-2"
+                  >
+                    <img
+                      src="/assets/aistudio/WhatsApp_Image_2026-11-03_at_4.39.43_PM_bff2bf8c.jpeg"
+                      className="w-8 h-8 rounded object-cover"
+                    />
+                    <div className="text-[11px] truncate">
+                      <p className="font-medium text-slate-200">Arshad</p>
+                      <p className="text-slate-500">Presenter</p>
+                    </div>
+                  </button>
+
+                  <button
+                    type="button"
+                    onClick={() =>
+                      handleSelectPreset(
                         'https://images.unsplash.com/photo-1534528741775-53994a69daeb?auto=format&fit=crop&w=600&q=80',
                         'Aria Sterling',
                         'Broadcast Host',
@@ -381,28 +403,6 @@ export const PersonaLibraryModal: React.FC<PersonaLibraryModalProps> = ({
                     <div className="text-[11px] truncate">
                       <p className="font-medium text-slate-200">Aria Sterling</p>
                       <p className="text-slate-500">Broadcast Host</p>
-                    </div>
-                  </button>
-
-                  <button
-                    type="button"
-                    onClick={() =>
-                      handleSelectPreset(
-                        'https://images.unsplash.com/photo-1507003211169-0a1dd7228f2d?auto=format&fit=crop&w=600&q=80',
-                        'David Miller',
-                        'Tech Lead',
-                        'men'
-                      )
-                    }
-                    className="p-2 rounded bg-slate-950 border border-slate-800 hover:border-sky-500 text-left flex items-center gap-2"
-                  >
-                    <img
-                      src="https://images.unsplash.com/photo-1507003211169-0a1dd7228f2d?auto=format&fit=crop&w=120&q=80"
-                      className="w-8 h-8 rounded object-cover"
-                    />
-                    <div className="text-[11px] truncate">
-                      <p className="font-medium text-slate-200">David Miller</p>
-                      <p className="text-slate-500">Tech Lead</p>
                     </div>
                   </button>
 

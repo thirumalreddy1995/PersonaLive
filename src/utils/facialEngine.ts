@@ -13,10 +13,14 @@
 import { AuthorizedPersona, EngineStatus, FacialMetrics, HeadPose, TransformationSettings } from '../types/index.ts';
 import { OneEuroFilter } from './faceMath.ts';
 import {
+  applyEyelidKinematics,
+  applyGazeIrisTracking,
   applySmileBias,
+  applySpeechAnatomy,
   buildFaceTopology,
   computeKinematics,
   FaceTopology,
+  INNER_LIP_RING,
   LM,
   pointBounds,
   smoothingToFilterParams,
@@ -30,7 +34,7 @@ import {
   FACE_TESSELLATION,
   TrackedFace,
 } from './faceTracker.ts';
-import { MeshWarpRenderer } from './meshWarpRenderer.ts';
+import { FacialLightingZones, MeshWarpRenderer } from './meshWarpRenderer.ts';
 
 export type MetricsCallback = (metrics: FacialMetrics, pose: HeadPose, fps: number, latency: number) => void;
 export type StatusCallback = (status: EngineStatus) => void;
@@ -87,6 +91,13 @@ export class RealtimeFacialEngine {
   private samplerCanvas: HTMLCanvasElement;
   private samplerCtx: CanvasRenderingContext2D;
   private colorGain: [number, number, number] = [1, 1, 1];
+  private zoneLighting: FacialLightingZones = {
+    forehead: [1, 1, 1],
+    leftCheek: [1, 1, 1],
+    rightCheek: [1, 1, 1],
+    nose: [1, 1, 1],
+    chin: [1, 1, 1],
+  };
   private frameIndex = 0;
 
   // Where the transformed pane sits on the canvas (used to place the mesh overlay)
@@ -422,6 +433,7 @@ export class RealtimeFacialEngine {
     const drawOverlay = (x: number, y: number, w: number, h: number) => {
       if (!overlayReady) return;
       ctx.drawImage(this.warp.canvas, 0, 0, W, H, x, y, w, h);
+      this.drawRealisticPostPass(ctx, x, y, w, h, metrics);
     };
 
     const splitPx = Math.max(20, Math.min(W - 20, (this.splitPosition / 100) * W));
@@ -521,6 +533,13 @@ export class RealtimeFacialEngine {
     this.framesSinceFace = 0;
     this.neutralMouthWidth = null;
     this.colorGain = [1, 1, 1];
+    this.zoneLighting = {
+      forehead: [1, 1, 1],
+      leftCheek: [1, 1, 1],
+      rightCheek: [1, 1, 1],
+      nose: [1, 1, 1],
+      chin: [1, 1, 1],
+    };
     if (this.status.faceDetected) this.patchStatus({ faceDetected: false });
   }
 
@@ -583,27 +602,50 @@ export class RealtimeFacialEngine {
   private renderPersonaOverlay(layout: SourceLayout, source: CanvasImageSource, srcW: number, srcH: number) {
     const s = this.settings;
     this.warpPositions.set(this.smoothed);
+    const k = computeKinematics(this.smoothed, this.neutralMouthWidth);
+
+    // 1. Natural smile warmth bias
     if (s.manualSmileBias) {
-      const k = computeKinematics(this.smoothed, null);
       applySmileBias(this.warpPositions, s.manualSmileBias, k.faceWidth);
     }
 
-    if (s.lightingAdaptation && this.frameIndex % 6 === 0) {
+    // 2. Anatomical speech constraints: stabilizes upper lip and mustache structure
+    applySpeechAnatomy(this.warpPositions, k.mar, k.faceHeight);
+
+    // 3. Eyelid kinematic blinking: folds persona's real eyelid skin down smoothly when blinking
+    const bs = this.lastFace?.blendshapes ?? {};
+    applyEyelidKinematics(
+      this.warpPositions,
+      k.earLeft,
+      k.earRight,
+      bs.eyeBlinkLeft ?? 0,
+      bs.eyeBlinkRight ?? 0
+    );
+
+    // 4. Neural gaze tracking: translates iris landmarks according to real-time gaze
+    if (s.eyeGazeSync) {
+      applyGazeIrisTracking(this.warpPositions, k.gazeX, k.gazeY, k.faceWidth);
+    }
+
+    if (s.lightingAdaptation && this.frameIndex % 5 === 0) {
       this.updateLightingGain(layout, source, srcW, srcH);
     }
 
+    const bounds = pointBounds(this.warpPositions.subarray(0, 468 * 2));
     const strength = clamp(s.blendStrength / 100, 0, 1);
+
     this.warp.render({
       positions: this.warpPositions,
-      opacity: Math.pow(strength, 0.6),
+      opacity: Math.pow(strength, 0.55),
       colorGain: this.colorGain,
-      drawPersonaEyes: !s.eyeGazeSync,
+      zoneLighting: this.zoneLighting,
+      faceBounds: [bounds.minX, bounds.minY, bounds.width, bounds.height],
+      drawPersonaEyes: !s.eyeGazeSync || (k.earLeft < 0.18 && k.earRight < 0.18),
     });
   }
 
-  /** Estimates the wearer's facial skin tone and derives a per-channel gain towards it. */
+  /** Estimates the wearer's facial skin tone across 5 spatial zones and derives lighting gains. */
   private updateLightingGain(layout: SourceLayout, source: CanvasImageSource, srcW: number, srcH: number) {
-    // Convert canvas-space landmarks back to source-space for sampling.
     const n = 468;
     const srcPts = new Float32Array(n * 2);
     for (let i = 0; i < n; i++) {
@@ -612,17 +654,66 @@ export class RealtimeFacialEngine {
       srcPts[i * 2] = ((x - layout.offsetX) / layout.drawWidth) * srcW;
       srcPts[i * 2 + 1] = ((this.smoothed[i * 2 + 1] - layout.offsetY) / layout.drawHeight) * srcH;
     }
-    const userMean = this.sampleMeanColor(source, srcPts, srcW, srcH, true);
-    // Match overall brightness fully but only partially match colour cast, so the persona keeps
-    // its own skin tone while sitting naturally in the wearer's lighting.
-    const lum = (c: [number, number, number]) => 0.2126 * c[0] + 0.7152 * c[1] + 0.0722 * c[2];
-    const lumRatio = clamp(Math.pow((lum(userMean) + 6) / (lum(this.personaMean) + 6), 0.75), 0.6, 1.5);
-    const target: [number, number, number] = [1, 1, 1];
-    for (let c = 0; c < 3; c++) {
-      const chroma = (userMean[c] + 6) / (lum(userMean) + 6) / ((this.personaMean[c] + 6) / (lum(this.personaMean) + 6));
-      target[c] = clamp(lumRatio * Math.pow(chroma, 0.5), 0.55, 1.7);
+
+    const b = pointBounds(srcPts.subarray(0, 468 * 2));
+    const size = 24;
+    const sctx = this.samplerCtx;
+    try {
+      sctx.clearRect(0, 0, size, size);
+      sctx.drawImage(source, b.minX, b.minY, Math.max(1, b.width), Math.max(1, b.height), 0, 0, size, size);
+      const data = sctx.getImageData(0, 0, size, size).data;
+
+      const samplePatch = (cx: number, cy: number, rad: number): [number, number, number] => {
+        let pr = 0;
+        let pg = 0;
+        let pb = 0;
+        let pcount = 0;
+        for (let py = Math.max(0, cy - rad); py <= Math.min(size - 1, cy + rad); py++) {
+          for (let px = Math.max(0, cx - rad); px <= Math.min(size - 1, cx + rad); px++) {
+            const idx = (py * size + px) * 4;
+            pr += data[idx];
+            pg += data[idx + 1];
+            pb += data[idx + 2];
+            pcount++;
+          }
+        }
+        return pcount ? [pr / pcount, pg / pcount, pb / pcount] : [128, 128, 128];
+      };
+
+      const lum = (c: [number, number, number]) => 0.2126 * c[0] + 0.7152 * c[1] + 0.0722 * c[2];
+      const computeGain = (sampleRGB: [number, number, number]): [number, number, number] => {
+        const lumRatio = clamp(Math.pow((lum(sampleRGB) + 6) / (lum(this.personaMean) + 6), 0.75), 0.55, 1.6);
+        const out: [number, number, number] = [1, 1, 1];
+        for (let c = 0; c < 3; c++) {
+          const chroma = (sampleRGB[c] + 6) / (lum(sampleRGB) + 6) / ((this.personaMean[c] + 6) / (lum(this.personaMean) + 6));
+          out[c] = clamp(lumRatio * Math.pow(chroma, 0.45), 0.5, 1.8);
+        }
+        return out;
+      };
+
+      const blendGain = (curr: [number, number, number], target: [number, number, number]) => {
+        curr[0] = curr[0] * 0.85 + target[0] * 0.15;
+        curr[1] = curr[1] * 0.85 + target[1] * 0.15;
+        curr[2] = curr[2] * 0.85 + target[2] * 0.15;
+      };
+
+      const userForehead = samplePatch(12, 5, 2);
+      const userLeftCheek = samplePatch(18, 13, 2);
+      const userRightCheek = samplePatch(6, 13, 2);
+      const userNose = samplePatch(12, 11, 2);
+      const userChin = samplePatch(12, 19, 2);
+
+      blendGain(this.zoneLighting.forehead, computeGain(userForehead));
+      blendGain(this.zoneLighting.leftCheek, computeGain(userLeftCheek));
+      blendGain(this.zoneLighting.rightCheek, computeGain(userRightCheek));
+      blendGain(this.zoneLighting.nose, computeGain(userNose));
+      blendGain(this.zoneLighting.chin, computeGain(userChin));
+
+      const centralMean = computeGain(userNose);
+      blendGain(this.colorGain, centralMean);
+    } catch {
+      // Keep existing gain on read error
     }
-    for (let c = 0; c < 3; c++) this.colorGain[c] = this.colorGain[c] * 0.85 + target[c] * 0.15;
   }
 
   /**
@@ -670,9 +761,82 @@ export class RealtimeFacialEngine {
     }
   }
 
-  // ---------------------------------------------------------------------------------------------
-  // Drawing helpers
-  // ---------------------------------------------------------------------------------------------
+  /**
+   * Advanced graphics post-pass: adds realistic oral aperture depth & lip vermilion anti-aliasing
+   * during speech, and dynamic corneal specular highlights to bring lifelike vitality to eyes.
+   */
+  private drawRealisticPostPass(
+    ctx: CanvasRenderingContext2D,
+    x: number,
+    y: number,
+    w: number,
+    h: number,
+    metrics: FacialMetrics
+  ) {
+    if (!this.faceVisible || this.status.persona !== 'ready') return;
+    const sx = w / this.canvas.width;
+    const sy = h / this.canvas.height;
+    const pts = this.warpPositions;
+
+    ctx.save();
+    ctx.translate(x, y);
+    ctx.scale(sx, sy);
+
+    // 1. Oral cavity depth & lip vermilion blending during speech
+    if (metrics.mouthAspectRatio > 0.04) {
+      // Soft upper-lip ambient occlusion shadow under the upper incisors
+      const upperLip = [78, 191, 80, 81, 82, 13, 312, 311, 310, 415, 308];
+      ctx.beginPath();
+      ctx.moveTo(pts[upperLip[0] * 2], pts[upperLip[0] * 2 + 1]);
+      for (let i = 1; i < upperLip.length; i++) {
+        ctx.lineTo(pts[upperLip[i] * 2], pts[upperLip[i] * 2 + 1]);
+      }
+      ctx.strokeStyle = 'rgba(15, 5, 8, 0.42)';
+      ctx.lineWidth = 2.5;
+      ctx.shadowColor = 'rgba(0, 0, 0, 0.65)';
+      ctx.shadowBlur = 4;
+      ctx.stroke();
+      ctx.shadowBlur = 0;
+
+      // Soft anti-aliased vermilion blending contour
+      ctx.beginPath();
+      ctx.moveTo(pts[INNER_LIP_RING[0] * 2], pts[INNER_LIP_RING[0] * 2 + 1]);
+      for (let i = 1; i < INNER_LIP_RING.length; i++) {
+        ctx.lineTo(pts[INNER_LIP_RING[i] * 2], pts[INNER_LIP_RING[i] * 2 + 1]);
+      }
+      ctx.closePath();
+      const r = Math.round(clamp(this.personaMean[0] * this.colorGain[0], 0, 255));
+      const g = Math.round(clamp(this.personaMean[1] * this.colorGain[1], 0, 255));
+      const b = Math.round(clamp(this.personaMean[2] * this.colorGain[2], 0, 255));
+      ctx.strokeStyle = `rgba(${r}, ${g}, ${b}, 0.35)`;
+      ctx.lineWidth = 1.8;
+      ctx.stroke();
+    }
+
+    // 2. Corneal specular catchlights (natural moisture & vitality in eyes)
+    if (!metrics.isBlinking && pts.length >= 478 * 2) {
+      const leftIrisX = pts[LM.LEFT_IRIS_CENTER * 2];
+      const leftIrisY = pts[LM.LEFT_IRIS_CENTER * 2 + 1];
+      const rightIrisX = pts[LM.RIGHT_IRIS_CENTER * 2];
+      const rightIrisY = pts[LM.RIGHT_IRIS_CENTER * 2 + 1];
+
+      // Subtle corneal catchlight positioned at upper-right pupil (matching typical key light)
+      const glintSize = 2.2;
+      ctx.fillStyle = 'rgba(255, 255, 255, 0.9)';
+      ctx.shadowColor = 'rgba(255, 255, 255, 0.8)';
+      ctx.shadowBlur = 2;
+
+      ctx.beginPath();
+      ctx.arc(leftIrisX + 1.2, leftIrisY - 1.2, glintSize, 0, Math.PI * 2);
+      ctx.fill();
+
+      ctx.beginPath();
+      ctx.arc(rightIrisX + 1.2, rightIrisY - 1.2, glintSize, 0, Math.PI * 2);
+      ctx.fill();
+    }
+
+    ctx.restore();
+  }
 
   private drawSource(
     ctx: CanvasRenderingContext2D,

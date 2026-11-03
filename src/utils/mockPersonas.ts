@@ -2,6 +2,30 @@ import { AuthorizedPersona } from '../types/index.ts';
 
 export const INITIAL_PERSONAS: AuthorizedPersona[] = [
   {
+    id: 'persona-arshad',
+    name: 'Arshad',
+    role: 'Verified Presenter',
+    category: 'men',
+    imageUrl: '/assets/aistudio/WhatsApp_Image_2026-11-03_at_4.39.43_PM_bff2bf8c.jpeg',
+    createdAt: '2026-11-03',
+    qualityScore: 98,
+    metrics: {
+      resolution: '2400 × 3200 px',
+      sharpness: 97,
+      lighting: 'Optimal',
+      orientation: 'Frontal',
+      obstruction: 'None',
+      singleFaceVerified: true,
+    },
+    consent: {
+      signerName: 'Arshad',
+      authorizedUsage: 'Full Likeness Real-Time Studio Video Stream',
+      timestamp: '2026-11-03T12:00:00Z',
+      signatureHash: 'C2PA-SEC-ARSHAD-20261103',
+      verified: true,
+    },
+  },
+  {
     id: 'persona-1',
     name: 'Dr. Sarah Chen',
     role: 'Keynote Speaker & AI Ethicist',
