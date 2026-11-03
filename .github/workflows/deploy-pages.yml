@@ -1,7 +1,8 @@
 name: Deploy Web App to GitHub Pages
 
-# Every push to main publishes the studio to https://<owner>.github.io/<repo>/.
-# Installed desktop PWAs that were installed from that URL pick the new build up automatically.
+# Every push to main builds the studio and publishes dist/ to the gh-pages branch, which GitHub
+# serves at https://<owner>.github.io/<repo>/. Installed desktop PWAs that were installed from
+# that URL pick the new build up automatically (service worker update → "Update Ready" button).
 
 on:
   push:
@@ -9,25 +10,18 @@ on:
   workflow_dispatch:
 
 permissions:
-  contents: read
-  pages: write
-  id-token: write
+  contents: write
 
 concurrency:
   group: pages
   cancel-in-progress: true
 
 jobs:
-  build:
+  build-and-deploy:
     runs-on: ubuntu-latest
     steps:
       - name: Checkout
         uses: actions/checkout@v4
-
-      - name: Enable GitHub Pages for this repository (first run only)
-        uses: actions/configure-pages@v5
-        with:
-          enablement: true
 
       - name: Setup Node.js 20
         uses: actions/setup-node@v4
@@ -46,18 +40,10 @@ jobs:
         env:
           VITE_BASE: /${{ github.event.repository.name }}/
 
-      - name: Upload Pages artifact
-        uses: actions/upload-pages-artifact@v3
+      - name: Publish dist/ to the gh-pages branch
+        uses: peaceiris/actions-gh-pages@v4
         with:
-          path: dist
-
-  deploy:
-    needs: build
-    runs-on: ubuntu-latest
-    environment:
-      name: github-pages
-      url: ${{ steps.deployment.outputs.page_url }}
-    steps:
-      - name: Deploy to GitHub Pages
-        id: deployment
-        uses: actions/deploy-pages@v4
+          github_token: ${{ secrets.GITHUB_TOKEN }}
+          publish_dir: ./dist
+          force_orphan: true
+          commit_message: 'Deploy ${{ github.sha }}'
