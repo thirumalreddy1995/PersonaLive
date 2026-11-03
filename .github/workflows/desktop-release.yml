@@ -1,14 +1,16 @@
 name: Build & Release PersonaLive Desktop
 
+# Push a version tag (e.g. `git tag v2.5.1 && git push --tags`) to build Windows and macOS
+# installers and publish them to GitHub Releases. Installed desktop apps update themselves
+# from there via electron-updater.
+
 on:
   push:
     tags:
-      - 'v*' # Trigger build on version tags like v2.5.0
-    branches:
-      - main # Optional: can also build on main pushes
+      - 'v*'
 
 permissions:
-  contents: write # Needed to publish GitHub Releases
+  contents: write # publish GitHub Releases
 
 jobs:
   build-and-release:
@@ -18,7 +20,7 @@ jobs:
     runs-on: ${{ matrix.os }}
 
     steps:
-      - name: Checkout Source Code
+      - name: Checkout
         uses: actions/checkout@v4
 
       - name: Setup Node.js 20
@@ -27,20 +29,16 @@ jobs:
           node-version: 20
           cache: 'npm'
 
-      - name: Install Dependencies
+      - name: Install dependencies
         run: npm ci
 
-      - name: Run Kinematics & Pure-Logic Unit Tests
-        run: npx tsx --test src/utils/faceMath.test.ts
+      - name: Run unit tests (face math + mesh topology)
+        run: npm test
 
-      - name: Build Web Application Bundle
+      - name: Build web bundle
         run: npm run build
 
-      - name: Build & Publish Native Desktop Binary (electron-builder)
-        uses: samuelmeuli/action-electron-builder@v1
-        with:
-          # Automatically publish to GitHub Releases
-          github_token: ${{ secrets.GITHUB_TOKEN }}
-          release: true
-          # Flags for Windows (.exe) and macOS (.dmg)
-          args: --publish always
+      - name: Build & publish desktop installer
+        run: npx electron-builder --publish always
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}

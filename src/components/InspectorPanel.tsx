@@ -2,15 +2,26 @@ import React from 'react';
 import {
   Sliders,
   Sparkles,
-  Video,
   ShieldCheck,
   Eye,
   Smile,
   Sun,
   Plus,
   Check,
+  Loader2,
+  AlertTriangle,
+  ScanFace,
+  Cpu,
 } from 'lucide-react';
-import { AuthorizedPersona, TransformationSettings, TelemetryStats } from '../types/index.ts';
+import {
+  AuthorizedPersona,
+  TransformationSettings,
+  TelemetryStats,
+  EngineStatus,
+  PersonaCategory,
+  CATEGORY_LABEL,
+} from '../types/index.ts';
+import { UserRound } from 'lucide-react';
 
 interface InspectorPanelProps {
   activePersona: AuthorizedPersona | null;
@@ -18,6 +29,9 @@ interface InspectorPanelProps {
   onSelectPersona: (persona: AuthorizedPersona) => void;
   settings: TransformationSettings;
   telemetry: TelemetryStats;
+  status: EngineStatus | null;
+  subjectCategory: PersonaCategory;
+  onChangeSubjectCategory: (category: PersonaCategory) => void;
   onUpdateSettings: (newSettings: Partial<TransformationSettings>) => void;
   onOpenLibrary: () => void;
   onOpenConsentLogs: () => void;
@@ -28,13 +42,45 @@ export const InspectorPanel: React.FC<InspectorPanelProps> = ({
   personas,
   onSelectPersona,
   settings,
-  telemetry,
+  status,
+  subjectCategory,
+  onChangeSubjectCategory,
   onUpdateSettings,
   onOpenLibrary,
 }) => {
+  const personaState = status?.persona ?? 'none';
+  const matchingPersonas = personas.filter((p) => p.category === subjectCategory);
+  const hiddenCount = personas.length - matchingPersonas.length;
+
   return (
     <aside className="w-80 bg-slate-950 border-l border-slate-800 flex flex-col h-full overflow-y-auto text-xs text-slate-300 divide-y divide-slate-800 select-none">
-      {/* 1. Fast 1-Tap Persona Switcher */}
+      {/* 0. Who is at the camera */}
+      <div className="p-4 space-y-2">
+        <span className="font-semibold text-slate-100 flex items-center gap-1.5">
+          <UserRound className="w-3.5 h-3.5 text-sky-400" />
+          Who is at the camera?
+        </span>
+        <div className="grid grid-cols-2 gap-1.5">
+          {(['women', 'men'] as const).map((c) => (
+            <button
+              key={c}
+              onClick={() => onChangeSubjectCategory(c)}
+              className={`py-2 rounded-lg text-xs font-semibold border transition-colors ${
+                subjectCategory === c
+                  ? 'bg-sky-500 text-slate-950 border-sky-400 shadow-sm'
+                  : 'bg-slate-900 text-slate-300 border-slate-800 hover:border-slate-600'
+              }`}
+            >
+              {CATEGORY_LABEL[c].one}
+            </button>
+          ))}
+        </div>
+        <p className="text-[10px] text-slate-500">
+          Only {CATEGORY_LABEL[subjectCategory].plural.toLowerCase()} can be mapped onto a {CATEGORY_LABEL[subjectCategory].one.toLowerCase()}.
+        </p>
+      </div>
+
+      {/* 1. Persona switcher */}
       <div className="p-4 bg-slate-900/40 space-y-3">
         <div className="flex items-center justify-between">
           <span className="font-semibold text-slate-100 flex items-center gap-1.5">
@@ -50,9 +96,16 @@ export const InspectorPanel: React.FC<InspectorPanelProps> = ({
           </button>
         </div>
 
-        {/* 1-Tap Avatar Row */}
+        {matchingPersonas.length === 0 && (
+          <div className="rounded-xl border border-dashed border-slate-700 p-3 text-[11px] text-slate-400 text-center">
+            No {CATEGORY_LABEL[subjectCategory].plural.toLowerCase()} yet.{' '}
+            <button onClick={onOpenLibrary} className="text-sky-400 hover:underline font-medium">
+              Upload one
+            </button>
+          </div>
+        )}
         <div className="grid grid-cols-4 gap-2">
-          {personas.slice(0, 4).map((p) => {
+          {matchingPersonas.slice(0, 4).map((p) => {
             const isSelected = activePersona?.id === p.id;
             return (
               <button
@@ -65,11 +118,7 @@ export const InspectorPanel: React.FC<InspectorPanelProps> = ({
                 }`}
                 title={p.name}
               >
-                <img
-                  src={p.imageUrl}
-                  alt={p.name}
-                  className="w-12 h-12 rounded-lg object-cover"
-                />
+                <img src={p.imageUrl} alt={p.name} className="w-12 h-12 rounded-lg object-cover" />
                 <span className="text-[10px] text-slate-200 font-medium truncate w-full text-center">
                   {p.name.split(' ')[0]}
                 </span>
@@ -83,7 +132,12 @@ export const InspectorPanel: React.FC<InspectorPanelProps> = ({
           })}
         </div>
 
-        {/* Active Face Summary Card */}
+        {hiddenCount > 0 && (
+          <p className="text-[10px] text-slate-500">
+            {hiddenCount} {hiddenCount === 1 ? 'face is' : 'faces are'} hidden because {hiddenCount === 1 ? 'it belongs' : 'they belong'} to the other group.
+          </p>
+        )}
+
         {activePersona && (
           <div className="bg-slate-900/80 rounded-xl border border-slate-800/80 p-2.5 flex items-center gap-2.5">
             <img
@@ -94,23 +148,37 @@ export const InspectorPanel: React.FC<InspectorPanelProps> = ({
             <div className="min-w-0 flex-1">
               <h4 className="font-semibold text-slate-100 text-xs truncate">{activePersona.name}</h4>
               <p className="text-[10px] text-slate-400 truncate">{activePersona.role}</p>
-              <div className="flex items-center gap-1 text-[10px] text-emerald-400 mt-0.5">
-                <ShieldCheck className="w-3 h-3" />
-                <span>Authorized &amp; Verified</span>
+              <div className="flex items-center gap-1 text-[10px] mt-0.5">
+                {personaState === 'ready' ? (
+                  <span className="flex items-center gap-1 text-emerald-400">
+                    <ShieldCheck className="w-3 h-3" /> Authorized · Face mapped
+                  </span>
+                ) : personaState === 'preparing' ? (
+                  <span className="flex items-center gap-1 text-sky-300">
+                    <Loader2 className="w-3 h-3 animate-spin" /> Mapping 478 landmarks…
+                  </span>
+                ) : personaState === 'no-face' || personaState === 'error' ? (
+                  <span className="flex items-center gap-1 text-rose-400">
+                    <AlertTriangle className="w-3 h-3" /> {personaState === 'no-face' ? 'No face found in photo' : 'Photo unusable'}
+                  </span>
+                ) : (
+                  <span className="flex items-center gap-1 text-slate-500">
+                    <Loader2 className="w-3 h-3 animate-spin" /> Waiting for tracker
+                  </span>
+                )}
               </div>
             </div>
           </div>
         )}
       </div>
 
-      {/* 2. Simple, Friendly Sliders */}
+      {/* 2. Transformation controls */}
       <div className="p-4 space-y-4">
         <div className="flex items-center gap-1.5 text-slate-100 font-semibold">
           <Sliders className="w-3.5 h-3.5 text-sky-400" />
           <span>Face Transformation Controls</span>
         </div>
 
-        {/* Transformation Strength */}
         <div className="space-y-1.5">
           <div className="flex justify-between">
             <span className="text-slate-200 font-medium">Transformation Strength</span>
@@ -125,12 +193,11 @@ export const InspectorPanel: React.FC<InspectorPanelProps> = ({
             className="w-full accent-sky-500 cursor-pointer h-2 bg-slate-800 rounded-lg"
           />
           <div className="flex justify-between text-[10px] text-slate-500">
-            <span>Natural Blend (30%)</span>
-            <span>Complete Transformation (100%)</span>
+            <span>Subtle blend</span>
+            <span>Full replacement</span>
           </div>
         </div>
 
-        {/* Motion Smoothness */}
         <div className="space-y-1.5">
           <div className="flex justify-between">
             <span className="text-slate-200 font-medium">Movement Smoothness</span>
@@ -145,12 +212,11 @@ export const InspectorPanel: React.FC<InspectorPanelProps> = ({
             className="w-full accent-sky-500 cursor-pointer h-2 bg-slate-800 rounded-lg"
           />
           <div className="flex justify-between text-[10px] text-slate-500">
-            <span>Responsive</span>
-            <span>Ultra Steady &amp; Stable</span>
+            <span>Instant response</span>
+            <span>Steady, no jitter</span>
           </div>
         </div>
 
-        {/* Friendly Expression Bias */}
         <div className="space-y-1.5">
           <div className="flex justify-between">
             <span className="text-slate-200 font-medium flex items-center gap-1">
@@ -175,16 +241,18 @@ export const InspectorPanel: React.FC<InspectorPanelProps> = ({
           <div className="flex justify-between text-[10px] text-slate-500">
             <span>Serious</span>
             <span>Neutral</span>
-            <span>Warm Smile</span>
+            <span>Warm smile</span>
           </div>
         </div>
 
-        {/* Simple Checkbox Toggles */}
         <div className="pt-2 space-y-2.5">
           <label className="flex items-center justify-between cursor-pointer p-2 rounded-lg bg-slate-900/60 hover:bg-slate-900 transition-colors">
             <span className="flex items-center gap-2 text-slate-200">
               <Eye className="w-3.5 h-3.5 text-sky-400" />
-              <span>Follow My Blinking &amp; Eyes</span>
+              <span>
+                Keep My Real Eyes
+                <span className="block text-[10px] text-slate-500 font-normal">Natural blinking &amp; eye contact</span>
+              </span>
             </span>
             <input
               type="checkbox"
@@ -197,7 +265,10 @@ export const InspectorPanel: React.FC<InspectorPanelProps> = ({
           <label className="flex items-center justify-between cursor-pointer p-2 rounded-lg bg-slate-900/60 hover:bg-slate-900 transition-colors">
             <span className="flex items-center gap-2 text-slate-200">
               <Sun className="w-3.5 h-3.5 text-amber-400" />
-              <span>Adapt to Room Lighting</span>
+              <span>
+                Match My Room Lighting
+                <span className="block text-[10px] text-slate-500 font-normal">Adapts skin tone to your camera</span>
+              </span>
             </span>
             <input
               type="checkbox"
@@ -209,7 +280,7 @@ export const InspectorPanel: React.FC<InspectorPanelProps> = ({
         </div>
       </div>
 
-      {/* 3. Output Quality Selection */}
+      {/* 3. Output quality */}
       <div className="p-4 space-y-2.5">
         <label className="text-slate-200 font-semibold block">Video Quality</label>
         <div className="grid grid-cols-3 gap-1.5">
@@ -227,19 +298,49 @@ export const InspectorPanel: React.FC<InspectorPanelProps> = ({
             </button>
           ))}
         </div>
-        <p className="text-[10px] text-slate-500">
-          * 720p HD is recommended for 30 FPS video calls with lowest latency.
-        </p>
+        <p className="text-[10px] text-slate-500">720p HD is recommended for 30 FPS video calls with the lowest latency.</p>
       </div>
 
-      {/* 4. Privacy & Consent Notice */}
+      {/* 4. Tracking engine */}
+      <div className="p-4 space-y-2">
+        <div className="flex items-center gap-1.5 text-slate-200 font-semibold">
+          <ScanFace className="w-3.5 h-3.5 text-sky-400" />
+          <span>Tracking Engine</span>
+        </div>
+        <div className="grid grid-cols-2 gap-1.5 text-[11px]">
+          <div className="rounded-lg bg-slate-900/70 border border-slate-800 p-2">
+            <p className="text-slate-500">Landmarks</p>
+            <p className="text-slate-200 font-medium">478 points · 52 expressions</p>
+          </div>
+          <div className="rounded-lg bg-slate-900/70 border border-slate-800 p-2">
+            <p className="text-slate-500">Compute</p>
+            <p className="text-slate-200 font-medium flex items-center gap-1">
+              <Cpu className="w-3 h-3 text-slate-500" />
+              {status?.backend === 'GPU' ? 'GPU (WebGL)' : status?.backend === 'CPU' ? 'CPU (WASM)' : '—'}
+            </p>
+          </div>
+          <div className="rounded-lg bg-slate-900/70 border border-slate-800 p-2">
+            <p className="text-slate-500">Face</p>
+            <p className={`font-medium ${status?.faceDetected ? 'text-emerald-400' : 'text-slate-400'}`}>
+              {status?.faceDetected ? 'Tracked' : status?.model === 'ready' ? 'Not in frame' : 'Loading…'}
+            </p>
+          </div>
+          <div className="rounded-lg bg-slate-900/70 border border-slate-800 p-2">
+            <p className="text-slate-500">Renderer</p>
+            <p className="text-slate-200 font-medium">{status?.renderer === 'canvas2d' ? 'Canvas 2D' : 'WebGL warp'}</p>
+          </div>
+        </div>
+      </div>
+
+      {/* 5. Privacy */}
       <div className="p-4 space-y-1.5 mt-auto bg-slate-900/30 text-[11px] text-slate-400">
         <div className="flex items-center gap-1.5 text-slate-300 font-semibold text-xs">
           <ShieldCheck className="w-3.5 h-3.5 text-emerald-400" />
           <span>100% Private On-Device</span>
         </div>
         <p className="leading-relaxed">
-          Your video is processed directly on your computer. No webcam footage or personal face data is ever sent to external cloud servers.
+          Tracking and rendering run entirely in this window. No webcam frames or face data leave your computer, and every
+          output frame carries the AI-transformed watermark.
         </p>
       </div>
     </aside>

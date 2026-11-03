@@ -1,13 +1,12 @@
 // PersonaLive Desktop Studio - Service Worker
 // Provides offline runtime caching and instant auto-updates when new changes are pushed.
 
-const CACHE_NAME = 'personalive-v2.4.1';
-const STATIC_ASSETS = [
-  '/',
-  '/index.html',
-  '/manifest.json',
-  '/icon.svg',
-];
+// __BUILD_ID__ is replaced at build time (see vite.config.ts) so every deploy ships a new worker.
+const BUILD_ID = '__BUILD_ID__';
+const CACHE_NAME = `personalive-${BUILD_ID}`;
+// Resolve the app shell relative to where this worker is served (works at / and at /<repo>/).
+const BASE = new URL('./', self.location.href).href;
+const STATIC_ASSETS = ['', 'index.html', 'manifest.json', 'icon.svg'].map((f) => BASE + f);
 
 // Install: Cache essential app shell and activate immediately
 self.addEventListener('install', (event) => {

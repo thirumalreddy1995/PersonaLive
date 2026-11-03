@@ -51,7 +51,7 @@ export const DesktopTitlebar: React.FC<DesktopTitlebarProps> = ({
           <span className="font-semibold text-sm tracking-tight text-slate-100 flex items-center gap-2">
             PersonaLive Desktop
             <span className="text-[10px] font-mono px-1.5 py-0.5 rounded bg-slate-800 text-slate-400 border border-slate-700">
-              v2.4.1 Studio
+              v2.5.0 · {__PL_BUILD_ID__.slice(0, 7)}
             </span>
           </span>
         </div>
@@ -66,12 +66,12 @@ export const DesktopTitlebar: React.FC<DesktopTitlebarProps> = ({
             }`}
           >
             <span className={`w-1.5 h-1.5 rounded-full ${isTransforming ? 'bg-sky-400' : 'bg-slate-500'}`} />
-            {isTransforming ? 'Neural Pipeline Active' : 'Standby'}
+            {isTransforming ? 'Face Tracking Live' : 'Waiting for Face'}
           </span>
 
           {virtualCamActive && (
             <span className="inline-flex items-center gap-1 text-xs font-medium px-2 py-0.5 rounded-full bg-emerald-950/80 text-emerald-400 border border-emerald-800">
-              <Video className="w-3 h-3" /> VirtualCam Sink Live
+              <Video className="w-3 h-3" /> Virtual Camera On
             </span>
           )}
 

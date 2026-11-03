@@ -1,4 +1,4 @@
-import React, { useState } from 'react';
+import React, { useEffect, useState } from 'react';
 import {
   X,
   Upload,
@@ -11,11 +11,15 @@ import {
   Info,
   FileCheck,
 } from 'lucide-react';
-import { AuthorizedPersona } from '../types/index.ts';
+import { AuthorizedPersona, CATEGORY_LABEL, PersonaCategory } from '../types/index.ts';
 import { evaluateImageQuality, generateConsentHash, QualityAssessmentResult } from '../utils/faceMath.ts';
 
 interface PersonaLibraryModalProps {
   isOpen: boolean;
+  /** Which tab to show when the modal opens. */
+  initialTab?: 'library' | 'enroll';
+  /** Who is sitting at the camera; only faces of the same category can be activated. */
+  subjectCategory: PersonaCategory;
   onClose: () => void;
   personas: AuthorizedPersona[];
   activePersonaId: string | null;
@@ -26,6 +30,8 @@ interface PersonaLibraryModalProps {
 
 export const PersonaLibraryModal: React.FC<PersonaLibraryModalProps> = ({
   isOpen,
+  initialTab = 'library',
+  subjectCategory,
   onClose,
   personas,
   activePersonaId,
@@ -38,6 +44,7 @@ export const PersonaLibraryModal: React.FC<PersonaLibraryModalProps> = ({
   // Enrollment Form State
   const [name, setName] = useState('');
   const [role, setRole] = useState('');
+  const [category, setCategory] = useState<PersonaCategory | null>(null);
   const [imageUrl, setImageUrl] = useState('');
   const [previewImage, setPreviewImage] = useState<string | null>(null);
   const [qualityResult, setQualityResult] = useState<QualityAssessmentResult | null>(null);
@@ -45,6 +52,10 @@ export const PersonaLibraryModal: React.FC<PersonaLibraryModalProps> = ({
   const [authorizedUsage, setAuthorizedUsage] = useState('Commercial Streaming & Virtual Presentation');
   const [consentAgreed, setConsentAgreed] = useState(false);
   const [errorMessage, setErrorMessage] = useState<string | null>(null);
+
+  useEffect(() => {
+    if (isOpen) setActiveTab(initialTab);
+  }, [isOpen, initialTab]);
 
   if (!isOpen) return null;
 
@@ -77,11 +88,12 @@ export const PersonaLibraryModal: React.FC<PersonaLibraryModalProps> = ({
   };
 
   // Sample avatar presets for quick testing
-  const handleSelectPreset = (presetUrl: string, presetName: string, presetRole: string) => {
+  const handleSelectPreset = (presetUrl: string, presetName: string, presetRole: string, presetCategory: PersonaCategory) => {
     setPreviewImage(presetUrl);
     setImageUrl(presetUrl);
     setName(presetName);
     setRole(presetRole);
+    setCategory(presetCategory);
     setSignerName(presetName);
     const quality = evaluateImageQuality(1920, 1080, 138, 50, 94);
     setQualityResult(quality);
@@ -95,7 +107,11 @@ export const PersonaLibraryModal: React.FC<PersonaLibraryModalProps> = ({
       return;
     }
     if (!previewImage) {
-      setErrorMessage('Please upload or select an authorized reference portrait.');
+      setErrorMessage('Please upload or pick a photo first.');
+      return;
+    }
+    if (!category) {
+      setErrorMessage('Please choose whether this is a woman\'s or a man\'s face.');
       return;
     }
     if (!consentAgreed) {
@@ -110,6 +126,7 @@ export const PersonaLibraryModal: React.FC<PersonaLibraryModalProps> = ({
       id: `persona-${Date.now()}`,
       name: name.trim(),
       role: role.trim() || 'Verified Presenter',
+      category,
       imageUrl: previewImage,
       createdAt: timestamp.slice(0, 10),
       qualityScore: qualityResult ? qualityResult.score : 90,
@@ -137,6 +154,7 @@ export const PersonaLibraryModal: React.FC<PersonaLibraryModalProps> = ({
     // Reset form
     setName('');
     setRole('');
+    setCategory(null);
     setPreviewImage(null);
     setQualityResult(null);
     setConsentAgreed(false);
@@ -152,9 +170,9 @@ export const PersonaLibraryModal: React.FC<PersonaLibraryModalProps> = ({
               <Sparkles className="w-4 h-4" />
             </div>
             <div>
-              <h2 className="font-semibold text-base text-slate-100">Authorized Persona Management</h2>
+              <h2 className="font-semibold text-base text-slate-100">Your Faces</h2>
               <p className="text-xs text-slate-400">
-                Ethical identity catalog & verified biometric consent profiles
+                Upload one clear photo — the face is mapped onto your live camera in real time
               </p>
             </div>
           </div>
@@ -177,7 +195,7 @@ export const PersonaLibraryModal: React.FC<PersonaLibraryModalProps> = ({
                 : 'border-transparent text-slate-400 hover:text-slate-300'
             }`}
           >
-            <span>Authorized Profiles ({personas.length})</span>
+            <span>My Faces ({personas.length})</span>
           </button>
           <button
             onClick={() => setActiveTab('enroll')}
@@ -188,7 +206,7 @@ export const PersonaLibraryModal: React.FC<PersonaLibraryModalProps> = ({
             }`}
           >
             <Plus className="w-3.5 h-3.5" />
-            <span>Enroll New Likeness Profile</span>
+            <span>Upload a Photo</span>
           </button>
         </div>
 
@@ -199,13 +217,16 @@ export const PersonaLibraryModal: React.FC<PersonaLibraryModalProps> = ({
               <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
                 {personas.map((persona) => {
                   const isActive = activePersonaId === persona.id;
+                  const allowed = persona.category === subjectCategory;
                   return (
                     <div
                       key={persona.id}
                       className={`rounded-xl border p-4 transition-all flex flex-col justify-between ${
                         isActive
                           ? 'bg-sky-950/30 border-sky-500/80 shadow-lg shadow-sky-950/50 ring-1 ring-sky-500/50'
-                          : 'bg-slate-950/60 border-slate-800 hover:border-slate-700'
+                          : allowed
+                            ? 'bg-slate-950/60 border-slate-800 hover:border-slate-700'
+                            : 'bg-slate-950/40 border-slate-800/60 opacity-60'
                       }`}
                     >
                       <div>
@@ -229,6 +250,15 @@ export const PersonaLibraryModal: React.FC<PersonaLibraryModalProps> = ({
                             <p className="text-xs text-slate-400 truncate">{persona.role}</p>
 
                             <div className="flex items-center gap-2 mt-2">
+                              <span
+                                className={`text-[10px] px-2 py-0.5 rounded border font-medium ${
+                                  persona.category === 'women'
+                                    ? 'bg-pink-950/60 text-pink-300 border-pink-800/70'
+                                    : 'bg-indigo-950/60 text-indigo-300 border-indigo-800/70'
+                                }`}
+                              >
+                                {CATEGORY_LABEL[persona.category].one}
+                              </span>
                               <span className="text-[10px] font-mono px-2 py-0.5 rounded bg-emerald-950/80 text-emerald-400 border border-emerald-800/80">
                                 Quality: {persona.qualityScore}/100
                               </span>
@@ -258,14 +288,26 @@ export const PersonaLibraryModal: React.FC<PersonaLibraryModalProps> = ({
                       {/* Action buttons */}
                       <div className="mt-4 pt-3 flex items-center justify-between gap-2">
                         <button
-                          onClick={() => onSelectPersona(persona)}
+                          onClick={() => allowed && onSelectPersona(persona)}
+                          disabled={!allowed}
+                          title={
+                            allowed
+                              ? undefined
+                              : `Only a ${CATEGORY_LABEL[persona.category].one.toLowerCase()} at the camera can use this face`
+                          }
                           className={`flex-1 py-1.5 px-3 rounded text-xs font-semibold transition-colors ${
                             isActive
                               ? 'bg-sky-500 text-slate-950 shadow-sm'
-                              : 'bg-slate-800 hover:bg-slate-700 text-slate-200'
+                              : allowed
+                                ? 'bg-slate-800 hover:bg-slate-700 text-slate-200'
+                                : 'bg-slate-900 text-slate-500 cursor-not-allowed'
                           }`}
                         >
-                          {isActive ? 'Currently Active' : 'Select for Live Transform'}
+                          {isActive
+                            ? 'Currently Active'
+                            : allowed
+                              ? 'Use This Face'
+                              : `${CATEGORY_LABEL[persona.category].one} only`}
                         </button>
 
                         {personas.length > 1 && (
@@ -303,11 +345,22 @@ export const PersonaLibraryModal: React.FC<PersonaLibraryModalProps> = ({
                 </div>
               )}
 
+              {/* Upload Dropzone */}
+              <div className="space-y-1.5">
+                <label className="text-xs text-slate-300 font-medium">Upload a photo (JPG, PNG, WebP)</label>
+                <label className="border-2 border-dashed border-slate-700 hover:border-sky-500 bg-slate-950 rounded-xl p-6 flex flex-col items-center justify-center cursor-pointer transition-colors group">
+                  <Upload className="w-8 h-8 text-slate-400 group-hover:text-sky-400 transition-colors mb-2" />
+                  <span className="text-xs font-medium text-slate-200">Click to choose a photo</span>
+                  <span className="text-[11px] text-slate-500 mt-1 text-center">
+                    Best results: one person, facing the camera, even lighting, no sunglasses, 720p or larger
+                  </span>
+                  <input type="file" accept="image/jpeg,image/png,image/webp" onChange={handleFileChange} className="hidden" />
+                </label>
+              </div>
+
               {/* Preset Quick Selection for Instant Testing */}
               <div className="space-y-2">
-                <label className="text-xs text-slate-400 font-medium">
-                  Quick-Load Verified Demo Likenesses (Studio Licensed)
-                </label>
+                <label className="text-xs text-slate-400 font-medium">Or try a sample face</label>
                 <div className="grid grid-cols-3 gap-2">
                   <button
                     type="button"
@@ -315,7 +368,8 @@ export const PersonaLibraryModal: React.FC<PersonaLibraryModalProps> = ({
                       handleSelectPreset(
                         'https://images.unsplash.com/photo-1534528741775-53994a69daeb?auto=format&fit=crop&w=600&q=80',
                         'Aria Sterling',
-                        'Broadcast Host'
+                        'Broadcast Host',
+                        'women'
                       )
                     }
                     className="p-2 rounded bg-slate-950 border border-slate-800 hover:border-sky-500 text-left flex items-center gap-2"
@@ -336,7 +390,8 @@ export const PersonaLibraryModal: React.FC<PersonaLibraryModalProps> = ({
                       handleSelectPreset(
                         'https://images.unsplash.com/photo-1507003211169-0a1dd7228f2d?auto=format&fit=crop&w=600&q=80',
                         'David Miller',
-                        'Tech Lead'
+                        'Tech Lead',
+                        'men'
                       )
                     }
                     className="p-2 rounded bg-slate-950 border border-slate-800 hover:border-sky-500 text-left flex items-center gap-2"
@@ -357,7 +412,8 @@ export const PersonaLibraryModal: React.FC<PersonaLibraryModalProps> = ({
                       handleSelectPreset(
                         'https://images.unsplash.com/photo-1544005313-94ddf0286df2?auto=format&fit=crop&w=600&q=80',
                         'Mei Lin',
-                        'Virtual Lecturer'
+                        'Virtual Lecturer',
+                        'women'
                       )
                     }
                     className="p-2 rounded bg-slate-950 border border-slate-800 hover:border-sky-500 text-left flex items-center gap-2"
@@ -374,28 +430,6 @@ export const PersonaLibraryModal: React.FC<PersonaLibraryModalProps> = ({
                 </div>
               </div>
 
-              {/* Upload Dropzone */}
-              <div className="space-y-1.5">
-                <label className="text-xs text-slate-300 font-medium">
-                  Upload Custom Reference Portrait (JPG, PNG, WebP)
-                </label>
-                <label className="border-2 border-dashed border-slate-700 hover:border-sky-500 bg-slate-950 rounded-xl p-6 flex flex-col items-center justify-center cursor-pointer transition-colors group">
-                  <Upload className="w-8 h-8 text-slate-400 group-hover:text-sky-400 transition-colors mb-2" />
-                  <span className="text-xs font-medium text-slate-200">
-                    Click to browse or drag and drop reference portrait
-                  </span>
-                  <span className="text-[11px] text-slate-500 mt-1">
-                    Frontal lighting, neutral expression, single subject, minimum 720p resolution
-                  </span>
-                  <input
-                    type="file"
-                    accept="image/jpeg,image/png,image/webp"
-                    onChange={handleFileChange}
-                    className="hidden"
-                  />
-                </label>
-              </div>
-
               {/* Quality Assessment Card (Shown after image loaded) */}
               {previewImage && qualityResult && (
                 <div className="p-4 rounded-xl bg-slate-950 border border-slate-800 space-y-3">
@@ -407,9 +441,7 @@ export const PersonaLibraryModal: React.FC<PersonaLibraryModalProps> = ({
                     />
                     <div className="space-y-1 flex-1">
                       <div className="flex items-center justify-between">
-                        <span className="font-medium text-slate-200 text-xs">
-                          Multi-Point Quality Evaluation
-                        </span>
+                        <span className="font-medium text-slate-200 text-xs">Photo quality check</span>
                         <span
                           className={`text-xs font-bold px-2 py-0.5 rounded ${
                             qualityResult.passed
@@ -426,8 +458,9 @@ export const PersonaLibraryModal: React.FC<PersonaLibraryModalProps> = ({
                         <div>Lighting: <span className="text-slate-200">{qualityResult.lightingCategory}</span></div>
                         <div>Orientation: <span className="text-slate-200">{qualityResult.orientation}</span></div>
                         <div>Sharpness: <span className="text-slate-200">{qualityResult.sharpnessScore}/100</span></div>
-                        <div>Single Face: <span className="text-emerald-400">Verified</span></div>
-                        <div>Obstruction: <span className="text-emerald-400">None</span></div>
+                        <div className="col-span-2 text-slate-500">
+                          Face landmarks are mapped when you activate this face.
+                        </div>
                       </div>
                     </div>
                   </div>
@@ -437,7 +470,7 @@ export const PersonaLibraryModal: React.FC<PersonaLibraryModalProps> = ({
               {/* Metadata Inputs */}
               <div className="grid grid-cols-2 gap-4">
                 <div className="space-y-1">
-                  <label className="text-xs text-slate-300">Persona Full Name *</label>
+                  <label className="text-xs text-slate-300">Name *</label>
                   <input
                     type="text"
                     required
@@ -449,48 +482,49 @@ export const PersonaLibraryModal: React.FC<PersonaLibraryModalProps> = ({
                 </div>
 
                 <div className="space-y-1">
-                  <label className="text-xs text-slate-300">Professional Role / Title</label>
+                  <label className="text-xs text-slate-300">Label (optional)</label>
                   <input
                     type="text"
                     value={role}
                     onChange={(e) => setRole(e.target.value)}
-                    placeholder="e.g. Virtual Keynote Speaker"
+                    placeholder="e.g. Keynote look, Streaming avatar"
                     className="w-full bg-slate-950 border border-slate-800 rounded-lg px-3 py-2 text-xs text-slate-200 focus:outline-none focus:border-sky-500"
                   />
                 </div>
               </div>
 
-              {/* Legal Consent Attestation Form */}
-              <div className="p-4 rounded-xl bg-slate-950 border border-slate-800 space-y-3">
+              {/* Category: faces only map onto a person of the same group */}
+              <div className="space-y-1.5">
+                <label className="text-xs text-slate-300">This face is a *</label>
+                <div className="grid grid-cols-2 gap-2">
+                  {(['women', 'men'] as const).map((c) => (
+                    <button
+                      key={c}
+                      type="button"
+                      onClick={() => setCategory(c)}
+                      className={`py-2 rounded-lg text-xs font-semibold border transition-colors ${
+                        category === c
+                          ? 'bg-sky-500 text-slate-950 border-sky-400'
+                          : 'bg-slate-950 text-slate-300 border-slate-800 hover:border-slate-600'
+                      }`}
+                    >
+                      {CATEGORY_LABEL[c].one}
+                    </button>
+                  ))}
+                </div>
+                <p className="text-[10px] text-slate-500">
+                  Women's faces can only be used by a woman at the camera, men's faces only by a man. You are currently set
+                  as <strong className="text-slate-300">{CATEGORY_LABEL[subjectCategory].one}</strong> in the studio.
+                </p>
+              </div>
+
+              {/* Consent */}
+              <div className="p-4 rounded-xl bg-slate-950 border border-slate-800 space-y-2">
                 <div className="flex items-center gap-2 text-xs font-semibold text-slate-200">
                   <FileCheck className="w-4 h-4 text-sky-400" />
-                  <span>Mandatory Identity Authorization & Consent Attestation</span>
+                  <span>Permission to use this face</span>
                 </div>
-
-                <div className="grid grid-cols-2 gap-4">
-                  <div className="space-y-1">
-                    <label className="text-[11px] text-slate-400">Authorized Signer / Legal Owner</label>
-                    <input
-                      type="text"
-                      value={signerName}
-                      onChange={(e) => setSignerName(e.target.value)}
-                      placeholder="Full name of consenting person"
-                      className="w-full bg-slate-900 border border-slate-800 rounded px-2.5 py-1.5 text-xs text-slate-200 focus:outline-none focus:border-sky-500"
-                    />
-                  </div>
-
-                  <div className="space-y-1">
-                    <label className="text-[11px] text-slate-400">Permitted Transformation Scope</label>
-                    <input
-                      type="text"
-                      value={authorizedUsage}
-                      onChange={(e) => setAuthorizedUsage(e.target.value)}
-                      className="w-full bg-slate-900 border border-slate-800 rounded px-2.5 py-1.5 text-xs text-slate-200 focus:outline-none focus:border-sky-500"
-                    />
-                  </div>
-                </div>
-
-                <label className="flex items-start gap-2.5 pt-2 cursor-pointer">
+                <label className="flex items-start gap-2.5 cursor-pointer">
                   <input
                     type="checkbox"
                     checked={consentAgreed}
@@ -498,7 +532,8 @@ export const PersonaLibraryModal: React.FC<PersonaLibraryModalProps> = ({
                     className="accent-sky-500 w-4 h-4 rounded mt-0.5 cursor-pointer"
                   />
                   <span className="text-[11px] text-slate-400 leading-normal">
-                    I legally certify that I possess explicit, verifiable permission to transform my live webcam appearance into this reference identity. I agree to display mandatory synthetic AI disclosure watermarks and will not utilize this application to bypass biometric security or deceive viewers.
+                    This is my own face, or the person in the photo has given me permission to use their likeness. I
+                    understand every output frame carries the visible “AI-transformed” watermark.
                   </span>
                 </label>
               </div>
@@ -518,7 +553,7 @@ export const PersonaLibraryModal: React.FC<PersonaLibraryModalProps> = ({
                   className="px-5 py-2 rounded-lg text-xs font-bold bg-sky-500 hover:bg-sky-400 disabled:opacity-50 disabled:cursor-not-allowed text-slate-950 shadow-md transition-all flex items-center gap-2"
                 >
                   <CheckCircle2 className="w-4 h-4" />
-                  <span>Approve & Enroll Persona</span>
+                  <span>Add Face &amp; Use It Now</span>
                 </button>
               </div>
             </form>

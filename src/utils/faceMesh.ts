@@ -1,0 +1,272 @@
+/**
+ * Face mesh topology & kinematics helpers built on the MediaPipe 478-point face landmark layout.
+ *
+ * Everything in this file is pure (no DOM, no MediaPipe runtime) so it can be unit-tested with
+ * `node --test`. The MediaPipe connection tables are passed in rather than imported so the
+ * topology builder is independent of the WASM bundle.
+ */
+import { calculateEyeAspectRatio, calculateMouthAspectRatio, estimateHeadPose, Point2D } from './faceMath.ts';
+
+export interface Connection {
+  start: number;
+  end: number;
+}
+
+/** Well-known landmark indices in the MediaPipe face mesh. */
+export const LM = {
+  NOSE_TIP: 1,
+  NOSE_BRIDGE: 6,
+  CHIN: 152,
+  FOREHEAD: 10,
+  LEFT_CHEEK: 280,
+  RIGHT_CHEEK: 50,
+  // Subject's right eye (appears on the left of an un-mirrored image)
+  RIGHT_EYE: { outer: 33, inner: 133, top1: 160, top2: 158, bottom1: 144, bottom2: 153 },
+  // Subject's left eye
+  LEFT_EYE: { outer: 263, inner: 362, top1: 387, top2: 385, bottom1: 373, bottom2: 380 },
+  MOUTH: { upperInner: 13, lowerInner: 14, cornerRight: 61, cornerLeft: 291 },
+  RIGHT_IRIS_CENTER: 468,
+  LEFT_IRIS_CENTER: 473,
+} as const;
+
+/** Ordered polygon rings (counter-clockwise in image space) for the mesh holes. */
+export const LEFT_EYE_RING = [263, 249, 390, 373, 374, 380, 381, 382, 362, 398, 384, 385, 386, 387, 388, 466];
+export const RIGHT_EYE_RING = [33, 7, 163, 144, 145, 153, 154, 155, 133, 173, 157, 158, 159, 160, 161, 246];
+export const INNER_LIP_RING = [78, 95, 88, 178, 87, 14, 317, 402, 318, 324, 308, 415, 310, 311, 312, 13, 82, 81, 80, 191];
+
+/**
+ * Three-cycles in the tessellation graph that are NOT mesh faces (they enclose another vertex).
+ * Derived once from the MediaPipe tessellation; see buildFaceTopology().
+ */
+export const SEPARATING_TRIANGLES: ReadonlyArray<readonly [number, number, number]> = [
+  [49, 64, 129],
+  [279, 294, 358],
+];
+
+export interface FaceTopology {
+  /** Triangle index list covering the skin surface (eyes and inner mouth left as holes). */
+  triangles: Uint16Array;
+  /** Triangle fans that fill the two eye holes (used when persona eyes should replace the wearer's). */
+  eyeTriangles: Uint16Array;
+  /** Per-vertex opacity in [0,1]: 0 on the face oval, rising to 1 a few rings inward (edge feathering). */
+  featherWeights: Float32Array;
+  /** Number of vertices referenced (468 mesh points; iris points are not part of the surface). */
+  vertexCount: number;
+}
+
+/**
+ * Builds a renderable triangle list from the MediaPipe tessellation edge table.
+ *
+ * MediaPipe only ships edges (connections). For a planar triangulation every face is a 3-cycle of
+ * the edge graph, so we enumerate 3-cycles and drop the known separating triangles.
+ */
+export function buildFaceTopology(
+  tessellation: Connection[],
+  faceOval: Connection[],
+  vertexCount = 468,
+  separating: ReadonlyArray<readonly [number, number, number]> = SEPARATING_TRIANGLES
+): FaceTopology {
+  const adjacency: Set<number>[] = Array.from({ length: vertexCount }, () => new Set<number>());
+  for (const { start, end } of tessellation) {
+    if (start >= vertexCount || end >= vertexCount) continue;
+    adjacency[start].add(end);
+    adjacency[end].add(start);
+  }
+
+  const banned = new Set(separating.map((t) => [...t].sort((a, b) => a - b).join(',')));
+  const tris: number[] = [];
+  for (let a = 0; a < vertexCount; a++) {
+    for (const b of adjacency[a]) {
+      if (b <= a) continue;
+      for (const c of adjacency[a]) {
+        if (c <= b) continue;
+        if (!adjacency[b].has(c)) continue;
+        if (banned.has(`${a},${b},${c}`)) continue;
+        tris.push(a, b, c);
+      }
+    }
+  }
+
+  // Feather weights: BFS ring distance from the face-oval vertices.
+  const distance = new Int16Array(vertexCount).fill(-1);
+  const queue: number[] = [];
+  for (const { start, end } of faceOval) {
+    for (const v of [start, end]) {
+      if (v < vertexCount && distance[v] === -1) {
+        distance[v] = 0;
+        queue.push(v);
+      }
+    }
+  }
+  while (queue.length) {
+    const v = queue.shift()!;
+    for (const n of adjacency[v]) {
+      if (distance[n] === -1) {
+        distance[n] = distance[v] + 1;
+        queue.push(n);
+      }
+    }
+  }
+  const featherWeights = new Float32Array(vertexCount);
+  for (let v = 0; v < vertexCount; v++) {
+    const d = distance[v];
+    featherWeights[v] = d < 0 ? 1 : d === 0 ? 0 : d === 1 ? 0.3 : d === 2 ? 0.65 : d === 3 ? 0.9 : 1;
+  }
+
+  const eyeTriangles = [...fanTriangles(LEFT_EYE_RING), ...fanTriangles(RIGHT_EYE_RING)];
+
+  return {
+    triangles: new Uint16Array(tris),
+    eyeTriangles: new Uint16Array(eyeTriangles),
+    featherWeights,
+    vertexCount,
+  };
+}
+
+/** Triangle fan covering a simple polygon ring. */
+export function fanTriangles(ring: number[]): number[] {
+  const out: number[] = [];
+  for (let i = 1; i < ring.length - 1; i++) out.push(ring[0], ring[i], ring[i + 1]);
+  return out;
+}
+
+export interface LandmarkKinematics {
+  earLeft: number;
+  earRight: number;
+  mar: number;
+  mouthWidthRatio: number;
+  yaw: number;
+  pitch: number;
+  roll: number;
+  gazeX: number;
+  gazeY: number;
+  faceWidth: number;
+  faceHeight: number;
+  center: Point2D;
+}
+
+/**
+ * Computes eye/mouth aspect ratios, head pose and gaze from landmark pixel positions.
+ * `points` is a flat [x0, y0, x1, y1, ...] array in image space (y down).
+ */
+export function computeKinematics(points: Float32Array, neutralMouthWidth: number | null): LandmarkKinematics {
+  const p = (i: number): Point2D => ({ x: points[i * 2], y: points[i * 2 + 1] });
+
+  const l = LM.LEFT_EYE;
+  const r = LM.RIGHT_EYE;
+  const earLeft = calculateEyeAspectRatio(p(l.outer), p(l.top1), p(l.top2), p(l.inner), p(l.bottom2), p(l.bottom1));
+  const earRight = calculateEyeAspectRatio(p(r.outer), p(r.top1), p(r.top2), p(r.inner), p(r.bottom2), p(r.bottom1));
+
+  const m = LM.MOUTH;
+  const mar = calculateMouthAspectRatio(p(m.upperInner), p(m.lowerInner), p(m.cornerRight), p(m.cornerLeft));
+  const mouthWidth = Math.hypot(p(m.cornerLeft).x - p(m.cornerRight).x, p(m.cornerLeft).y - p(m.cornerRight).y);
+
+  const nose = p(LM.NOSE_TIP);
+  const chin = p(LM.CHIN);
+  const forehead = p(LM.FOREHEAD);
+  const eyeR = p(r.outer);
+  const eyeL = p(l.outer);
+  const pose = estimateHeadPose(
+    { ...nose, z: 0 },
+    { ...chin, z: 0 },
+    { ...eyeR, z: 0 },
+    { ...eyeL, z: 0 }
+  );
+
+  // Gaze: iris centre offset relative to the eye corners, averaged across both eyes.
+  const gaze = (iris: number, inner: number, outer: number, top: number, bottom: number) => {
+    const c = p(iris);
+    const a = p(inner);
+    const b = p(outer);
+    const t = p(top);
+    const d = p(bottom);
+    const w = Math.hypot(b.x - a.x, b.y - a.y) || 1;
+    const h = Math.hypot(d.x - t.x, d.y - t.y) || 1;
+    const mx = (a.x + b.x) / 2;
+    const my = (t.y + d.y) / 2;
+    return { x: ((c.x - mx) / w) * 2, y: ((c.y - my) / h) * 2 };
+  };
+  const hasIris = points.length >= 478 * 2;
+  const gl = hasIris ? gaze(LM.LEFT_IRIS_CENTER, l.inner, l.outer, l.top1, l.bottom1) : { x: 0, y: 0 };
+  const gr = hasIris ? gaze(LM.RIGHT_IRIS_CENTER, r.inner, r.outer, r.top1, r.bottom1) : { x: 0, y: 0 };
+
+  const faceWidth = Math.hypot(eyeL.x - eyeR.x, eyeL.y - eyeR.y) * 1.9;
+  const faceHeight = Math.hypot(chin.x - forehead.x, chin.y - forehead.y);
+
+  return {
+    earLeft,
+    earRight,
+    mar,
+    mouthWidthRatio: neutralMouthWidth ? mouthWidth / neutralMouthWidth : 1,
+    yaw: pose.yaw,
+    pitch: pose.pitch,
+    roll: pose.roll,
+    gazeX: clamp((gl.x + gr.x) / 2, -1, 1),
+    gazeY: clamp((gl.y + gr.y) / 2, -1, 1),
+    faceWidth,
+    faceHeight,
+    center: { x: (forehead.x + chin.x) / 2, y: (forehead.y + chin.y) / 2 },
+  };
+}
+
+/**
+ * Applies a "smile warmth" displacement to mouth-corner landmarks: pulls the corners up and
+ * outward (positive bias) or down (negative bias) with a smooth radial falloff. Mutates `points`.
+ */
+export function applySmileBias(points: Float32Array, bias: number, faceWidth: number) {
+  if (!bias) return;
+  const radius = faceWidth * 0.16;
+  const strength = bias * faceWidth * 0.045;
+  const corners: Array<{ idx: number; dirX: number }> = [
+    { idx: LM.MOUTH.cornerRight, dirX: -1 },
+    { idx: LM.MOUTH.cornerLeft, dirX: 1 },
+  ];
+  const n = points.length / 2;
+  for (const { idx, dirX } of corners) {
+    const cx = points[idx * 2];
+    const cy = points[idx * 2 + 1];
+    for (let i = 0; i < n; i++) {
+      const dx = points[i * 2] - cx;
+      const dy = points[i * 2 + 1] - cy;
+      const d = Math.hypot(dx, dy);
+      if (d >= radius) continue;
+      const w = 1 - d / radius;
+      const f = w * w * (3 - 2 * w); // smoothstep
+      points[i * 2] += dirX * strength * 0.5 * f;
+      points[i * 2 + 1] -= strength * f;
+    }
+  }
+}
+
+/** Axis-aligned bounds of a flat point array. */
+export function pointBounds(points: Float32Array) {
+  let minX = Infinity;
+  let minY = Infinity;
+  let maxX = -Infinity;
+  let maxY = -Infinity;
+  for (let i = 0; i < points.length; i += 2) {
+    const x = points[i];
+    const y = points[i + 1];
+    if (x < minX) minX = x;
+    if (x > maxX) maxX = x;
+    if (y < minY) minY = y;
+    if (y > maxY) maxY = y;
+  }
+  return { minX, minY, maxX, maxY, width: maxX - minX, height: maxY - minY };
+}
+
+export function clamp(v: number, lo: number, hi: number) {
+  return Math.min(hi, Math.max(lo, v));
+}
+
+/**
+ * Maps the user-facing "Movement Smoothness" (20..100) to 1-Euro filter parameters.
+ * Low smoothness = high cutoff (responsive); high smoothness = low cutoff (steady).
+ */
+export function smoothingToFilterParams(smoothness: number): { minCutoff: number; beta: number } {
+  const t = clamp((smoothness - 20) / 80, 0, 1);
+  return {
+    minCutoff: 4.5 - t * 3.7, // 4.5 Hz → 0.8 Hz
+    beta: 0.08 - t * 0.06, // responsive to fast motion when smoothing is low
+  };
+}

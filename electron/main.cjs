@@ -1,15 +1,51 @@
 // PersonaLive Desktop Studio - Electron Main Process
-// Configured with auto-updater via GitHub Releases and hardware acceleration for WebGL & Canvas
+//
+// - Serves the built web app over a privileged `app://` scheme (instead of file://) so that the
+//   MediaPipe WASM runtime, the model cache and the service worker all work exactly like in a
+//   browser, fully offline after the first launch.
+// - Grants camera access to the app window.
+// - Enables GPU rasterisation / WebGL for the real-time mesh warp.
+// - Ships with electron-updater for delta updates from GitHub Releases.
 
-const { app, BrowserWindow, ipcMain, shell } = require('electron');
+const { app, BrowserWindow, ipcMain, shell, protocol, net, session } = require('electron');
 const path = require('path');
+const fs = require('fs');
+const { pathToFileURL } = require('url');
 const { autoUpdater } = require('electron-updater');
 
-// Configure autoUpdater logging and feed
+const APP_SCHEME = 'app';
+const APP_HOST = 'personalive';
+const DIST_DIR = path.join(__dirname, '..', 'dist');
+
 autoUpdater.autoDownload = true;
 autoUpdater.autoInstallOnAppQuit = true;
 
+// GPU flags must be set before the app is ready.
+app.commandLine.appendSwitch('enable-gpu-rasterization');
+app.commandLine.appendSwitch('enable-zero-copy');
+app.commandLine.appendSwitch('ignore-gpu-blocklist');
+
+protocol.registerSchemesAsPrivileged([
+  {
+    scheme: APP_SCHEME,
+    privileges: { standard: true, secure: true, supportFetchAPI: true, stream: true, corsEnabled: true },
+  },
+]);
+
 let mainWindow = null;
+
+function registerAppProtocol() {
+  protocol.handle(APP_SCHEME, (request) => {
+    const url = new URL(request.url);
+    let pathname = decodeURIComponent(url.pathname);
+    if (pathname === '/' || pathname === '') pathname = '/index.html';
+    let file = path.normalize(path.join(DIST_DIR, pathname));
+    if (!file.startsWith(DIST_DIR)) return new Response('Forbidden', { status: 403 });
+    // SPA fallback for unknown routes.
+    if (!fs.existsSync(file) || fs.statSync(file).isDirectory()) file = path.join(DIST_DIR, 'index.html');
+    return net.fetch(pathToFileURL(file).toString());
+  });
+}
 
 function createWindow() {
   mainWindow = new BrowserWindow({
@@ -17,9 +53,10 @@ function createWindow() {
     height: 900,
     minWidth: 1024,
     minHeight: 700,
+    show: false,
     title: 'PersonaLive Desktop Studio',
     backgroundColor: '#020617',
-    titleBarStyle: 'hiddenInset', // Native clean macOS/Windows titlebar
+    autoHideMenuBar: true,
     webPreferences: {
       preload: path.join(__dirname, 'preload.cjs'),
       nodeIntegration: false,
@@ -27,18 +64,24 @@ function createWindow() {
       sandbox: true,
       webSecurity: true,
     },
-    icon: path.join(__dirname, '../public/icon.svg'),
+    icon: path.join(__dirname, '../public/pwa-512x512.png'),
   });
 
-  // Enable hardware acceleration flags for real-time 60 FPS face transformation
-  app.commandLine.appendSwitch('enable-gpu-rasterization');
-  app.commandLine.appendSwitch('enable-zero-copy');
+  const devServerUrl = process.env.VITE_DEV_SERVER_URL;
+  if (devServerUrl) {
+    mainWindow.loadURL(devServerUrl);
+  } else if (fs.existsSync(path.join(DIST_DIR, 'index.html'))) {
+    mainWindow.loadURL(`${APP_SCHEME}://${APP_HOST}/index.html`);
+  } else {
+    mainWindow.loadURL(
+      'data:text/html,' +
+        encodeURIComponent(
+          '<body style="font-family:sans-serif;background:#020617;color:#e2e8f0;padding:40px">' +
+            '<h2>PersonaLive: no build found</h2><p>Run <code>npm run build</code> first, or <code>npm run desktop:dev</code> to use the Vite dev server.</p></body>'
+        )
+    );
+  }
 
-  // In development, load local Vite dev server; in production, load built dist
-  const startUrl = process.env.VITE_DEV_SERVER_URL || `file://${path.join(__dirname, '../dist/index.html')}`;
-  mainWindow.loadURL(startUrl);
-
-  // Open external links safely in system browser
   mainWindow.webContents.setWindowOpenHandler(({ url }) => {
     shell.openExternal(url);
     return { action: 'deny' };
@@ -48,63 +91,44 @@ function createWindow() {
     mainWindow = null;
   });
 
-  // Check for auto-updates after window is ready
   mainWindow.once('ready-to-show', () => {
     mainWindow.show();
-    if (app.isPackaged) {
-      autoUpdater.checkForUpdatesAndNotify();
-    }
+    if (app.isPackaged) autoUpdater.checkForUpdatesAndNotify();
   });
 }
 
-// Auto-updater event listeners & IPC forwarding to renderer UI
-autoUpdater.on('checking-for-update', () => {
-  mainWindow?.webContents.send('updater-status', { status: 'checking' });
-});
+// Auto-updater events → renderer
+autoUpdater.on('checking-for-update', () => mainWindow?.webContents.send('updater-status', { status: 'checking' }));
+autoUpdater.on('update-available', (info) =>
+  mainWindow?.webContents.send('updater-status', { status: 'available', version: info.version })
+);
+autoUpdater.on('update-not-available', () => mainWindow?.webContents.send('updater-status', { status: 'up-to-date' }));
+autoUpdater.on('download-progress', (p) =>
+  mainWindow?.webContents.send('updater-progress', { percent: p.percent, transferred: p.transferred, total: p.total })
+);
+autoUpdater.on('update-downloaded', (info) =>
+  mainWindow?.webContents.send('updater-status', { status: 'ready-to-install', version: info.version })
+);
 
-autoUpdater.on('update-available', (info) => {
-  mainWindow?.webContents.send('updater-status', { status: 'available', version: info.version });
-});
+ipcMain.handle('check-for-updates', async () => (app.isPackaged ? autoUpdater.checkForUpdates() : { status: 'dev-mode' }));
+ipcMain.handle('quit-and-install-update', () => autoUpdater.quitAndInstall());
 
-autoUpdater.on('update-not-available', () => {
-  mainWindow?.webContents.send('updater-status', { status: 'up-to-date' });
-});
+app.whenReady().then(() => {
+  registerAppProtocol();
 
-autoUpdater.on('download-progress', (progressObj) => {
-  mainWindow?.webContents.send('updater-progress', {
-    percent: progressObj.percent,
-    transferred: progressObj.transferred,
-    total: progressObj.total,
+  // Allow the studio window to use the webcam (and nothing else).
+  session.defaultSession.setPermissionRequestHandler((_wc, permission, callback) => {
+    callback(permission === 'media' || permission === 'mediaKeySystem');
   });
-});
+  session.defaultSession.setPermissionCheckHandler((_wc, permission) => permission === 'media');
 
-autoUpdater.on('update-downloaded', (info) => {
-  mainWindow?.webContents.send('updater-status', { status: 'ready-to-install', version: info.version });
+  createWindow();
 });
-
-// Manual update triggers from UI
-ipcMain.handle('check-for-updates', async () => {
-  if (app.isPackaged) {
-    return await autoUpdater.checkForUpdates();
-  }
-  return { status: 'dev-mode' };
-});
-
-ipcMain.handle('quit-and-install-update', () => {
-  autoUpdater.quitAndInstall();
-});
-
-// App lifecycle
-app.whenReady().then(createWindow);
 
 app.on('window-all-closed', () => {
-  if (process.platform !== 'darwin') {
-    app.quit();
-  }
+  if (process.platform !== 'darwin') app.quit();
 });
 
 app.on('activate', () => {
-  if (BrowserWindow.getAllWindows().length === 0) {
-    createWindow();
-  }
+  if (BrowserWindow.getAllWindows().length === 0) createWindow();
 });

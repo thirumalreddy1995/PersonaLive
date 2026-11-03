@@ -49,7 +49,7 @@ export const RecordingsModal: React.FC<RecordingsModalProps> = ({
               <Film className="w-10 h-10 text-slate-600 mx-auto" />
               <p className="text-slate-400 text-xs">No recordings stored yet</p>
               <p className="text-slate-500 text-[11px]">
-                Click "Record Stream" on the studio toolbar to save an audited transformed session.
+                Click "Record" on the studio toolbar to capture the transformed output as a WebM video.
               </p>
             </div>
           ) : (
@@ -81,7 +81,7 @@ export const RecordingsModal: React.FC<RecordingsModalProps> = ({
                 <div className="flex items-center gap-2 shrink-0">
                   <a
                     href={rec.downloadUrl}
-                    download={`${rec.title}.mp4`}
+                    download={`${rec.title}.${rec.mimeType?.includes('mp4') ? 'mp4' : 'webm'}`}
                     className="p-2 rounded-lg bg-slate-800 hover:bg-slate-700 text-sky-300 text-xs flex items-center gap-1.5 transition-colors"
                     title="Download Permitted Recording"
                   >

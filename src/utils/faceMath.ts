@@ -138,6 +138,13 @@ export class OneEuroFilter {
     this.dxPrev = 0;
     this.tPrev = null;
   }
+
+  /** Retunes the filter without losing its state (used when the user drags the smoothness slider). */
+  public setParams(minCutoff: number, beta: number, dCutoff?: number) {
+    this.minCutoff = minCutoff;
+    this.beta = beta;
+    if (dCutoff !== undefined) this.dCutoff = dCutoff;
+  }
 }
 
 /**

@@ -38,7 +38,11 @@ export function usePWAInstall() {
 
     // Register Service Worker and listen for background updates
     if ('serviceWorker' in navigator && process.env.NODE_ENV !== 'test') {
-      navigator.serviceWorker.register('/sw.js').then((registration) => {
+      navigator.serviceWorker.register(`${import.meta.env.BASE_URL}sw.js`).then((registration) => {
+        // Installed desktop windows can stay open for days: check for a new build every 15 minutes.
+        const poll = window.setInterval(() => registration.update().catch(() => undefined), 15 * 60 * 1000);
+        window.addEventListener('beforeunload', () => window.clearInterval(poll));
+
         // If a new worker is waiting, an update has arrived
         if (registration.waiting) {
           setWaitingWorker(registration.waiting);

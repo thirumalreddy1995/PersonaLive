@@ -1,65 +1,264 @@
-import { AuthorizedPersona, FacialMetrics, HeadPose, TransformationSettings } from '../types/index.ts';
-import { calculateEyeAspectRatio, calculateMouthAspectRatio, estimateHeadPose, OneEuroFilter, Point2D, Point3D } from './faceMath.ts';
+/**
+ * Real-time facial transformation engine.
+ *
+ * Pipeline per frame:
+ *   1. Acquire a source frame (live webcam, or the built-in demo subject).
+ *   2. Track 478 facial landmarks with MediaPipe Face Landmarker (GPU/WASM).
+ *   3. Smooth landmarks with per-coordinate 1-Euro filters (user-tunable).
+ *   4. Derive kinematics (EAR, MAR, head pose, gaze) and expression state from blendshapes.
+ *   5. Warp the authorized persona portrait onto the live face mesh (GPU piecewise-affine warp)
+ *      with edge feathering, lighting adaptation and optional real-eye pass-through.
+ *   6. Composite into the selected view mode and stamp the mandatory AI-transformed watermark.
+ */
+import { AuthorizedPersona, EngineStatus, FacialMetrics, HeadPose, TransformationSettings } from '../types/index.ts';
+import { OneEuroFilter } from './faceMath.ts';
+import {
+  applySmileBias,
+  buildFaceTopology,
+  computeKinematics,
+  FaceTopology,
+  LM,
+  pointBounds,
+  smoothingToFilterParams,
+  clamp,
+} from './faceMesh.ts';
+import {
+  FaceTracker,
+  FACE_LEFT_IRIS,
+  FACE_OVAL,
+  FACE_RIGHT_IRIS,
+  FACE_TESSELLATION,
+  TrackedFace,
+} from './faceTracker.ts';
+import { MeshWarpRenderer } from './meshWarpRenderer.ts';
+
+export type MetricsCallback = (metrics: FacialMetrics, pose: HeadPose, fps: number, latency: number) => void;
+export type StatusCallback = (status: EngineStatus) => void;
+
+const LANDMARK_COUNT = 478;
+const RESOLUTIONS: Record<TransformationSettings['outputResolution'], [number, number]> = {
+  '1080p': [1920, 1080],
+  '720p': [1280, 720],
+  '540p': [960, 540],
+};
+
+/** Portrait used as the stand-in subject when no webcam is connected. */
+export const DEMO_SUBJECT_URL =
+  'https://images.unsplash.com/photo-1506794778202-cad84cf45f1d?auto=format&fit=crop&w=1280&q=80';
+
+interface SourceLayout {
+  offsetX: number;
+  offsetY: number;
+  drawWidth: number;
+  drawHeight: number;
+  mirror: boolean;
+}
 
 export class RealtimeFacialEngine {
   private canvas: HTMLCanvasElement;
   private ctx: CanvasRenderingContext2D;
+  private tracker = new FaceTracker();
+  private warp: MeshWarpRenderer;
+  private topology: FaceTopology;
+
+  // Sources
   private videoElement: HTMLVideoElement | null = null;
+  private demoImage: HTMLImageElement | null = null;
+  private demoFailed = false;
+  private demoCanvas: HTMLCanvasElement;
+  private demoCtx: CanvasRenderingContext2D;
+
+  // Persona
+  private personaId: string | null = null;
   private personaImage: HTMLImageElement | null = null;
-  private isRunning: boolean = false;
+  private personaMean: [number, number, number] = [128, 128, 128];
+  private personaPrepareToken = 0;
+
+  // Tracking state
+  private filters: OneEuroFilter[] = [];
+  private smoothed = new Float32Array(LANDMARK_COUNT * 2);
+  private warpPositions = new Float32Array(LANDMARK_COUNT * 2);
+  private lastFace: TrackedFace | null = null;
+  private faceVisible = false;
+  private framesSinceFace = 0;
+  private neutralMouthWidth: number | null = null;
+
+  // Lighting adaptation
+  private samplerCanvas: HTMLCanvasElement;
+  private samplerCtx: CanvasRenderingContext2D;
+  private colorGain: [number, number, number] = [1, 1, 1];
+  private frameIndex = 0;
+
+  // Where the transformed pane sits on the canvas (used to place the mesh overlay)
+  private paneTransform = { x: 0, y: 0, scale: 1 };
+
+  // Loop & settings
+  private isRunning = false;
   private animationFrameId: number | null = null;
+  private settings: TransformationSettings;
+  private splitPosition = 50;
 
-  // Smoothing filters for head pose and metrics
-  private yawFilter = new OneEuroFilter(1.2, 0.015);
-  private pitchFilter = new OneEuroFilter(1.2, 0.015);
-  private rollFilter = new OneEuroFilter(1.2, 0.015);
-  private earLeftFilter = new OneEuroFilter(1.8, 0.02);
-  private earRightFilter = new OneEuroFilter(1.8, 0.02);
-  private marFilter = new OneEuroFilter(2.0, 0.02);
-
-  // Performance telemetry
-  private lastFrameTime = performance.now();
+  // Telemetry
   private frameCount = 0;
   private lastFpsCalcTime = performance.now();
-  private currentFps = 31.4;
+  private currentFps = 0;
   private latencyHistory: number[] = [];
 
-  // Callbacks
-  private onMetricsUpdate?: (metrics: FacialMetrics, pose: HeadPose, fps: number, latency: number) => void;
+  // Status
+  private status: EngineStatus = {
+    model: 'idle',
+    modelProgress: 0,
+    modelMessage: 'Face tracking not started',
+    backend: '-',
+    renderer: 'webgl',
+    source: 'none',
+    faceDetected: false,
+    persona: 'none',
+  };
+  private lastStatusJson = '';
 
-  constructor(canvas: HTMLCanvasElement) {
+  private onMetricsUpdate?: MetricsCallback;
+  private onStatusUpdate?: StatusCallback;
+
+  constructor(canvas: HTMLCanvasElement, settings: TransformationSettings) {
     this.canvas = canvas;
     const context = canvas.getContext('2d', { alpha: false });
     if (!context) throw new Error('Could not get 2D context from canvas');
     this.ctx = context;
+    this.settings = settings;
+
+    const [w, h] = RESOLUTIONS[settings.outputResolution] ?? RESOLUTIONS['720p'];
+    canvas.width = w;
+    canvas.height = h;
+
+    this.topology = buildFaceTopology(FACE_TESSELLATION, FACE_OVAL, 468);
+    this.warp = new MeshWarpRenderer(w, h);
+    this.warp.setTopology(this.topology);
+    this.status.renderer = this.warp.usesWebGL ? 'webgl' : 'canvas2d';
+
+    this.demoCanvas = document.createElement('canvas');
+    this.demoCanvas.width = 1280;
+    this.demoCanvas.height = 720;
+    this.demoCtx = this.demoCanvas.getContext('2d')!;
+
+    this.samplerCanvas = document.createElement('canvas');
+    this.samplerCanvas.width = 24;
+    this.samplerCanvas.height = 24;
+    this.samplerCtx = this.samplerCanvas.getContext('2d', { willReadFrequently: true })!;
+
+    const params = smoothingToFilterParams(settings.temporalSmoothing);
+    for (let i = 0; i < LANDMARK_COUNT * 2; i++) {
+      this.filters.push(new OneEuroFilter(params.minCutoff, params.beta, 1.0));
+    }
   }
 
-  public setCallbacks(cb: (metrics: FacialMetrics, pose: HeadPose, fps: number, latency: number) => void) {
-    this.onMetricsUpdate = cb;
+  // ---------------------------------------------------------------------------------------------
+  // Public API
+  // ---------------------------------------------------------------------------------------------
+
+  public setCallbacks(onMetrics: MetricsCallback, onStatus: StatusCallback) {
+    this.onMetricsUpdate = onMetrics;
+    this.onStatusUpdate = onStatus;
+    this.emitStatus(true);
+  }
+
+  /** Loads the tracking runtime + model. Safe to call multiple times. */
+  public async init(): Promise<void> {
+    if (this.status.model === 'ready' || this.status.model === 'loading') return;
+    this.patchStatus({ model: 'loading', modelProgress: 0 });
+    try {
+      await this.tracker.load((p) => {
+        this.patchStatus({ modelProgress: p.progress, modelMessage: p.message });
+      });
+      this.patchStatus({ model: 'ready', modelProgress: 1, backend: this.tracker.backend, modelMessage: 'Face tracking ready' });
+      // Persona may have been selected while the model was still loading.
+      if (this.personaImage && this.status.persona !== 'ready') void this.preparePersona();
+    } catch (err) {
+      console.error('Face tracker failed to load', err);
+      this.patchStatus({
+        model: 'error',
+        modelMessage: err instanceof Error ? err.message : 'Face tracking engine failed to load',
+      });
+    }
   }
 
   public setVideoSource(video: HTMLVideoElement | null) {
     this.videoElement = video;
+    this.resetTracking();
+    this.patchStatus({ source: video ? 'webcam' : this.demoImage ? 'demo' : 'none' });
+  }
+
+  /** Loads the demo subject portrait used when no webcam is active. */
+  public loadDemoSubject(url: string = DEMO_SUBJECT_URL) {
+    const img = new Image();
+    img.crossOrigin = 'anonymous';
+    img.onload = () => {
+      this.demoImage = img;
+      this.demoFailed = false;
+      if (!this.videoElement) this.patchStatus({ source: 'demo' });
+    };
+    img.onerror = () => {
+      this.demoFailed = true;
+      if (!this.videoElement) this.patchStatus({ source: 'none' });
+    };
+    img.src = url;
   }
 
   public setPersona(persona: AuthorizedPersona | null) {
+    this.personaPrepareToken++;
     if (!persona) {
+      this.personaId = null;
       this.personaImage = null;
+      this.warp.clearPersona();
+      this.patchStatus({ persona: 'none' });
       return;
     }
+    if (persona.id === this.personaId && this.status.persona === 'ready') return;
+    this.personaId = persona.id;
+    this.patchStatus({ persona: 'preparing' });
+
+    const token = this.personaPrepareToken;
     const img = new Image();
     img.crossOrigin = 'anonymous';
-    img.src = persona.imageUrl;
     img.onload = () => {
+      if (token !== this.personaPrepareToken) return;
       this.personaImage = img;
+      void this.preparePersona();
     };
+    img.onerror = () => {
+      if (token !== this.personaPrepareToken) return;
+      this.patchStatus({ persona: 'error', personaMessage: 'Could not load the persona photo.' });
+    };
+    img.src = persona.imageUrl;
   }
 
-  public start(settings: TransformationSettings, splitPosition: number) {
+  public updateSettings(settings: TransformationSettings) {
+    const prev = this.settings;
+    this.settings = settings;
+    if (prev.temporalSmoothing !== settings.temporalSmoothing) {
+      const p = smoothingToFilterParams(settings.temporalSmoothing);
+      for (const f of this.filters) f.setParams(p.minCutoff, p.beta);
+    }
+    if (prev.outputResolution !== settings.outputResolution) {
+      const [w, h] = RESOLUTIONS[settings.outputResolution];
+      this.canvas.width = w;
+      this.canvas.height = h;
+      this.warp.resize(w, h);
+      this.resetTracking();
+    }
+    if (prev.lightingAdaptation && !settings.lightingAdaptation) this.colorGain = [1, 1, 1];
+  }
+
+  public setSplitPosition(position: number) {
+    this.splitPosition = position;
+  }
+
+  public start() {
     if (this.isRunning) return;
     this.isRunning = true;
-    this.lastFrameTime = performance.now();
-    this.loop(settings, splitPosition);
+    this.lastFpsCalcTime = performance.now();
+    this.frameCount = 0;
+    this.loop();
   }
 
   public stop() {
@@ -70,637 +269,538 @@ export class RealtimeFacialEngine {
     }
   }
 
-  private loop(settings: TransformationSettings, splitPosition: number) {
-    if (!this.isRunning) return;
+  public dispose() {
+    this.stop();
+    this.tracker.dispose();
+    this.warp.dispose();
+  }
 
+  public getStatus(): EngineStatus {
+    return this.status;
+  }
+
+  // ---------------------------------------------------------------------------------------------
+  // Persona preparation
+  // ---------------------------------------------------------------------------------------------
+
+  private async preparePersona() {
+    const img = this.personaImage;
+    if (!img || !this.tracker.ready) return;
+    const token = this.personaPrepareToken;
+    try {
+      const { faces } = await this.tracker.detectImage(img);
+      if (token !== this.personaPrepareToken) return;
+      if (faces.length === 0) {
+        this.warp.clearPersona();
+        this.patchStatus({
+          persona: 'no-face',
+          personaMessage: 'No face was found in this persona photo. Use a clear, front-facing portrait.',
+        });
+        return;
+      }
+      const face = faces[0];
+      this.warp.setPersona(img, face.landmarks);
+      this.personaMean = this.sampleMeanColor(img, face.landmarks, img.naturalWidth, img.naturalHeight, false);
+      this.patchStatus({
+        persona: 'ready',
+        personaMessage: faces.length > 1 ? 'Multiple faces detected — using the most prominent one.' : undefined,
+      });
+    } catch (err) {
+      console.error('Persona analysis failed', err);
+      if (token !== this.personaPrepareToken) return;
+      this.patchStatus({
+        persona: 'error',
+        personaMessage:
+          'Persona photo could not be analysed. If this is a web image, its host may block cross-origin access.',
+      });
+    }
+  }
+
+  // ---------------------------------------------------------------------------------------------
+  // Frame loop
+  // ---------------------------------------------------------------------------------------------
+
+  private loop = () => {
+    if (!this.isRunning) return;
     const frameStart = performance.now();
-    this.renderFrame(settings, splitPosition, frameStart);
+    try {
+      this.renderFrame(frameStart);
+    } catch (err) {
+      console.error('Render frame failed', err);
+    }
     const frameEnd = performance.now();
 
-    const frameLatency = frameEnd - frameStart;
-    this.latencyHistory.push(frameLatency);
+    this.latencyHistory.push(frameEnd - frameStart);
     if (this.latencyHistory.length > 30) this.latencyHistory.shift();
 
-    // FPS calculation
     this.frameCount++;
     if (frameEnd - this.lastFpsCalcTime >= 500) {
       this.currentFps = (this.frameCount * 1000) / (frameEnd - this.lastFpsCalcTime);
       this.frameCount = 0;
       this.lastFpsCalcTime = frameEnd;
     }
+    this.animationFrameId = requestAnimationFrame(this.loop);
+  };
 
-    this.animationFrameId = requestAnimationFrame(() => this.loop(settings, splitPosition));
+  private getSource(): { source: HTMLVideoElement | HTMLCanvasElement; width: number; height: number; mirror: boolean } | null {
+    const v = this.videoElement;
+    if (v && v.readyState >= 2 && v.videoWidth > 0) {
+      return { source: v, width: v.videoWidth, height: v.videoHeight, mirror: true };
+    }
+    if (this.demoImage) {
+      this.drawDemoSubject(performance.now() / 1000);
+      return { source: this.demoCanvas, width: this.demoCanvas.width, height: this.demoCanvas.height, mirror: false };
+    }
+    return null;
   }
 
-  public renderFrame(settings: TransformationSettings, splitPosition: number, timestamp: number) {
-    const width = this.canvas.width;
-    const height = this.canvas.height;
-    if (width === 0 || height === 0) return;
+  /** Renders the demo portrait with gentle head motion so tracking + warping are visibly live. */
+  private drawDemoSubject(t: number) {
+    const ctx = this.demoCtx;
+    const img = this.demoImage!;
+    const W = this.demoCanvas.width;
+    const H = this.demoCanvas.height;
+    const scale = Math.max(W / img.naturalWidth, H / img.naturalHeight) * (1.06 + Math.sin(t * 0.45) * 0.03);
+    const dw = img.naturalWidth * scale;
+    const dh = img.naturalHeight * scale;
+    ctx.save();
+    ctx.fillStyle = '#0b1220';
+    ctx.fillRect(0, 0, W, H);
+    ctx.translate(W / 2 + Math.sin(t * 0.6) * W * 0.02, H / 2 + Math.cos(t * 0.5) * H * 0.015);
+    ctx.rotate(Math.sin(t * 0.35) * 0.025);
+    ctx.drawImage(img, -dw / 2, -dh / 2, dw, dh);
+    ctx.restore();
+  }
 
+  public renderFrame(timestamp: number) {
+    const W = this.canvas.width;
+    const H = this.canvas.height;
+    if (W === 0 || H === 0) return;
     const ctx = this.ctx;
-    const timeSec = timestamp / 1000;
+    const settings = this.settings;
+    this.frameIndex++;
 
-    // 1. Determine facial movement state (live camera or natural procedural movement)
-    let rawYaw = Math.sin(timeSec * 0.7) * 14 + Math.sin(timeSec * 1.9) * 4;
-    let rawPitch = Math.cos(timeSec * 0.5) * 8;
-    let rawRoll = Math.sin(timeSec * 0.4) * 3;
+    const src = this.getSource();
+    const layout: SourceLayout | null = src ? coverLayout(src.width, src.height, W, H, src.mirror) : null;
 
-    // Periodic natural blink
-    const blinkCycle = timeSec % 3.6;
-    let rawEar = 0.32;
-    if (blinkCycle > 3.4 && blinkCycle < 3.55) {
-      rawEar = 0.04; // full blink
+    // --- 1. Track ---------------------------------------------------------------------------
+    let tracked: TrackedFace | null = null;
+    if (src && this.tracker.ready) {
+      tracked = this.tracker.detectVideo(src.source, timestamp);
+    }
+    if (tracked && layout) {
+      this.ingestLandmarks(tracked.landmarks, layout, timestamp);
+      this.lastFace = tracked;
+      this.faceVisible = true;
+      this.framesSinceFace = 0;
     } else {
-      rawEar = 0.30 + Math.sin(timeSec * 4) * 0.03;
+      this.framesSinceFace++;
+      if (this.framesSinceFace > 12) {
+        this.faceVisible = false;
+        this.lastFace = null;
+        this.resetFilters();
+      }
     }
+    if (this.status.faceDetected !== this.faceVisible) this.patchStatus({ faceDetected: this.faceVisible });
 
-    // Natural speaking rhythm
-    const speechCycle = timeSec % 5.0;
-    let rawMar = 0.12;
-    if (speechCycle > 1.0 && speechCycle < 4.2) {
-      rawMar = 0.25 + Math.abs(Math.sin(timeSec * 9)) * 0.38 * settings.lipSyncSensitivity;
-    }
+    // --- 2. Kinematics & metrics -------------------------------------------------------------
+    const { metrics, pose } = this.computeMetrics();
 
-    // Apply 1-Euro low-pass filtering
-    const smoothYaw = this.yawFilter.filter(rawYaw, timestamp);
-    const smoothPitch = this.pitchFilter.filter(rawPitch, timestamp);
-    const smoothRoll = this.rollFilter.filter(rawRoll, timestamp);
-    const smoothEarL = this.earLeftFilter.filter(rawEar, timestamp);
-    const smoothEarR = this.earRightFilter.filter(rawEar, timestamp);
-    const smoothMar = this.marFilter.filter(rawMar, timestamp);
+    // --- 3. Compose base frame --------------------------------------------------------------
+    ctx.fillStyle = '#0b1220';
+    ctx.fillRect(0, 0, W, H);
 
-    const isBlinking = smoothEarL < 0.12;
-    const isSpeaking = smoothMar > 0.22;
-    const smileThreshold = 0.4 - (settings.manualSmileBias || 0);
-    const isSmiling = (smoothMar < 0.28 && Math.sin(timeSec * 0.3) > smileThreshold) || (settings.manualSmileBias || 0) > 0.2;
-
-    const gazeX = Math.sin(timeSec * 0.6) * 0.4;
-    const gazeY = Math.cos(timeSec * 0.4) * 0.2;
-
-    const pose: HeadPose = { yaw: smoothYaw, pitch: smoothPitch, roll: smoothRoll };
-    const metrics: FacialMetrics = {
-      eyeAspectRatioLeft: Number(smoothEarL.toFixed(3)),
-      eyeAspectRatioRight: Number(smoothEarR.toFixed(3)),
-      mouthAspectRatio: Number((smoothMar * settings.expressionGain).toFixed(3)),
-      mouthWidthRatio: 1.0 + (isSmiling ? 0.22 * settings.expressionGain : 0),
-      eyebrowElevation: 0.5 + Math.sin(timeSec * 1.2) * 0.2,
-      isBlinking,
-      isSmiling,
-      isSpeaking,
-      gazeX,
-      gazeY,
+    const drawBase = (x: number, y: number, w: number, h: number) => {
+      if (src && layout) this.drawSource(ctx, src.source, layout, x, y, w, h);
+      else this.drawStandby(ctx, x, y, w, h);
     };
 
-    const avgLatency = this.latencyHistory.length > 0 
-      ? this.latencyHistory.reduce((a, b) => a + b, 0) / this.latencyHistory.length
-      : 24;
-
-    if (this.onMetricsUpdate) {
-      this.onMetricsUpdate(metrics, pose, Math.round(this.currentFps * 10) / 10, Math.round(avgLatency * 10) / 10);
+    const overlayReady = !!(this.faceVisible && this.lastFace && this.warp.hasPersona && this.status.persona === 'ready');
+    if (overlayReady && src && layout) {
+      this.renderPersonaOverlay(layout, src.source, src.width, src.height);
     }
+    const drawOverlay = (x: number, y: number, w: number, h: number) => {
+      if (!overlayReady) return;
+      ctx.drawImage(this.warp.canvas, 0, 0, W, H, x, y, w, h);
+    };
 
-    // Clear background
-    ctx.fillStyle = '#0f172a';
-    ctx.fillRect(0, 0, width, height);
+    const splitPx = Math.max(20, Math.min(W - 20, (this.splitPosition / 100) * W));
 
-    // 2. Render based on viewMode
     if (settings.viewMode === 'split') {
-      const splitPx = Math.max(20, Math.min(width - 20, (splitPosition / 100) * width));
-
-      // Left pane: Original Webcam feed
+      drawBase(0, 0, W, H);
       ctx.save();
       ctx.beginPath();
-      ctx.rect(0, 0, splitPx, height);
+      ctx.rect(splitPx, 0, W - splitPx, H);
       ctx.clip();
-      this.drawSubjectFeed(ctx, width, height, timeSec, pose, metrics, false);
+      drawOverlay(0, 0, W, H);
       ctx.restore();
-
-      // Right pane: AI-Transformed feed
-      ctx.save();
-      ctx.beginPath();
-      ctx.rect(splitPx, 0, width - splitPx, height);
-      ctx.clip();
-      this.drawSubjectFeed(ctx, width, height, timeSec, pose, metrics, true, settings);
-      ctx.restore();
-
-      // Split boundary bar
-      ctx.strokeStyle = '#38bdf8';
-      ctx.lineWidth = 2.5;
-      ctx.beginPath();
-      ctx.moveTo(splitPx, 0);
-      ctx.lineTo(splitPx, height);
-      ctx.stroke();
-
-      // Split Handle pill
-      ctx.fillStyle = '#0284c7';
-      ctx.shadowColor = 'rgba(0,0,0,0.5)';
-      ctx.shadowBlur = 8;
-      ctx.beginPath();
-      ctx.roundRect(splitPx - 14, height / 2 - 28, 28, 56, 14);
-      ctx.fill();
-      ctx.shadowBlur = 0;
-      ctx.strokeStyle = '#bae6fd';
-      ctx.lineWidth = 1.5;
-      ctx.stroke();
-
-      // Split Handle arrows
-      ctx.fillStyle = '#ffffff';
-      ctx.font = '12px sans-serif';
-      ctx.textAlign = 'center';
-      ctx.textBaseline = 'middle';
-      ctx.fillText('◀ ▶', splitPx, height / 2);
-
-      // Labels on each side
-      ctx.font = 'bold 12px Inter, system-ui, sans-serif';
-      ctx.fillStyle = 'rgba(15, 23, 42, 0.75)';
-      ctx.fillRect(16, 16, 120, 26);
-      ctx.fillStyle = '#94a3b8';
-      ctx.textAlign = 'left';
-      ctx.textBaseline = 'middle';
-      ctx.fillText('LIVE WEBCAM', 26, 29);
-
-      const rightLabelX = Math.max(splitPx + 16, width - 180);
-      ctx.fillStyle = 'rgba(15, 23, 42, 0.75)';
-      ctx.fillRect(rightLabelX, 16, 160, 26);
-      ctx.fillStyle = '#38bdf8';
-      ctx.fillText('● AI TRANSFORMED', rightLabelX + 12, 29);
+      this.drawSplitHandle(ctx, splitPx, W, H);
     } else if (settings.viewMode === 'side-by-side') {
-      const halfW = width / 2;
-      // Left: Original
-      ctx.save();
-      ctx.beginPath();
-      ctx.rect(0, 0, halfW - 2, height);
-      ctx.clip();
-      this.drawSubjectFeed(ctx, halfW, height, timeSec, pose, metrics, false);
-      ctx.restore();
-
-      // Divider
+      // Each pane shows the full frame scaled to fit half the canvas (same scale for base + overlay).
+      const gap = 4;
+      const paneW = (W - gap) / 2;
+      const scale = Math.min(paneW / W, 1);
+      const pw = W * scale;
+      const ph = H * scale;
+      const py = (H - ph) / 2;
+      drawBase(0, py, pw, ph);
+      drawBase(paneW + gap, py, pw, ph);
+      drawOverlay(paneW + gap, py, pw, ph);
       ctx.fillStyle = '#1e293b';
-      ctx.fillRect(halfW - 2, 0, 4, height);
-
-      // Right: Transformed
-      ctx.save();
-      ctx.translate(halfW + 2, 0);
-      ctx.beginPath();
-      ctx.rect(0, 0, halfW - 2, height);
-      ctx.clip();
-      this.drawSubjectFeed(ctx, halfW - 2, height, timeSec, pose, metrics, true, settings);
-      ctx.restore();
+      ctx.fillRect(paneW, 0, gap, H);
+      this.drawLabel(ctx, 'LIVE CAMERA', 16, py + 16, '#94a3b8');
+      this.drawLabel(ctx, '● AI TRANSFORMED', paneW + gap + 16, py + 16, '#38bdf8');
+      this.paneTransform = { x: paneW + gap, y: py, scale };
     } else if (settings.viewMode === 'transformed-only') {
-      this.drawSubjectFeed(ctx, width, height, timeSec, pose, metrics, true, settings);
+      drawBase(0, 0, W, H);
+      drawOverlay(0, 0, W, H);
     } else if (settings.viewMode === 'pip') {
-      // Main: Transformed
-      this.drawSubjectFeed(ctx, width, height, timeSec, pose, metrics, true, settings);
-      // PiP bottom-right: Webcam
-      const pipW = width * 0.28;
-      const pipH = height * 0.28;
-      const pipX = width - pipW - 20;
-      const pipY = height - pipH - 20;
-
+      drawBase(0, 0, W, H);
+      drawOverlay(0, 0, W, H);
+      const pipW = W * 0.26;
+      const pipH = H * 0.26;
+      const pipX = W - pipW - 20;
+      const pipY = H - pipH - 56;
       ctx.save();
       ctx.shadowColor = 'rgba(0,0,0,0.6)';
       ctx.shadowBlur = 12;
       ctx.fillStyle = '#0f172a';
       ctx.fillRect(pipX - 2, pipY - 2, pipW + 4, pipH + 4);
+      ctx.shadowBlur = 0;
       ctx.strokeStyle = '#38bdf8';
       ctx.lineWidth = 2;
       ctx.strokeRect(pipX - 2, pipY - 2, pipW + 4, pipH + 4);
-      ctx.shadowBlur = 0;
-
-      ctx.translate(pipX, pipY);
-      this.drawSubjectFeed(ctx, pipW, pipH, timeSec, pose, metrics, false);
-      ctx.fillStyle = 'rgba(0,0,0,0.7)';
-      ctx.fillRect(8, 8, 90, 20);
-      ctx.fillStyle = '#94a3b8';
-      ctx.font = '10px Inter, sans-serif';
-      ctx.fillText('Original Cam', 12, 22);
-      ctx.restore();
-    }
-
-    // 3. Optional Overlay: 478 Landmark Wireframe
-    if (settings.showLandmarkOverlay) {
-      this.drawLandmarksMesh(ctx, width, height, pose, metrics);
-    }
-
-    // 4. Optional Overlay: 3D Head Orientation Axis Tripod
-    if (settings.showLandmarkOverlay) {
-      this.drawHeadPoseTripod(ctx, 40, height - 40, pose);
-    }
-
-    // 5. Mandatory Synthetic AI Watermark (Regulatory Safeguard)
-    if (settings.watermarkMandatory) {
-      this.drawMandatoryWatermark(ctx, width, height);
-    }
-  }
-
-  /**
-   * Draws the subject face (either raw webcam or transformed persona)
-   */
-  private drawSubjectFeed(
-    ctx: CanvasRenderingContext2D,
-    w: number,
-    h: number,
-    time: number,
-    pose: HeadPose,
-    metrics: FacialMetrics,
-    isTransformed: boolean,
-    settings?: TransformationSettings
-  ) {
-    const cx = w / 2 + (pose.yaw * w) / 250;
-    const cy = h / 2 + (pose.pitch * h) / 300;
-    const faceW = Math.min(w, h) * 0.44;
-    const faceH = faceW * 1.35;
-
-    // Background gradient studio environment
-    const bgGrad = ctx.createRadialGradient(cx, cy - 80, 50, cx, cy, Math.max(w, h) * 0.8);
-    if (isTransformed) {
-      bgGrad.addColorStop(0, '#1e293b');
-      bgGrad.addColorStop(1, '#090d16');
-    } else {
-      bgGrad.addColorStop(0, '#1e293b');
-      bgGrad.addColorStop(1, '#0a0f1d');
-    }
-    ctx.fillStyle = bgGrad;
-    ctx.fillRect(0, 0, w, h);
-
-    // If real video element is active and ready, draw video background
-    if (this.videoElement && this.videoElement.readyState >= 2) {
-      ctx.save();
-      // Mirror video horizontally
-      ctx.translate(w, 0);
-      ctx.scale(-1, 1);
-      ctx.drawImage(this.videoElement, 0, 0, w, h);
-      ctx.restore();
-    } else {
-      // Draw simulated camera subject
-      this.drawSimulatedSubjectBody(ctx, cx, cy, faceW, faceH, pose);
-    }
-
-    // If transformed and we have an authorized persona image
-    if (isTransformed && this.personaImage && this.personaImage.complete) {
-      ctx.save();
-      ctx.translate(cx, cy);
-      ctx.rotate((pose.roll * Math.PI) / 180);
-
-      const blend = settings ? settings.blendStrength / 100 : 0.9;
-
-      // Create smooth oval clipping mask for face region
       ctx.beginPath();
-      ctx.ellipse(0, 0, faceW * 0.52, faceH * 0.54, 0, 0, Math.PI * 2);
+      ctx.rect(pipX, pipY, pipW, pipH);
       ctx.clip();
-
-      // Draw persona image aligned to head center
-      ctx.globalAlpha = blend;
-      const imgAspect = this.personaImage.width / this.personaImage.height;
-      const drawH = faceH * 1.35;
-      const drawW = drawH * imgAspect;
-      ctx.drawImage(this.personaImage, -drawW / 2, -drawH * 0.48, drawW, drawH);
-
-      // Dynamically animate eyes over persona image
-      this.renderDynamicEyes(ctx, faceW, faceH, metrics, pose);
-
-      // Dynamically animate mouth & speaking over persona image
-      this.renderDynamicMouth(ctx, faceW, faceH, metrics);
-
+      drawBase(pipX, pipY, pipW, pipH);
       ctx.restore();
+      this.drawLabel(ctx, 'ORIGINAL', pipX + 8, pipY + 8, '#94a3b8');
+    }
+    if (settings.viewMode !== 'side-by-side') this.paneTransform = { x: 0, y: 0, scale: 1 };
 
-      // Soft boundary feathering to eliminate visible seams
-      ctx.save();
-      ctx.translate(cx, cy);
-      ctx.rotate((pose.roll * Math.PI) / 180);
-      const featherGrad = ctx.createRadialGradient(0, 0, faceW * 0.44, 0, 0, faceW * 0.58);
-      featherGrad.addColorStop(0, 'rgba(15, 23, 42, 0)');
-      featherGrad.addColorStop(1, 'rgba(15, 23, 42, 0.45)');
-      ctx.fillStyle = featherGrad;
-      ctx.beginPath();
-      ctx.ellipse(0, 0, faceW * 0.58, faceH * 0.58, 0, 0, Math.PI * 2);
-      ctx.fill();
-      ctx.restore();
-    } else if (isTransformed && (!this.personaImage || !this.personaImage.complete)) {
-      // Fallback preview when no persona image loaded yet
-      ctx.save();
-      ctx.translate(cx, cy);
-      ctx.rotate((pose.roll * Math.PI) / 180);
-      this.renderProceduralTransformedFace(ctx, faceW, faceH, metrics, pose);
-      ctx.restore();
+    // --- 4. Overlays --------------------------------------------------------------------------
+    if (settings.showLandmarkOverlay && this.faceVisible) {
+      const t = this.paneTransform;
+      this.drawLandmarkMesh(ctx, t.x, t.y, t.scale);
+      this.drawHeadPoseTripod(ctx, 40, H - 40, pose);
+    }
+
+    if (settings.watermarkMandatory) this.drawMandatoryWatermark(ctx, W, H);
+
+    // --- 5. Telemetry ---------------------------------------------------------------------------
+    const avgLatency = this.latencyHistory.length
+      ? this.latencyHistory.reduce((a, b) => a + b, 0) / this.latencyHistory.length
+      : 0;
+    this.onMetricsUpdate?.(metrics, pose, Math.round(this.currentFps * 10) / 10, Math.round(avgLatency * 10) / 10);
+  }
+
+  // ---------------------------------------------------------------------------------------------
+  // Tracking helpers
+  // ---------------------------------------------------------------------------------------------
+
+  private ingestLandmarks(normalized: Float32Array, layout: SourceLayout, timestamp: number) {
+    const n = Math.min(LANDMARK_COUNT, normalized.length / 2);
+    for (let i = 0; i < n; i++) {
+      let x = layout.offsetX + normalized[i * 2] * layout.drawWidth;
+      const y = layout.offsetY + normalized[i * 2 + 1] * layout.drawHeight;
+      if (layout.mirror) x = this.canvas.width - x;
+      this.smoothed[i * 2] = this.filters[i * 2].filter(x, timestamp);
+      this.smoothed[i * 2 + 1] = this.filters[i * 2 + 1].filter(y, timestamp);
     }
   }
 
-  /**
-   * Draws a realistic procedural subject avatar for testing when real webcam is not active
-   */
-  private drawSimulatedSubjectBody(
-    ctx: CanvasRenderingContext2D,
-    cx: number,
-    cy: number,
-    faceW: number,
-    faceH: number,
-    pose: HeadPose
-  ) {
-    ctx.save();
-    // Natural shoulders & shirt
-    ctx.fillStyle = '#0f172a';
-    ctx.beginPath();
-    ctx.moveTo(cx - faceW * 0.95, cy + faceH * 0.95);
-    ctx.quadraticCurveTo(cx - faceW * 0.45, cy + faceH * 0.42, cx - faceW * 0.22, cy + faceH * 0.38);
-    ctx.lineTo(cx + faceW * 0.22, cy + faceH * 0.38);
-    ctx.quadraticCurveTo(cx + faceW * 0.45, cy + faceH * 0.42, cx + faceW * 0.95, cy + faceH * 0.95);
-    ctx.lineTo(cx + faceW * 1.5, cy + faceH * 1.6);
-    ctx.lineTo(cx - faceW * 1.5, cy + faceH * 1.6);
-    ctx.fill();
-
-    // Collar
-    ctx.fillStyle = '#334155';
-    ctx.beginPath();
-    ctx.moveTo(cx - faceW * 0.22, cy + faceH * 0.38);
-    ctx.lineTo(cx, cy + faceH * 0.52);
-    ctx.lineTo(cx + faceW * 0.22, cy + faceH * 0.38);
-    ctx.lineTo(cx + faceW * 0.26, cy + faceH * 0.44);
-    ctx.lineTo(cx, cy + faceH * 0.58);
-    ctx.lineTo(cx - faceW * 0.26, cy + faceH * 0.44);
-    ctx.closePath();
-    ctx.fill();
-
-    // Neck with shadow gradient
-    const neckGrad = ctx.createLinearGradient(cx, cy + faceH * 0.25, cx, cy + faceH * 0.45);
-    neckGrad.addColorStop(0, '#cda287');
-    neckGrad.addColorStop(1, '#b5886d');
-    ctx.fillStyle = neckGrad;
-    ctx.beginPath();
-    ctx.roundRect(cx - faceW * 0.2, cy + faceH * 0.24, faceW * 0.4, faceH * 0.28, 6);
-    ctx.fill();
-
-    // Face oval
-    ctx.translate(cx, cy);
-    ctx.rotate((pose.roll * Math.PI) / 180);
-
-    const skinGrad = ctx.createRadialGradient(0, -faceH * 0.05, faceW * 0.1, 0, 0, faceW * 0.55);
-    skinGrad.addColorStop(0, '#f2d4c2');
-    skinGrad.addColorStop(0.7, '#e4beaa');
-    skinGrad.addColorStop(1, '#caa18b');
-    ctx.fillStyle = skinGrad;
-    ctx.beginPath();
-    ctx.ellipse(0, 0, faceW * 0.46, faceH * 0.5, 0, 0, Math.PI * 2);
-    ctx.fill();
-
-    // Hair
-    const hairGrad = ctx.createLinearGradient(0, -faceH * 0.6, 0, -faceH * 0.2);
-    hairGrad.addColorStop(0, '#1c1917');
-    hairGrad.addColorStop(1, '#292524');
-    ctx.fillStyle = hairGrad;
-    ctx.beginPath();
-    ctx.ellipse(0, -faceH * 0.38, faceW * 0.5, faceH * 0.26, 0, Math.PI * 0.9, Math.PI * 2.1);
-    ctx.fill();
-
-    // Eyebrows
-    ctx.strokeStyle = '#292524';
-    ctx.lineWidth = 3.5;
-    ctx.beginPath();
-    ctx.moveTo(-faceW * 0.28, -faceH * 0.16);
-    ctx.quadraticCurveTo(-faceW * 0.18, -faceH * 0.2, -faceW * 0.08, -faceH * 0.16);
-    ctx.moveTo(faceW * 0.08, -faceH * 0.16);
-    ctx.quadraticCurveTo(faceW * 0.18, -faceH * 0.2, faceW * 0.28, -faceH * 0.16);
-    ctx.stroke();
-
-    // Eyes with eyelids
-    const eyeSpacing = faceW * 0.18;
-    const eyeY = -faceH * 0.08;
-    ctx.fillStyle = '#ffffff';
-    ctx.beginPath();
-    ctx.ellipse(-eyeSpacing, eyeY, faceW * 0.09, faceH * 0.045, 0, 0, Math.PI * 2);
-    ctx.ellipse(eyeSpacing, eyeY, faceW * 0.09, faceH * 0.045, 0, 0, Math.PI * 2);
-    ctx.fill();
-
-    // Dark brown Irises
-    ctx.fillStyle = '#3e2723';
-    ctx.beginPath();
-    ctx.arc(-eyeSpacing, eyeY, faceW * 0.038, 0, Math.PI * 2);
-    ctx.arc(eyeSpacing, eyeY, faceW * 0.038, 0, Math.PI * 2);
-    ctx.fill();
-
-    // Pupils & reflections
-    ctx.fillStyle = '#0f172a';
-    ctx.beginPath();
-    ctx.arc(-eyeSpacing, eyeY, faceW * 0.018, 0, Math.PI * 2);
-    ctx.arc(eyeSpacing, eyeY, faceW * 0.018, 0, Math.PI * 2);
-    ctx.fill();
-    ctx.fillStyle = 'rgba(255,255,255,0.85)';
-    ctx.beginPath();
-    ctx.arc(-eyeSpacing - 1.5, eyeY - 1.5, 1.8, 0, Math.PI * 2);
-    ctx.arc(eyeSpacing - 1.5, eyeY - 1.5, 1.8, 0, Math.PI * 2);
-    ctx.fill();
-
-    // Nose
-    ctx.strokeStyle = '#b08369';
-    ctx.lineWidth = 2.2;
-    ctx.beginPath();
-    ctx.moveTo(0, -faceH * 0.04);
-    ctx.lineTo(faceW * 0.03, faceH * 0.11);
-    ctx.lineTo(-faceW * 0.03, faceH * 0.13);
-    ctx.stroke();
-
-    // Mouth
-    ctx.fillStyle = '#9f5055';
-    ctx.beginPath();
-    ctx.ellipse(0, faceH * 0.26, faceW * 0.14, faceH * 0.025, 0, 0, Math.PI * 2);
-    ctx.fill();
-
-    ctx.restore();
+  private resetFilters() {
+    for (const f of this.filters) f.reset();
   }
 
-  /**
-   * Renders dynamically articulated eyes with EAR blink and gaze vectors
-   */
-  private renderDynamicEyes(
-    ctx: CanvasRenderingContext2D,
-    faceW: number,
-    faceH: number,
-    metrics: FacialMetrics,
-    pose: HeadPose
-  ) {
-    const eyeY = -faceH * 0.08;
-    const eyeSpacing = faceW * 0.20;
-    const eyeWidth = faceW * 0.12;
-    const eyeMaxHeight = faceH * 0.06;
+  private resetTracking() {
+    this.resetFilters();
+    this.lastFace = null;
+    this.faceVisible = false;
+    this.framesSinceFace = 0;
+    this.neutralMouthWidth = null;
+    this.colorGain = [1, 1, 1];
+    if (this.status.faceDetected) this.patchStatus({ faceDetected: false });
+  }
 
-    // Only render synthetic eyelid when the user is actually blinking
-    if (metrics.isBlinking) {
-      // Left Eye Eyelid
-      ctx.save();
-      ctx.translate(-eyeSpacing, eyeY);
-      // Natural skin-tone closed eyelid
-      ctx.fillStyle = '#c59b7d';
-      ctx.beginPath();
-      ctx.ellipse(0, 1, eyeWidth * 0.78, eyeMaxHeight * 0.65, 0, 0, Math.PI * 2);
-      ctx.fill();
-
-      // Upper lash shadow
-      ctx.strokeStyle = '#2d1e18';
-      ctx.lineWidth = 2.2;
-      ctx.beginPath();
-      ctx.moveTo(-eyeWidth * 0.72, 1);
-      ctx.quadraticCurveTo(0, 3, eyeWidth * 0.72, 1);
-      ctx.stroke();
-      ctx.restore();
-
-      // Right Eye Eyelid
-      ctx.save();
-      ctx.translate(eyeSpacing, eyeY);
-      ctx.fillStyle = '#c59b7d';
-      ctx.beginPath();
-      ctx.ellipse(0, 1, eyeWidth * 0.78, eyeMaxHeight * 0.65, 0, 0, Math.PI * 2);
-      ctx.fill();
-
-      ctx.strokeStyle = '#2d1e18';
-      ctx.lineWidth = 2.2;
-      ctx.beginPath();
-      ctx.moveTo(-eyeWidth * 0.72, 1);
-      ctx.quadraticCurveTo(0, 3, eyeWidth * 0.72, 1);
-      ctx.stroke();
-      ctx.restore();
-    } else {
-      // Subtle dynamic eye specular highlights tracking gaze direction
-      const gazeOffsetX = metrics.gazeX * 3;
-      const gazeOffsetY = metrics.gazeY * 2;
-
-      ctx.save();
-      ctx.fillStyle = 'rgba(255, 255, 255, 0.4)';
-      ctx.beginPath();
-      ctx.arc(-eyeSpacing + gazeOffsetX, eyeY - 2 + gazeOffsetY, 1.8, 0, Math.PI * 2);
-      ctx.arc(eyeSpacing + gazeOffsetX, eyeY - 2 + gazeOffsetY, 1.8, 0, Math.PI * 2);
-      ctx.fill();
-      ctx.restore();
+  private computeMetrics(): { metrics: FacialMetrics; pose: HeadPose } {
+    const s = this.settings;
+    if (!this.faceVisible || !this.lastFace) {
+      return {
+        metrics: {
+          eyeAspectRatioLeft: 0,
+          eyeAspectRatioRight: 0,
+          mouthAspectRatio: 0,
+          mouthWidthRatio: 1,
+          eyebrowElevation: 0,
+          isBlinking: false,
+          isSmiling: false,
+          isSpeaking: false,
+          gazeX: 0,
+          gazeY: 0,
+        },
+        pose: { yaw: 0, pitch: 0, roll: 0 },
+      };
     }
-  }
-
-  /**
-   * Renders dynamically articulated mouth opening and speech visemes synchronized to MAR
-   */
-  private renderDynamicMouth(ctx: CanvasRenderingContext2D, faceW: number, faceH: number, metrics: FacialMetrics) {
-    const mouthY = faceH * 0.26;
-    const baseW = faceW * 0.17 * metrics.mouthWidthRatio;
-    const mouthH = faceH * 0.15 * (metrics.mouthAspectRatio / 0.5);
-
-    // Only render dynamic oral opening when user opens mouth to speak
-    if (metrics.mouthAspectRatio > 0.19) {
-      ctx.save();
-      ctx.translate(0, mouthY);
-
-      // Natural oral cavity
-      ctx.fillStyle = '#3b0d11';
-      ctx.beginPath();
-      ctx.ellipse(0, 0, baseW * 0.85, mouthH * 0.85, 0, 0, Math.PI * 2);
-      ctx.fill();
-
-      // Natural upper teeth row
-      ctx.fillStyle = '#f8fafc';
-      ctx.beginPath();
-      ctx.roundRect(-baseW * 0.5, -mouthH * 0.75, baseW * 1.0, mouthH * 0.45, 2);
-      ctx.fill();
-
-      // Lower teeth row if open wide
-      if (metrics.mouthAspectRatio > 0.4) {
-        ctx.fillStyle = '#f1f5f9';
-        ctx.beginPath();
-        ctx.roundRect(-baseW * 0.42, mouthH * 0.35, baseW * 0.84, mouthH * 0.35, 2);
-        ctx.fill();
-      }
-
-      // Soft natural lip border blending
-      ctx.strokeStyle = 'rgba(168, 50, 75, 0.7)';
-      ctx.lineWidth = 2.5;
-      ctx.beginPath();
-      ctx.ellipse(0, 0, baseW * 0.9, mouthH * 0.9, 0, 0, Math.PI * 2);
-      ctx.stroke();
-
-      ctx.restore();
-    }
-  }
-
-  private renderProceduralTransformedFace(
-    ctx: CanvasRenderingContext2D,
-    faceW: number,
-    faceH: number,
-    metrics: FacialMetrics,
-    pose: HeadPose
-  ) {
-    // Stylized high-tech neural face
-    ctx.fillStyle = '#38bdf8';
-    ctx.beginPath();
-    ctx.ellipse(0, 0, faceW * 0.48, faceH * 0.52, 0, 0, Math.PI * 2);
-    ctx.fill();
-
-    this.renderDynamicEyes(ctx, faceW, faceH, metrics, pose);
-    this.renderDynamicMouth(ctx, faceW, faceH, metrics);
-  }
-
-  /**
-   * Draws MediaPipe 478-landmark style wireframe mesh over the face
-   */
-  private drawLandmarksMesh(
-    ctx: CanvasRenderingContext2D,
-    w: number,
-    h: number,
-    pose: HeadPose,
-    metrics: FacialMetrics
-  ) {
-    const cx = w / 2 + (pose.yaw * w) / 250;
-    const cy = h / 2 + (pose.pitch * h) / 300;
-    const faceW = Math.min(w, h) * 0.44;
-    const faceH = faceW * 1.35;
-
-    ctx.save();
-    ctx.translate(cx, cy);
-    ctx.rotate((pose.roll * Math.PI) / 180);
-
-    ctx.strokeStyle = 'rgba(56, 189, 248, 0.4)';
-    ctx.lineWidth = 1;
-    ctx.fillStyle = '#38bdf8';
-
-    // Outer face contour
-    const points: Point2D[] = [];
-    const numPoints = 28;
-    for (let i = 0; i < numPoints; i++) {
-      const angle = (i / numPoints) * Math.PI * 2;
-      const rx = faceW * 0.48 * Math.cos(angle);
-      const ry = faceH * 0.52 * Math.sin(angle);
-      points.push({ x: rx, y: ry });
+    const k = computeKinematics(this.smoothed, this.neutralMouthWidth);
+    const bs = this.lastFace.blendshapes;
+    const mouthWidth = Math.hypot(
+      this.smoothed[LM.MOUTH.cornerLeft * 2] - this.smoothed[LM.MOUTH.cornerRight * 2],
+      this.smoothed[LM.MOUTH.cornerLeft * 2 + 1] - this.smoothed[LM.MOUTH.cornerRight * 2 + 1]
+    );
+    // Learn the neutral mouth width while the mouth is relaxed.
+    if (k.mar < 0.05 && (bs.mouthSmileLeft ?? 0) < 0.2) {
+      this.neutralMouthWidth = this.neutralMouthWidth === null ? mouthWidth : this.neutralMouthWidth * 0.98 + mouthWidth * 0.02;
     }
 
-    ctx.beginPath();
-    points.forEach((p, idx) => {
-      if (idx === 0) ctx.moveTo(p.x, p.y);
-      else ctx.lineTo(p.x, p.y);
-      ctx.fillRect(p.x - 1.5, p.y - 1.5, 3, 3);
+    const smileScore = ((bs.mouthSmileLeft ?? 0) + (bs.mouthSmileRight ?? 0)) / 2 + s.manualSmileBias * 0.6;
+    const blinkScore = ((bs.eyeBlinkLeft ?? 0) + (bs.eyeBlinkRight ?? 0)) / 2;
+    const speakingThreshold = 0.11 / Math.max(0.5, s.lipSyncSensitivity);
+    const mar = k.mar * s.expressionGain;
+
+    return {
+      metrics: {
+        eyeAspectRatioLeft: round3(k.earLeft),
+        eyeAspectRatioRight: round3(k.earRight),
+        mouthAspectRatio: round3(mar),
+        mouthWidthRatio: round3(k.mouthWidthRatio),
+        eyebrowElevation: round3(clamp(bs.browInnerUp ?? 0, 0, 1)),
+        isBlinking: blinkScore > 0.5 || (k.earLeft + k.earRight) / 2 < 0.16,
+        isSmiling: smileScore > 0.42,
+        isSpeaking: mar > speakingThreshold,
+        gazeX: round3(k.gazeX),
+        gazeY: round3(k.gazeY),
+      },
+      pose: { yaw: k.yaw, pitch: k.pitch, roll: k.roll },
+    };
+  }
+
+  // ---------------------------------------------------------------------------------------------
+  // Persona overlay
+  // ---------------------------------------------------------------------------------------------
+
+  private renderPersonaOverlay(layout: SourceLayout, source: CanvasImageSource, srcW: number, srcH: number) {
+    const s = this.settings;
+    this.warpPositions.set(this.smoothed);
+    if (s.manualSmileBias) {
+      const k = computeKinematics(this.smoothed, null);
+      applySmileBias(this.warpPositions, s.manualSmileBias, k.faceWidth);
+    }
+
+    if (s.lightingAdaptation && this.frameIndex % 6 === 0) {
+      this.updateLightingGain(layout, source, srcW, srcH);
+    }
+
+    const strength = clamp(s.blendStrength / 100, 0, 1);
+    this.warp.render({
+      positions: this.warpPositions,
+      opacity: Math.pow(strength, 0.6),
+      colorGain: this.colorGain,
+      drawPersonaEyes: !s.eyeGazeSync,
     });
-    ctx.closePath();
-    ctx.stroke();
+  }
 
-    // Eye contours wireframe
-    ctx.strokeStyle = 'rgba(74, 222, 128, 0.7)';
-    ctx.strokeRect(-faceW * 0.28, -faceH * 0.12, faceW * 0.2, faceH * 0.08);
-    ctx.strokeRect(faceW * 0.08, -faceH * 0.12, faceW * 0.2, faceH * 0.08);
-
-    // Mouth wireframe
-    ctx.strokeStyle = 'rgba(244, 63, 94, 0.7)';
-    ctx.strokeRect(-faceW * 0.18, faceH * 0.2, faceW * 0.36, faceH * 0.12);
-
-    ctx.restore();
+  /** Estimates the wearer's facial skin tone and derives a per-channel gain towards it. */
+  private updateLightingGain(layout: SourceLayout, source: CanvasImageSource, srcW: number, srcH: number) {
+    // Convert canvas-space landmarks back to source-space for sampling.
+    const n = 468;
+    const srcPts = new Float32Array(n * 2);
+    for (let i = 0; i < n; i++) {
+      let x = this.smoothed[i * 2];
+      if (layout.mirror) x = this.canvas.width - x;
+      srcPts[i * 2] = ((x - layout.offsetX) / layout.drawWidth) * srcW;
+      srcPts[i * 2 + 1] = ((this.smoothed[i * 2 + 1] - layout.offsetY) / layout.drawHeight) * srcH;
+    }
+    const userMean = this.sampleMeanColor(source, srcPts, srcW, srcH, true);
+    // Match overall brightness fully but only partially match colour cast, so the persona keeps
+    // its own skin tone while sitting naturally in the wearer's lighting.
+    const lum = (c: [number, number, number]) => 0.2126 * c[0] + 0.7152 * c[1] + 0.0722 * c[2];
+    const lumRatio = clamp(Math.pow((lum(userMean) + 6) / (lum(this.personaMean) + 6), 0.75), 0.6, 1.5);
+    const target: [number, number, number] = [1, 1, 1];
+    for (let c = 0; c < 3; c++) {
+      const chroma = (userMean[c] + 6) / (lum(userMean) + 6) / ((this.personaMean[c] + 6) / (lum(this.personaMean) + 6));
+      target[c] = clamp(lumRatio * Math.pow(chroma, 0.5), 0.55, 1.7);
+    }
+    for (let c = 0; c < 3; c++) this.colorGain[c] = this.colorGain[c] * 0.85 + target[c] * 0.15;
   }
 
   /**
-   * 3D Head Orientation tripod indicator (Red X, Green Y, Blue Z)
+   * Mean RGB of the central face region (cheeks/nose/forehead) of `image`, where `points` are
+   * landmark pixel positions inside that image.
    */
+  private sampleMeanColor(
+    image: CanvasImageSource,
+    points: Float32Array,
+    imageWidth: number,
+    imageHeight: number,
+    alreadyPixelSpace: boolean
+  ): [number, number, number] {
+    const pts = alreadyPixelSpace ? points : scalePoints(points, imageWidth, imageHeight);
+    const b = pointBounds(pts.subarray(0, 468 * 2));
+    const size = 24;
+    const sctx = this.samplerCtx;
+    try {
+      sctx.clearRect(0, 0, size, size);
+      sctx.drawImage(image, b.minX, b.minY, Math.max(1, b.width), Math.max(1, b.height), 0, 0, size, size);
+      const data = sctx.getImageData(0, 0, size, size).data;
+      let r = 0;
+      let g = 0;
+      let bl = 0;
+      let count = 0;
+      const cx = size / 2;
+      const cy = size * 0.52;
+      for (let y = 0; y < size; y++) {
+        for (let x = 0; x < size; x++) {
+          // Inner ellipse only: skips hair, background and the mesh border.
+          const dx = (x + 0.5 - cx) / (size * 0.28);
+          const dy = (y + 0.5 - cy) / (size * 0.36);
+          if (dx * dx + dy * dy > 1) continue;
+          const i = (y * size + x) * 4;
+          r += data[i];
+          g += data[i + 1];
+          bl += data[i + 2];
+          count++;
+        }
+      }
+      if (!count) return [128, 128, 128];
+      return [r / count, g / count, bl / count];
+    } catch {
+      return [128, 128, 128];
+    }
+  }
+
+  // ---------------------------------------------------------------------------------------------
+  // Drawing helpers
+  // ---------------------------------------------------------------------------------------------
+
+  private drawSource(
+    ctx: CanvasRenderingContext2D,
+    source: CanvasImageSource,
+    layout: SourceLayout,
+    x: number,
+    y: number,
+    w: number,
+    h: number
+  ) {
+    const W = this.canvas.width;
+    const H = this.canvas.height;
+    const sx = w / W;
+    const sy = h / H;
+    ctx.save();
+    ctx.translate(x, y);
+    ctx.scale(sx, sy);
+    if (layout.mirror) {
+      ctx.translate(W, 0);
+      ctx.scale(-1, 1);
+    }
+    ctx.drawImage(source, layout.offsetX, layout.offsetY, layout.drawWidth, layout.drawHeight);
+    ctx.restore();
+  }
+
+  /** Shown when neither webcam nor demo subject is available. */
+  private drawStandby(ctx: CanvasRenderingContext2D, x: number, y: number, w: number, h: number) {
+    const grad = ctx.createRadialGradient(x + w / 2, y + h / 2, 20, x + w / 2, y + h / 2, Math.max(w, h) * 0.7);
+    grad.addColorStop(0, '#1e293b');
+    grad.addColorStop(1, '#090d16');
+    ctx.fillStyle = grad;
+    ctx.fillRect(x, y, w, h);
+    ctx.save();
+    ctx.strokeStyle = 'rgba(56,189,248,0.35)';
+    ctx.lineWidth = 2;
+    ctx.setLineDash([8, 8]);
+    ctx.beginPath();
+    ctx.ellipse(x + w / 2, y + h / 2, Math.min(w, h) * 0.2, Math.min(w, h) * 0.27, 0, 0, Math.PI * 2);
+    ctx.stroke();
+    ctx.restore();
+    ctx.fillStyle = 'rgba(148,163,184,0.9)';
+    ctx.font = `500 ${Math.round(Math.min(w, h) * 0.035)}px Inter, system-ui, sans-serif`;
+    ctx.textAlign = 'center';
+    ctx.textBaseline = 'middle';
+    ctx.fillText(this.demoFailed ? 'Demo subject unavailable — turn on your webcam' : 'Waiting for a video source…', x + w / 2, y + h * 0.82);
+  }
+
+  private drawSplitHandle(ctx: CanvasRenderingContext2D, splitPx: number, W: number, H: number) {
+    ctx.save();
+    ctx.strokeStyle = '#38bdf8';
+    ctx.lineWidth = 2.5;
+    ctx.beginPath();
+    ctx.moveTo(splitPx, 0);
+    ctx.lineTo(splitPx, H);
+    ctx.stroke();
+
+    ctx.fillStyle = '#0284c7';
+    ctx.shadowColor = 'rgba(0,0,0,0.5)';
+    ctx.shadowBlur = 8;
+    ctx.beginPath();
+    ctx.roundRect(splitPx - 14, H / 2 - 28, 28, 56, 14);
+    ctx.fill();
+    ctx.shadowBlur = 0;
+    ctx.strokeStyle = '#bae6fd';
+    ctx.lineWidth = 1.5;
+    ctx.stroke();
+
+    ctx.fillStyle = '#ffffff';
+    ctx.font = '12px sans-serif';
+    ctx.textAlign = 'center';
+    ctx.textBaseline = 'middle';
+    ctx.fillText('◀ ▶', splitPx, H / 2);
+    ctx.restore();
+
+    this.drawLabel(ctx, 'LIVE CAMERA', 16, 16, '#94a3b8');
+    this.drawLabel(ctx, '● AI TRANSFORMED', Math.max(splitPx + 16, W - 180), 16, '#38bdf8');
+  }
+
+  private drawLabel(ctx: CanvasRenderingContext2D, text: string, x: number, y: number, color: string) {
+    ctx.save();
+    ctx.font = 'bold 12px Inter, system-ui, sans-serif';
+    const w = ctx.measureText(text).width + 20;
+    ctx.fillStyle = 'rgba(15, 23, 42, 0.75)';
+    ctx.beginPath();
+    ctx.roundRect(x, y, w, 26, 6);
+    ctx.fill();
+    ctx.fillStyle = color;
+    ctx.textAlign = 'left';
+    ctx.textBaseline = 'middle';
+    ctx.fillText(text, x + 10, y + 13);
+    ctx.restore();
+  }
+
+  /** Draws the live 478-point tessellation (and iris rings) from the tracked landmarks. */
+  private drawLandmarkMesh(ctx: CanvasRenderingContext2D, offsetX: number, offsetY: number, scale: number) {
+    const p = this.smoothed;
+    ctx.save();
+    ctx.translate(offsetX, offsetY);
+    ctx.scale(scale, scale);
+    ctx.strokeStyle = 'rgba(56, 189, 248, 0.35)';
+    ctx.lineWidth = 0.8;
+    ctx.beginPath();
+    for (const { start, end } of FACE_TESSELLATION) {
+      ctx.moveTo(p[start * 2], p[start * 2 + 1]);
+      ctx.lineTo(p[end * 2], p[end * 2 + 1]);
+    }
+    ctx.stroke();
+
+    ctx.strokeStyle = 'rgba(74, 222, 128, 0.9)';
+    ctx.lineWidth = 1.5;
+    ctx.beginPath();
+    for (const { start, end } of [...FACE_LEFT_IRIS, ...FACE_RIGHT_IRIS]) {
+      ctx.moveTo(p[start * 2], p[start * 2 + 1]);
+      ctx.lineTo(p[end * 2], p[end * 2 + 1]);
+    }
+    ctx.stroke();
+
+    ctx.fillStyle = 'rgba(186, 230, 253, 0.9)';
+    for (let i = 0; i < 468; i++) ctx.fillRect(p[i * 2] - 0.75, p[i * 2 + 1] - 0.75, 1.5, 1.5);
+    ctx.restore();
+  }
+
   private drawHeadPoseTripod(ctx: CanvasRenderingContext2D, originX: number, originY: number, pose: HeadPose) {
     ctx.save();
     ctx.translate(originX, originY);
-
     const length = 24;
-    const yawRad = (pose.yaw * Math.PI) / 180;
-    const pitchRad = (pose.pitch * Math.PI) / 180;
     const rollRad = (pose.roll * Math.PI) / 180;
 
-    // Background badge
     ctx.fillStyle = 'rgba(15, 23, 42, 0.85)';
     ctx.strokeStyle = '#334155';
     ctx.lineWidth = 1;
@@ -709,7 +809,6 @@ export class RealtimeFacialEngine {
     ctx.fill();
     ctx.stroke();
 
-    // X axis (Pitch) - Red
     ctx.strokeStyle = '#ef4444';
     ctx.lineWidth = 2.5;
     ctx.beginPath();
@@ -717,27 +816,23 @@ export class RealtimeFacialEngine {
     ctx.lineTo(Math.cos(rollRad) * length, Math.sin(rollRad) * length);
     ctx.stroke();
 
-    // Y axis (Yaw) - Green
     ctx.strokeStyle = '#22c55e';
     ctx.beginPath();
     ctx.moveTo(0, 0);
     ctx.lineTo(-Math.sin(rollRad) * length, Math.cos(rollRad) * length);
     ctx.stroke();
 
-    // Text labels
     ctx.fillStyle = '#94a3b8';
     ctx.font = '10px Inter, monospace, sans-serif';
     ctx.textAlign = 'left';
-    ctx.fillText(`Y: ${pose.yaw > 0 ? '+' : ''}${Number(pose.yaw).toFixed(1)}°`, 36, -12);
-    ctx.fillText(`P: ${pose.pitch > 0 ? '+' : ''}${Number(pose.pitch).toFixed(1)}°`, 36, 0);
-    ctx.fillText(`R: ${pose.roll > 0 ? '+' : ''}${Number(pose.roll).toFixed(1)}°`, 36, 12);
-
+    ctx.textBaseline = 'middle';
+    ctx.fillText(`Y: ${pose.yaw > 0 ? '+' : ''}${pose.yaw.toFixed(1)}°`, 36, -12);
+    ctx.fillText(`P: ${pose.pitch > 0 ? '+' : ''}${pose.pitch.toFixed(1)}°`, 36, 0);
+    ctx.fillText(`R: ${pose.roll > 0 ? '+' : ''}${pose.roll.toFixed(1)}°`, 36, 12);
     ctx.restore();
   }
 
-  /**
-   * Mandatory persistent AI-synthesized watermarking for ethical non-deceptive use
-   */
+  /** Mandatory persistent AI-synthesized watermark for ethical, non-deceptive use. */
   private drawMandatoryWatermark(ctx: CanvasRenderingContext2D, w: number, h: number) {
     ctx.save();
     const margin = 16;
@@ -754,7 +849,6 @@ export class RealtimeFacialEngine {
     ctx.fill();
     ctx.stroke();
 
-    // Glowing dot
     ctx.fillStyle = '#38bdf8';
     ctx.shadowColor = '#38bdf8';
     ctx.shadowBlur = 6;
@@ -763,18 +857,61 @@ export class RealtimeFacialEngine {
     ctx.fill();
     ctx.shadowBlur = 0;
 
-    // Text
     ctx.fillStyle = '#e2e8f0';
     ctx.font = 'bold 10px Inter, system-ui, sans-serif';
     ctx.textAlign = 'left';
     ctx.textBaseline = 'middle';
     ctx.fillText('AI-TRANSFORMED PERSONA', x + 26, y + 14);
 
-    // C2PA micro tag
     ctx.fillStyle = '#0284c7';
     ctx.font = '8px monospace';
     ctx.fillText('C2PA', x + badgeW - 30, y + 14);
-
     ctx.restore();
   }
+
+  // ---------------------------------------------------------------------------------------------
+  // Status
+  // ---------------------------------------------------------------------------------------------
+
+  private patchStatus(patch: Partial<EngineStatus>) {
+    this.status = { ...this.status, ...patch };
+    this.emitStatus();
+  }
+
+  private emitStatus(force = false) {
+    const json = JSON.stringify(this.status);
+    if (!force && json === this.lastStatusJson) return;
+    this.lastStatusJson = json;
+    this.onStatusUpdate?.(this.status);
+  }
+}
+
+// -----------------------------------------------------------------------------------------------
+// Module helpers
+// -----------------------------------------------------------------------------------------------
+
+function coverLayout(srcW: number, srcH: number, dstW: number, dstH: number, mirror: boolean): SourceLayout {
+  const scale = Math.max(dstW / srcW, dstH / srcH);
+  const drawWidth = srcW * scale;
+  const drawHeight = srcH * scale;
+  return {
+    offsetX: (dstW - drawWidth) / 2,
+    offsetY: (dstH - drawHeight) / 2,
+    drawWidth,
+    drawHeight,
+    mirror,
+  };
+}
+
+function scalePoints(points: Float32Array, w: number, h: number): Float32Array {
+  const out = new Float32Array(points.length);
+  for (let i = 0; i < points.length; i += 2) {
+    out[i] = points[i] * w;
+    out[i + 1] = points[i + 1] * h;
+  }
+  return out;
+}
+
+function round3(v: number) {
+  return Math.round(v * 1000) / 1000;
 }

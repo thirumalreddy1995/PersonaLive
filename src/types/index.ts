@@ -1,7 +1,16 @@
+/** Faces are grouped so a woman's face is only mapped onto a woman and a man's onto a man. */
+export type PersonaCategory = 'women' | 'men';
+
+export const CATEGORY_LABEL: Record<PersonaCategory, { one: string; plural: string }> = {
+  women: { one: 'Woman', plural: "Women's faces" },
+  men: { one: 'Man', plural: "Men's faces" },
+};
+
 export interface AuthorizedPersona {
   id: string;
   name: string;
   role: string;
+  category: PersonaCategory;
   imageUrl: string;
   createdAt: string;
   qualityScore: number; // 0 - 100
@@ -49,7 +58,20 @@ export interface TelemetryStats {
   cpuUsagePercent: number;
   vramMb: number;
   resolution: string;
-  inferenceEngine: 'ONNX DirectML (FP16)' | 'TensorRT (RTX Accel)' | 'CoreML Neural Engine' | 'CPU Safe-Fallback';
+  inferenceEngine: string;
+}
+
+/** Live state of the on-device tracking & rendering pipeline, surfaced to the UI. */
+export interface EngineStatus {
+  model: 'idle' | 'loading' | 'ready' | 'error';
+  modelProgress: number; // 0..1
+  modelMessage: string;
+  backend: 'GPU' | 'CPU' | '-';
+  renderer: 'webgl' | 'canvas2d';
+  source: 'none' | 'webcam' | 'demo';
+  faceDetected: boolean;
+  persona: 'none' | 'preparing' | 'ready' | 'no-face' | 'error';
+  personaMessage?: string;
 }
 
 export interface TransformationSettings {
@@ -88,5 +110,7 @@ export interface RecordedClip {
   personaUsed: string;
   sizeMb: number;
   c2paVerified: boolean;
+  /** Object URL of the recorded WebM blob (empty for sample entries). */
   downloadUrl: string;
+  mimeType?: string;
 }
