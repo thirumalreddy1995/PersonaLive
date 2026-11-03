@@ -1,0 +1,46 @@
+name: Build & Release PersonaLive Desktop
+
+on:
+  push:
+    tags:
+      - 'v*' # Trigger build on version tags like v2.5.0
+    branches:
+      - main # Optional: can also build on main pushes
+
+permissions:
+  contents: write # Needed to publish GitHub Releases
+
+jobs:
+  build-and-release:
+    strategy:
+      matrix:
+        os: [windows-latest, macos-latest]
+    runs-on: ${{ matrix.os }}
+
+    steps:
+      - name: Checkout Source Code
+        uses: actions/checkout@v4
+
+      - name: Setup Node.js 20
+        uses: actions/setup-node@v4
+        with:
+          node-version: 20
+          cache: 'npm'
+
+      - name: Install Dependencies
+        run: npm ci
+
+      - name: Run Kinematics & Pure-Logic Unit Tests
+        run: npx tsx --test src/utils/faceMath.test.ts
+
+      - name: Build Web Application Bundle
+        run: npm run build
+
+      - name: Build & Publish Native Desktop Binary (electron-builder)
+        uses: samuelmeuli/action-electron-builder@v1
+        with:
+          # Automatically publish to GitHub Releases
+          github_token: ${{ secrets.GITHUB_TOKEN }}
+          release: true
+          # Flags for Windows (.exe) and macOS (.dmg)
+          args: --publish always

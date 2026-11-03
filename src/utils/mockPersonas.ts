@@ -1,0 +1,73 @@
+import { AuthorizedPersona } from '../types/index.ts';
+
+export const INITIAL_PERSONAS: AuthorizedPersona[] = [
+  {
+    id: 'persona-1',
+    name: 'Dr. Sarah Chen',
+    role: 'Keynote Speaker & AI Ethicist',
+    imageUrl: 'https://images.unsplash.com/photo-1573496359142-b8d87734a5a2?auto=format&fit=crop&w=600&q=80',
+    createdAt: '2026-10-12',
+    qualityScore: 96,
+    metrics: {
+      resolution: '1920 × 1440 px',
+      sharpness: 94,
+      lighting: 'Optimal',
+      orientation: 'Frontal',
+      obstruction: 'None',
+      singleFaceVerified: true,
+    },
+    consent: {
+      signerName: 'Sarah Chen, Ph.D.',
+      authorizedUsage: 'Commercial Streaming & Virtual Presentation',
+      timestamp: '2026-10-12T14:30:00Z',
+      signatureHash: 'C2PA-SEC-9F82B3A1-20261012',
+      verified: true,
+    },
+  },
+  {
+    id: 'persona-2',
+    name: 'Marcus Vance',
+    role: 'Executive News Anchor',
+    imageUrl: 'https://images.unsplash.com/photo-1500648767791-00dcc994a43e?auto=format&fit=crop&w=600&q=80',
+    createdAt: '2026-10-18',
+    qualityScore: 92,
+    metrics: {
+      resolution: '2048 × 1536 px',
+      sharpness: 91,
+      lighting: 'Optimal',
+      orientation: 'Frontal',
+      obstruction: 'None',
+      singleFaceVerified: true,
+    },
+    consent: {
+      signerName: 'Marcus T. Vance',
+      authorizedUsage: 'Broadcast Media & Live Interview Appearance',
+      timestamp: '2026-10-18T09:15:00Z',
+      signatureHash: 'C2PA-SEC-A470E1C9-20261018',
+      verified: true,
+    },
+  },
+  {
+    id: 'persona-3',
+    name: 'Elena Rostova',
+    role: 'Global Spokesperson',
+    imageUrl: 'https://images.unsplash.com/photo-1580489944761-15a19d654956?auto=format&fit=crop&w=600&q=80',
+    createdAt: '2026-10-24',
+    qualityScore: 94,
+    metrics: {
+      resolution: '1920 × 1280 px',
+      sharpness: 93,
+      lighting: 'Optimal',
+      orientation: 'Frontal',
+      obstruction: 'None',
+      singleFaceVerified: true,
+    },
+    consent: {
+      signerName: 'Elena Rostova',
+      authorizedUsage: 'Corporate Video Training & Keynotes',
+      timestamp: '2026-10-24T16:45:00Z',
+      signatureHash: 'C2PA-SEC-B389D2F4-20261024',
+      verified: true,
+    },
+  },
+];
