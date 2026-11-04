@@ -34,7 +34,7 @@ self.addEventListener('activate', (event) => {
 });
 
 // Fetch: Network-first for HTML / code bundles (so updates are seen immediately),
-// with fallback to cache for offline desktop use
+// with fallback to cache for offline desktop use.
 self.addEventListener('fetch', (event) => {
   // Only handle GET requests
   if (event.request.method !== 'GET') return;
@@ -47,21 +47,32 @@ self.addEventListener('fetch', (event) => {
   event.respondWith(
     fetch(event.request)
       .then((networkResponse) => {
-        // Clone and store valid responses in cache
+        // Store valid same-origin responses. The write is tied to the event so the browser
+        // does not terminate the worker before it completes.
         if (networkResponse && networkResponse.status === 200 && networkResponse.type === 'basic') {
           const responseToCache = networkResponse.clone();
-          caches.open(CACHE_NAME).then((cache) => {
-            cache.put(event.request, responseToCache);
-          });
+          event.waitUntil(caches.open(CACHE_NAME).then((cache) => cache.put(event.request, responseToCache)));
         }
         return networkResponse;
       })
-      .catch(() => {
-        // If network fails (offline), serve from cache
-        return caches.match(event.request);
-      })
+      .catch(() => serveFromCache(event.request))
   );
 });
+
+/**
+ * Offline path. Serves the cached response when there is one; otherwise falls back to the cached
+ * app shell for page navigations (the SPA renders every route from index.html). Returning an
+ * actual Response instead of `undefined` keeps respondWith() from throwing.
+ */
+async function serveFromCache(request) {
+  const cached = await caches.match(request);
+  if (cached) return cached;
+  if (request.mode === 'navigate') {
+    const shell = await caches.match(BASE + 'index.html');
+    if (shell) return shell;
+  }
+  return new Response('Offline and not cached', { status: 504, statusText: 'Gateway Timeout' });
+}
 
 // Listen for skip waiting messages from the UI
 self.addEventListener('message', (event) => {
