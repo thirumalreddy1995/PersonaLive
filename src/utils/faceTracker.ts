@@ -95,9 +95,12 @@ async function fetchModel(url: string, onProgress: (p: number) => void): Promise
 export class FaceTracker {
   private videoLandmarker: FaceLandmarker | null = null;
   private imageLandmarker: FaceLandmarker | null = null;
+  /** In-flight IMAGE landmarker creation, memoised so concurrent callers share one instance. */
+  private imageLandmarkerPromise: Promise<FaceLandmarker> | null = null;
   private wasmFileset: Awaited<ReturnType<typeof FilesetResolver.forVisionTasks>> | null = null;
   private modelBuffer: Uint8Array | null = null;
   private lastVideoTimestamp = -1;
+  private disposed = false;
   public backend: TrackerBackend = 'GPU';
   public ready = false;
 
@@ -105,6 +108,7 @@ export class FaceTracker {
 
   async load(onProgress: (p: TrackerLoadProgress) => void): Promise<void> {
     if (this.ready) return;
+    this.disposed = false;
     onProgress({ phase: 'runtime', progress: 0.05, message: 'Starting face tracking runtime…' });
     this.wasmFileset = await FilesetResolver.forVisionTasks(WASM_BASE_PATH);
 
@@ -114,16 +118,23 @@ export class FaceTracker {
     );
 
     onProgress({ phase: 'warmup', progress: 0.85, message: 'Initialising neural landmark tracker…' });
-    this.videoLandmarker = await this.createLandmarker('VIDEO');
+    const landmarker = await this.createLandmarker('VIDEO');
+    if (this.disposed) {
+      landmarker.close();
+      return;
+    }
+    this.videoLandmarker = landmarker;
     this.ready = true;
     onProgress({ phase: 'ready', progress: 1, message: 'Face tracking ready' });
   }
 
   private async createLandmarker(runningMode: 'VIDEO' | 'IMAGE'): Promise<FaceLandmarker> {
-    if (!this.wasmFileset || !this.modelBuffer) throw new Error('Tracker runtime not loaded');
+    const fileset = this.wasmFileset;
+    const modelBuffer = this.modelBuffer;
+    if (!fileset || !modelBuffer) throw new Error('Tracker runtime not loaded');
     const make = (delegate: TrackerBackend) =>
-      FaceLandmarker.createFromOptions(this.wasmFileset!, {
-        baseOptions: { modelAssetBuffer: this.modelBuffer!, delegate },
+      FaceLandmarker.createFromOptions(fileset, {
+        baseOptions: { modelAssetBuffer: modelBuffer, delegate },
         runningMode,
         numFaces: 1,
         outputFaceBlendshapes: true,
@@ -133,8 +144,7 @@ export class FaceTracker {
         minTrackingConfidence: 0.5,
       });
     try {
-      const lm = await make(this.backend);
-      return lm;
+      return await make(this.backend);
     } catch (err) {
       if (this.backend === 'GPU') {
         console.warn('GPU delegate unavailable, falling back to CPU face tracking.', err);
@@ -143,6 +153,27 @@ export class FaceTracker {
       }
       throw err;
     }
+  }
+
+  /** Returns the IMAGE-mode landmarker, creating it at most once even under concurrent calls. */
+  private getImageLandmarker(): Promise<FaceLandmarker> {
+    if (this.imageLandmarker) return Promise.resolve(this.imageLandmarker);
+    if (!this.imageLandmarkerPromise) {
+      this.imageLandmarkerPromise = this.createLandmarker('IMAGE')
+        .then((landmarker) => {
+          if (this.disposed) {
+            landmarker.close();
+            throw new Error('Tracker was disposed while the image landmarker was being created');
+          }
+          this.imageLandmarker = landmarker;
+          return landmarker;
+        })
+        .catch((err: unknown) => {
+          this.imageLandmarkerPromise = null;
+          throw err;
+        });
+    }
+    return this.imageLandmarkerPromise;
   }
 
   /** Runs tracking on a live frame. Returns null when no face is present. */
@@ -157,8 +188,8 @@ export class FaceTracker {
 
   /** Runs single-image detection (used to analyse persona reference portraits). */
   async detectImage(image: HTMLImageElement | HTMLCanvasElement): Promise<{ faces: TrackedFace[] }> {
-    if (!this.imageLandmarker) this.imageLandmarker = await this.createLandmarker('IMAGE');
-    const result = this.imageLandmarker.detect(image);
+    const landmarker = await this.getImageLandmarker();
+    const result = landmarker.detect(image);
     const faces: TrackedFace[] = [];
     for (let i = 0; i < result.faceLandmarks.length; i++) {
       const face = toTrackedFace(result, i);
@@ -168,10 +199,12 @@ export class FaceTracker {
   }
 
   dispose() {
+    this.disposed = true;
     this.videoLandmarker?.close();
     this.imageLandmarker?.close();
     this.videoLandmarker = null;
     this.imageLandmarker = null;
+    this.imageLandmarkerPromise = null;
     this.ready = false;
   }
 }
