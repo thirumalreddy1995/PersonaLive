@@ -1,0 +1,22 @@
+# Deep Neural Face Reenactment & Identity Transfer Pipeline Dependencies
+# Python 3.10+ compatible
+
+# Core Deep Learning & Tensor Operations
+torch>=2.2.0
+torchvision>=0.17.0
+torchaudio>=2.2.0
+
+# Computer Vision & Landmark Tracking
+opencv-python>=4.9.0.80
+mediapipe>=0.10.14
+numpy>=1.26.0,<2.0.0
+scipy>=1.12.0
+Pillow>=10.2.0
+
+# Identity Conditioning & ArcFace Embeddings
+insightface>=0.7.3
+onnx>=1.16.0
+
+# ONNX Runtime (GPU execution provider with CPU fallback)
+onnxruntime-gpu>=1.17.0; sys_platform != "darwin"
+onnxruntime>=1.17.0; sys_platform == "darwin"
