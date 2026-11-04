@@ -103,6 +103,9 @@ export class RealtimeFacialEngine {
   // Lighting adaptation
   private samplerCanvas: HTMLCanvasElement;
   private samplerCtx: CanvasRenderingContext2D;
+  /** Transparent copy of the warp output; alpha-only boundary passes run here before compositing. */
+  private overlayLayer: HTMLCanvasElement;
+  private overlayCtx: CanvasRenderingContext2D;
   private colorGain: [number, number, number] = [1, 1, 1];
   private zoneLighting: FacialLightingZones = {
     forehead: [1, 1, 1],
@@ -170,6 +173,13 @@ export class RealtimeFacialEngine {
     this.samplerCanvas.width = 24;
     this.samplerCanvas.height = 24;
     this.samplerCtx = this.samplerCanvas.getContext('2d', { willReadFrequently: true })!;
+
+    this.overlayLayer = document.createElement('canvas');
+    this.overlayLayer.width = w;
+    this.overlayLayer.height = h;
+    const overlayContext = this.overlayLayer.getContext('2d');
+    if (!overlayContext) throw new Error('Could not get 2D context for the overlay layer');
+    this.overlayCtx = overlayContext;
 
     const params = smoothingToFilterParams(settings.temporalSmoothing);
     for (let i = 0; i < LANDMARK_COUNT * 2; i++) {
@@ -273,6 +283,8 @@ export class RealtimeFacialEngine {
       const [w, h] = resolveResolution(settings.outputResolution);
       this.canvas.width = w;
       this.canvas.height = h;
+      this.overlayLayer.width = w;
+      this.overlayLayer.height = h;
       this.warp.resize(w, h);
       this.resetTracking();
     }
@@ -462,10 +474,11 @@ export class RealtimeFacialEngine {
     const overlayReady = !!(kinematics && this.faceVisible && this.lastFace && this.warp.hasPersona && this.status.persona === 'ready');
     if (overlayReady && kinematics && src && layout) {
       this.renderPersonaOverlay(layout, src.source, src.width, src.height, kinematics);
+      this.composeOverlayLayer();
     }
     const drawOverlay = (x: number, y: number, w: number, h: number) => {
       if (!overlayReady) return;
-      ctx.drawImage(this.warp.canvas, 0, 0, W, H, x, y, w, h);
+      ctx.drawImage(this.overlayLayer, 0, 0, W, H, x, y, w, h);
       this.drawRealisticPostPass(ctx, x, y, w, h, metrics);
     };
 
@@ -714,6 +727,21 @@ export class RealtimeFacialEngine {
     });
   }
 
+  /**
+   * Copies the warp output onto the transparent overlay layer and runs the alpha-only boundary
+   * passes there. `destination-out` on this layer erases persona alpha so the driver's hairline
+   * shows through after compositing; on the opaque output canvas it would only darken pixels.
+   */
+  private composeOverlayLayer() {
+    const octx = this.overlayCtx;
+    const W = this.overlayLayer.width;
+    const H = this.overlayLayer.height;
+    octx.clearRect(0, 0, W, H);
+    octx.drawImage(this.warp.canvas, 0, 0, W, H);
+    CranialBoundaryBlender.harmonizeForeheadBoundary(octx, this.warpPositions);
+    CranialBoundaryBlender.softenHairlineEdges(octx, this.warpPositions);
+  }
+
   /** Estimates the wearer's facial skin tone across 5 spatial zones and derives lighting gains. */
   private updateLightingGain(layout: SourceLayout, source: CanvasImageSource, srcW: number, srcH: number) {
     const n = 468;
@@ -862,16 +890,9 @@ export class RealtimeFacialEngine {
     ctx.translate(x, y);
     ctx.scale(sx, sy);
 
-    // 1. Forehead & hairline cranial boundary harmonization (eliminates brow/temple seam lines)
-    CranialBoundaryBlender.harmonizeForeheadBoundary(ctx, pts, {
-      canvasWidth: this.canvas.width,
-      canvasHeight: this.canvas.height,
-      blendStrength: this.settings.blendStrength,
-      colorGain: this.colorGain,
-    });
-    CranialBoundaryBlender.softenHairlineEdges(ctx, pts);
+    // Forehead/hairline harmonization runs on the transparent overlay layer (composeOverlayLayer).
 
-    // 2. Anatomical Intra-Oral Dental & Depth Synthesis Engine
+    // 1. Anatomical Intra-Oral Dental & Depth Synthesis Engine
     const apertureMetrics = extractOralApertureMetrics(pts);
     if (apertureMetrics) {
       OralCavityRenderer.renderOralCavity(ctx, pts, {
