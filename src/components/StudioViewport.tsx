@@ -597,7 +597,7 @@ export const StudioViewport: React.FC<StudioViewportProps> = ({
               className="accent-sky-500 w-3.5 h-3.5 rounded"
             />
             <Video className="w-3.5 h-3.5 text-emerald-400" />
-            <span className="font-medium">Virtual Camera Output</span>
+            <span className="font-medium">Virtual Camera Badge</span>
           </label>
         </div>
       </div>

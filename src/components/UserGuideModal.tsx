@@ -184,7 +184,7 @@ export const UserGuideModal: React.FC<UserGuideModalProps> = ({
                     <span>Virtual Camera & Recording</span>
                   </div>
                   <p className="text-slate-400 leading-relaxed">
-                    Keep the <strong>"DirectShow / OBS VirtualCam Sink"</strong> checkbox checked to expose your transformed appearance as a system-wide webcam to Zoom, Teams, and OBS. Click <strong>"Record Stream"</strong> or <strong>"Snapshot"</strong> to save high-fidelity recordings with embedded C2PA provenance credentials.
+                    To use the output in Zoom, Teams, Meet or Discord, capture the studio window with OBS Studio and start its virtual camera; the <strong>"Virtual Camera Badge"</strong> checkbox only shows the on-air indicator in the title bar. Click <strong>"Record Stream"</strong> or <strong>"Snapshot"</strong> to save recordings with the AI-Transformed watermark.
                   </p>
                 </div>
               </div>

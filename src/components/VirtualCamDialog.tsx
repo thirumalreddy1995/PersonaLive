@@ -1,5 +1,7 @@
 import React from 'react';
-import { X, Video, ShieldAlert } from 'lucide-react';
+import { X, Video, ShieldAlert, ExternalLink } from 'lucide-react';
+
+const OBS_DOWNLOAD_URL = 'https://obsproject.com/';
 
 interface VirtualCamDialogProps {
   isOpen: boolean;
@@ -26,8 +28,8 @@ export const VirtualCamDialog: React.FC<VirtualCamDialogProps> = ({
               <Video className="w-4 h-4" />
             </div>
             <div>
-              <h2 className="font-semibold text-base text-slate-100">Virtual Camera Integration</h2>
-              <p className="text-xs text-slate-400">System-wide video feed routing (Zoom, Teams, OBS, Discord)</p>
+              <h2 className="font-semibold text-base text-slate-100">Virtual Camera via OBS</h2>
+              <p className="text-xs text-slate-400">Send the studio output to Zoom, Teams, Meet or Discord</p>
             </div>
           </div>
 
@@ -42,9 +44,10 @@ export const VirtualCamDialog: React.FC<VirtualCamDialogProps> = ({
         <div className="p-6 space-y-4 text-xs text-slate-300">
           <div className="p-3.5 rounded-xl bg-slate-950 border border-slate-800 flex items-center justify-between">
             <div className="space-y-0.5">
-              <span className="font-medium text-slate-200 text-sm">DirectShow / CoreMedia Virtual Sink</span>
+              <span className="font-medium text-slate-200 text-sm">Virtual camera status badge</span>
               <p className="text-slate-400 text-[11px]">
-                Exposes transformed frame buffer as an OS webcam device
+                Shows “Virtual Camera On” in the title and telemetry bars while you stream the studio through OBS.
+                PersonaLive does not install a camera driver of its own.
               </p>
             </div>
             <button
@@ -55,24 +58,39 @@ export const VirtualCamDialog: React.FC<VirtualCamDialogProps> = ({
                   : 'bg-slate-800 hover:bg-slate-700 text-slate-200'
               }`}
             >
-              {virtualCamActive ? 'Sink Active (Streaming)' : 'Activate Sink'}
+              {virtualCamActive ? 'Badge shown' : 'Show badge'}
             </button>
           </div>
 
           <div className="space-y-2">
-            <h4 className="font-semibold text-slate-200">How to use in third-party software:</h4>
+            <h4 className="font-semibold text-slate-200">How to use the output in a video call:</h4>
+            <p className="text-slate-400 leading-relaxed">
+              Browsers and Electron cannot register a system-wide webcam, so the studio window is captured with the free
+              OBS Studio virtual camera.
+            </p>
             <ol className="list-decimal list-inside space-y-2 text-slate-400 leading-relaxed bg-slate-950 p-4 rounded-xl border border-slate-800">
               <li>
-                <strong className="text-slate-200">Keep PersonaLive Desktop running</strong> in the background with AI Transformation enabled.
+                Install{' '}
+                <a
+                  href={OBS_DOWNLOAD_URL}
+                  target="_blank"
+                  rel="noreferrer"
+                  className="text-sky-400 hover:underline inline-flex items-center gap-1"
+                >
+                  OBS Studio <ExternalLink className="w-3 h-3" />
+                </a>{' '}
+                (Windows, macOS, Linux).
               </li>
               <li>
-                In <strong className="text-slate-200">Zoom, Microsoft Teams, or Discord</strong>, navigate to <span className="font-mono text-sky-400">Settings &gt; Video</span>.
+                <strong className="text-slate-200">Keep PersonaLive running</strong> with AI Transformation enabled and a persona selected.
               </li>
               <li>
-                In the Camera dropdown list, select <strong className="text-sky-300">"PersonaLive Virtual Camera"</strong> or <strong className="text-sky-300">"OBS Virtual Camera"</strong>.
+                In OBS add a <strong className="text-slate-200">Window Capture</strong> source for the PersonaLive window, then click{' '}
+                <strong className="text-slate-200">Start Virtual Camera</strong>.
               </li>
               <li>
-                The real-time transformed face with synchronized lip-sync and eye movement will automatically broadcast to call participants with mandatory synthetic disclosure badge.
+                In <strong className="text-slate-200">Zoom, Teams, Meet or Discord</strong> open <span className="font-mono text-sky-400">Settings &gt; Video</span> and
+                choose <strong className="text-sky-300">“OBS Virtual Camera”</strong>.
               </li>
             </ol>
           </div>
@@ -80,7 +98,7 @@ export const VirtualCamDialog: React.FC<VirtualCamDialogProps> = ({
           <div className="p-3 bg-amber-950/40 border border-amber-800/80 rounded-lg text-amber-300 flex items-start gap-2.5">
             <ShieldAlert className="w-4 h-4 shrink-0 mt-0.5" />
             <p className="text-[11px] leading-relaxed">
-              <strong>Mandatory Disclosure:</strong> Output streams contain the persistent AI-Transformed watermark. Any attempt to modify drivers to bypass identity verification or facilitate deceptive impersonation violates the application EULA.
+              <strong>Mandatory Disclosure:</strong> Every frame carries the persistent AI-Transformed watermark, so call participants can see the video is synthetic. Removing the watermark or using the output for deceptive impersonation violates the application EULA.
             </p>
           </div>
         </div>
