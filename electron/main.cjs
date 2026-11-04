@@ -12,6 +12,7 @@ const path = require('path');
 const fs = require('fs');
 const { pathToFileURL } = require('url');
 const { autoUpdater } = require('electron-updater');
+const { resolveDistFile } = require('./resolveDistFile.cjs');
 
 const APP_SCHEME = 'app';
 const APP_HOST = 'personalive';
@@ -36,11 +37,14 @@ let mainWindow = null;
 
 function registerAppProtocol() {
   protocol.handle(APP_SCHEME, (request) => {
-    const url = new URL(request.url);
-    let pathname = decodeURIComponent(url.pathname);
-    if (pathname === '/' || pathname === '') pathname = '/index.html';
-    let file = path.normalize(path.join(DIST_DIR, pathname));
-    if (!file.startsWith(DIST_DIR)) return new Response('Forbidden', { status: 403 });
+    let pathname;
+    try {
+      pathname = decodeURIComponent(new URL(request.url).pathname);
+    } catch {
+      return new Response('Bad Request', { status: 400 });
+    }
+    let file = resolveDistFile(DIST_DIR, pathname);
+    if (!file) return new Response('Forbidden', { status: 403 });
     // SPA fallback for unknown routes.
     if (!fs.existsSync(file) || fs.statSync(file).isDirectory()) file = path.join(DIST_DIR, 'index.html');
     return net.fetch(pathToFileURL(file).toString());
@@ -93,24 +97,43 @@ function createWindow() {
 
   mainWindow.once('ready-to-show', () => {
     mainWindow.show();
-    if (app.isPackaged) autoUpdater.checkForUpdatesAndNotify();
+    if (app.isPackaged) {
+      // Rejects when offline or when no release exists yet; that is routine, not fatal.
+      autoUpdater.checkForUpdatesAndNotify().catch((err) => {
+        console.warn('[updater] Update check failed:', err instanceof Error ? err.message : err);
+      });
+    }
   });
 }
 
-// Auto-updater events → renderer
-autoUpdater.on('checking-for-update', () => mainWindow?.webContents.send('updater-status', { status: 'checking' }));
-autoUpdater.on('update-available', (info) =>
-  mainWindow?.webContents.send('updater-status', { status: 'available', version: info.version })
-);
-autoUpdater.on('update-not-available', () => mainWindow?.webContents.send('updater-status', { status: 'up-to-date' }));
-autoUpdater.on('download-progress', (p) =>
-  mainWindow?.webContents.send('updater-progress', { percent: p.percent, transferred: p.transferred, total: p.total })
-);
-autoUpdater.on('update-downloaded', (info) =>
-  mainWindow?.webContents.send('updater-status', { status: 'ready-to-install', version: info.version })
-);
+/** Sends an updater event to the renderer if the window is still alive. */
+function sendToRenderer(channel, payload) {
+  if (mainWindow && !mainWindow.isDestroyed()) mainWindow.webContents.send(channel, payload);
+}
 
-ipcMain.handle('check-for-updates', async () => (app.isPackaged ? autoUpdater.checkForUpdates() : { status: 'dev-mode' }));
+// Auto-updater events → renderer
+autoUpdater.on('checking-for-update', () => sendToRenderer('updater-status', { status: 'checking' }));
+autoUpdater.on('update-available', (info) => sendToRenderer('updater-status', { status: 'available', version: info.version }));
+autoUpdater.on('update-not-available', () => sendToRenderer('updater-status', { status: 'up-to-date' }));
+autoUpdater.on('download-progress', (p) =>
+  sendToRenderer('updater-progress', { percent: p.percent, transferred: p.transferred, total: p.total })
+);
+autoUpdater.on('update-downloaded', (info) => sendToRenderer('updater-status', { status: 'ready-to-install', version: info.version }));
+autoUpdater.on('error', (err) => {
+  console.warn('[updater]', err instanceof Error ? err.message : err);
+  sendToRenderer('updater-status', { status: 'error', message: err instanceof Error ? err.message : String(err) });
+});
+
+// IPC results must be structured-cloneable, so only plain data crosses the bridge.
+ipcMain.handle('check-for-updates', async () => {
+  if (!app.isPackaged) return { status: 'dev-mode' };
+  try {
+    const result = await autoUpdater.checkForUpdates();
+    return { status: 'checked', version: result?.updateInfo?.version ?? null };
+  } catch (err) {
+    return { status: 'error', message: err instanceof Error ? err.message : String(err) };
+  }
+});
 ipcMain.handle('quit-and-install-update', () => autoUpdater.quitAndInstall());
 
 app.whenReady().then(() => {
