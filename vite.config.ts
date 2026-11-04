@@ -6,6 +6,9 @@ import { defineConfig, type Plugin } from 'vite';
 
 const projectRoot = import.meta.dirname ?? process.cwd();
 
+/** package.json is the single source of truth for the user-visible app version. */
+const APP_VERSION = (JSON.parse(fs.readFileSync(path.resolve(projectRoot, 'package.json'), 'utf8')) as { version: string }).version;
+
 /** Public base path. GitHub Pages serves the app at /<repo>/, so the deploy workflow sets VITE_BASE=/PersonaLive/. */
 const BASE_PATH = process.env.VITE_BASE || '/';
 const BUILD_ID = process.env.GITHUB_SHA?.slice(0, 12) || new Date().toISOString().replace(/[-:.TZ]/g, '').slice(0, 14);
@@ -67,7 +70,7 @@ function stampServiceWorker(): Plugin {
 export default defineConfig(() => {
   return {
     base: BASE_PATH,
-    define: { __PL_BUILD_ID__: JSON.stringify(BUILD_ID) },
+    define: { __PL_BUILD_ID__: JSON.stringify(BUILD_ID), __PL_APP_VERSION__: JSON.stringify(APP_VERSION) },
     plugins: [react(), tailwindcss(), mediapipeWasm(), stampServiceWorker()],
     resolve: {
       alias: {

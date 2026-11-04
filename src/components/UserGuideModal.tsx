@@ -48,7 +48,7 @@ export const UserGuideModal: React.FC<UserGuideModalProps> = ({
               <h2 className="font-semibold text-base text-slate-100 flex items-center gap-2">
                 PersonaLive Studio: End-to-End User & Developer Guide
                 <span className="text-[10px] bg-sky-950 text-sky-400 font-mono px-2 py-0.5 rounded border border-sky-800">
-                  Desktop Edition v2.4
+                  Desktop Edition v{__PL_APP_VERSION__}
                 </span>
               </h2>
               <p className="text-xs text-slate-400">

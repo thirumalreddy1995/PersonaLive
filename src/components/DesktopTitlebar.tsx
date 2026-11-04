@@ -51,7 +51,7 @@ export const DesktopTitlebar: React.FC<DesktopTitlebarProps> = ({
           <span className="font-semibold text-sm tracking-tight text-slate-100 flex items-center gap-2">
             PersonaLive Desktop
             <span className="text-[10px] font-mono px-1.5 py-0.5 rounded bg-slate-800 text-slate-400 border border-slate-700">
-              v2.5.0 · {__PL_BUILD_ID__.slice(0, 7)}
+              v{__PL_APP_VERSION__} · {__PL_BUILD_ID__.slice(0, 7)}
             </span>
           </span>
         </div>

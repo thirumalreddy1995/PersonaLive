@@ -179,7 +179,7 @@ export const LoginPage: React.FC<LoginPageProps> = ({ onLogin }) => {
 
       {/* Footer */}
       <div className="text-center text-xs text-slate-600 max-w-md mx-auto">
-        PersonaLive Studio Desktop &bull; Version 2.4.1 &bull; Private & Secure
+        PersonaLive Studio Desktop &bull; Version {__PL_APP_VERSION__} &bull; Private & Secure
       </div>
     </div>
   );
