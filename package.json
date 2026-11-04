@@ -11,25 +11,21 @@
     "build": "vite build",
     "preview": "vite preview",
     "test": "npx tsx --test src/utils/faceMath.test.ts src/utils/faceMesh.test.ts src/utils/neuralPipelineAudit.test.ts src/utils/assetUrl.test.ts src/utils/imageStatistics.test.ts electron/resolveDistFile.test.cjs",
-    "clean": "rm -rf dist server.js",
+    "clean": "rm -rf dist",
     "lint": "tsc --noEmit",
     "desktop:run": "electron .",
     "desktop:dev": "node electron/dev.cjs",
     "desktop:build": "npm run build && electron-builder --publish never"
   },
   "dependencies": {
-    "@google/genai": "^2.4.0",
     "@mediapipe/tasks-vision": "^1.2.0",
-    "dotenv": "^17.2.3",
     "electron-updater": "^6.3.9",
-    "express": "^4.21.2",
     "lucide-react": "^0.546.0",
     "react": "^19.0.1",
     "react-dom": "^19.0.1"
   },
   "devDependencies": {
     "@tailwindcss/vite": "^4.3.3",
-    "@types/express": "^4.17.21",
     "@types/node": "^22.14.0",
     "@types/react": "^19.3.0",
     "@types/react-dom": "^19.3.0",
