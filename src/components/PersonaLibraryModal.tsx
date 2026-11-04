@@ -13,6 +13,10 @@ import {
 } from 'lucide-react';
 import { AuthorizedPersona, CATEGORY_LABEL, PersonaCategory } from '../types/index.ts';
 import { evaluateImageQuality, generateConsentHash, QualityAssessmentResult } from '../utils/faceMath.ts';
+import { publicAssetUrl } from '../utils/assetUrl.ts';
+
+/** Bundled sample portrait (lives in public/, so it must be resolved against the Vite base path). */
+const SAMPLE_PRESET_IMAGE = publicAssetUrl('assets/aistudio/WhatsApp_Image_2026-11-03_at_4.39.43_PM_bff2bf8c.jpeg');
 
 interface PersonaLibraryModalProps {
   isOpen: boolean;
@@ -366,7 +370,7 @@ export const PersonaLibraryModal: React.FC<PersonaLibraryModalProps> = ({
                     type="button"
                     onClick={() =>
                       handleSelectPreset(
-                        '/assets/aistudio/WhatsApp_Image_2026-11-03_at_4.39.43_PM_bff2bf8c.jpeg',
+                        SAMPLE_PRESET_IMAGE,
                         'Arshad',
                         'Verified Presenter',
                         'men'
@@ -374,10 +378,7 @@ export const PersonaLibraryModal: React.FC<PersonaLibraryModalProps> = ({
                     }
                     className="p-2 rounded bg-slate-950 border border-slate-800 hover:border-sky-500 text-left flex items-center gap-2"
                   >
-                    <img
-                      src="/assets/aistudio/WhatsApp_Image_2026-11-03_at_4.39.43_PM_bff2bf8c.jpeg"
-                      className="w-8 h-8 rounded object-cover"
-                    />
+                    <img src={SAMPLE_PRESET_IMAGE} alt="Arshad" className="w-8 h-8 rounded object-cover" />
                     <div className="text-[11px] truncate">
                       <p className="font-medium text-slate-200">Arshad</p>
                       <p className="text-slate-500">Presenter</p>
