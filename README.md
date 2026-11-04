@@ -56,9 +56,9 @@ Open http://localhost:3000, sign in with the demo credentials (`admin@personaliv
 ```bash
 npm test
 ```
-Runs the pure-logic suites: facial math (EAR, MAR, head pose, 1-Euro filter, quality scoring) and face-mesh topology (triangle extraction from the MediaPipe tessellation, eye/mouth holes, feather weights, kinematics, smile deformation).
+Runs the pure-logic suites with the Node test runner: facial math (EAR, MAR, head pose, 1-Euro filter, quality scoring), face-mesh topology (triangle extraction from the MediaPipe tessellation, eye/mouth holes, feather weights, kinematics, smile deformation), the neural pipeline audit (identity bank, cranial blending, oral aperture), photo statistics (luminance, contrast, sharpness), base-path asset resolution, and the Electron `app://` path containment check.
 
-Type-check with `npm run lint`.
+Type-check with `npm run lint` (TypeScript `strict` plus unused-code checks are enforced).
 
 ---
 
@@ -122,6 +122,8 @@ src/utils/faceMesh.ts          Pure mesh topology + kinematics helpers (unit-tes
 src/utils/meshWarpRenderer.ts  WebGL piecewise-affine warp (Canvas 2D fallback)
 src/utils/facialEngine.ts      Per-frame pipeline, compositing, overlays, status reporting
 src/utils/faceMath.ts          EAR / MAR / head pose / 1-Euro filter / quality scoring
+src/utils/imageStatistics.ts   Pixel statistics (luminance, contrast, sharpness) for the photo quality check
+src/utils/assetUrl.ts          Base-path-safe URLs for files in public/ (GitHub Pages sub-path)
 src/components/StudioViewport  Canvas, camera control, recording, guidance overlays
 src/components/InspectorPanel  Face picker and transformation controls
 electron/main.cjs              Desktop shell (app:// scheme, camera permission, auto-update)
