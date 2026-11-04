@@ -23,7 +23,8 @@
 | `npm run lint` | 0 errors, `strict` off | 0 errors with `strict`, `noUnusedLocals`, `noUnusedParameters`, `noFallthroughCasesInSwitch` |
 | `npm test` | 23 / 23 pass | 39 / 39 pass (5 new suites: asset URLs, image statistics, contrast scoring, Electron path containment) |
 | `npm run build` | OK, 1 chunk-size warning | OK, same warning (GAP-035 deferred) |
-| `npm audit` | cannot run (no lockfile) | runs; 29 advisories, all transitive through the Electron build toolchain (GAP-040) |
+| `npm audit` | cannot run (no lockfile) | runs; 15 moderate advisories (one `minimatch` advisory reachable only through electron-builder's own build-time tree, see GAP-040) |
+| Desktop packaging | not attempted | electron 45.2.2 + electron-builder 26.18.0: the NSIS installer (141 MB) and the unpacked build were produced with exit 0; the packaged app started, created its window, loaded the MediaPipe WASM runtime with a WebGL 2 context, and the updater check correctly reported that no GitHub release exists yet (camera capture needs an interactive session and was not exercised; the renderer also logs that service-worker registration is skipped on the app:// scheme, which is pre-existing and harmless because the files are local). |
 | `npm ci` | fails (no lockfile) | succeeds from the committed `package-lock.json` (validated in a clean directory) |
 | CI runtime | Node 20 (EOL) | Node 22 |
 | Python | `main_stream.py` raises `NameError` on import | all four modules compile; entry point imports |
@@ -34,9 +35,11 @@
 | --- | --- | --- | --- | --- | --- |
 | Critical | 1 | 1 | 0 | 0 | 0 |
 | High | 5 | 5 | 0 | 0 | 0 |
-| Medium | 24 | 17 | 2 | 0 | 5 |
-| Low | 11 | 7 | 2 | 0 | 2 |
-| **Total** | **41** | **30** | **4** | **0** | **7** |
+| Medium | 24 | 22 | 2 | 0 | 0 |
+| Low | 11 | 9 | 2 | 0 | 0 |
+| **Total** | **41** | **37** | **4** | **0** | **0** |
+
+The seven items originally marked *Needs Decision* (GAP-023, 024, 025, 026, 034, 037, 040) were decided on 2026-11-04 and applied in a second round of commits on the same branch.
 
 | Category | Count |
 | --- | --- |
@@ -201,30 +204,35 @@ Status legend: **Fixed** / **Deferred** (recommendation recorded, not applied) /
 - **Fix:** add `public/pwa-512x512.png` to `build.files`.
 - **Risk:** none.
 
-#### GAP-023 · Rendering correctness · Medium · **Needs Decision** [QUESTION]
-- **Where:** `src/utils/cranialBoundaryBlender.ts:95-161`, `src/utils/facialEngine.ts:142`
-- **Problem:** `harmonizeForeheadBoundary()` fills a band with `globalCompositeOperation = 'destination-out'` on the main output context, which was created with `{ alpha: false }`. On an opaque canvas “erasing” darkens pixels toward black rather than revealing the driver frame underneath; the band is also applied over the already-composited video, so it darkens the user's own forehead too. The `opts` argument (`blendStrength`, `colorGain`) is unused.
-- **Recommendation:** apply the feather on the warp layer (`MeshWarpRenderer.canvas`, which has alpha) before compositing, or drop the pass in favour of the shader's `cranialFalloff`. Visual tuning requires review on real footage, so not changed here.
+#### GAP-023 · Rendering correctness · Medium · **Fixed** (decided: apply recommendation)
+- **Where:** `src/utils/cranialBoundaryBlender.ts`, `src/utils/facialEngine.ts` (`composeOverlayLayer`)
+- **Problem:** `harmonizeForeheadBoundary()` filled a band with `globalCompositeOperation = 'destination-out'` on the main output context, which was created with `{ alpha: false }`. On an opaque canvas “erasing” darkens pixels toward black rather than revealing the driver frame underneath; the band was also applied over the already-composited video, so it darkened the user's own forehead too. The `opts` argument (`blendStrength`, `colorGain`) was unused.
+- **Fix:** the engine now copies the warp output onto a transparent overlay layer (`overlayLayer`, resized with the output canvas), runs `harmonizeForeheadBoundary()` and `softenHairlineEdges()` there (both erase persona alpha, so the driver's hairline shows through) and composites that layer. The unused options parameter was removed; `softenHairlineEdges()` also switched to `destination-out` so it thins the edge instead of painting a dark stroke.
+- **Risk:** one extra full-frame `drawImage` per frame; the hairline band now feathers instead of darkening (visual change, see behaviour table).
 
-#### GAP-024 · Security (authentication) · Medium · **Needs Decision**
-- **Where:** `src/components/LoginPage.tsx:9-10,25-34`, `src/components/AccountAuthModal.tsx:33-51`, `src/App.tsx:53-61`
-- **Problem:** Login pre-fills `admin@personalive.ai / admin123`, accepts any non-empty credentials, and persists `pl_auth=true` in `localStorage`; OTP verification accepts any 6-character input; a licence key is hard-coded. This is clearly a demo gate, but it reads like real authentication.
-- **Recommendation:** either label the screen as a demo and remove the pre-filled password, or replace it with real auth. Both change user-visible contracts, so left for product decision.
+#### GAP-024 · Security (authentication) · Medium · **Fixed** (decided: label as demo)
+- **Where:** `src/components/LoginPage.tsx`, `src/components/AccountAuthModal.tsx`
+- **Problem:** Login pre-filled `admin@personalive.ai / admin123`, accepted any non-empty credentials, and persists `pl_auth=true` in `localStorage`; OTP verification accepted any 6-character input; a licence key is hard-coded. This is clearly a demo gate, but it read like real authentication.
+- **Fix:** the pre-filled credentials and the on-screen password are gone; a “Demo sign-in” notice states that nothing is verified or sent and offers a one-click demo entry. The dead “Forgot password?” link was removed and the inputs got `autoComplete` hints. The OTP step now accepts only the demo code it displays (`749281`) and labels itself and the licence as demo. The `pl_auth` flag and the hard-coded licence value are unchanged.
+- **Risk:** none technically; users who relied on the pre-filled password must type any credentials or use the demo button.
 
-#### GAP-025 · Product claim / UX · Medium · **Needs Decision**
-- **Where:** `src/components/VirtualCamDialog.tsx:45-59`, `README.md` (“Using the output in video calls”)
-- **Problem:** The dialog claims a “DirectShow / CoreMedia Virtual Sink” that “exposes the transformed frame buffer as an OS webcam device”, but `virtualCameraActive` only toggles a boolean badge; README correctly says OBS Virtual Camera is required.
-- **Recommendation:** reword the dialog to the OBS workflow (as README) or implement a real virtual camera in the Electron shell. Copy/feature decision.
+#### GAP-025 · Product claim / UX · Medium · **Fixed** (decided: reword to the OBS workflow)
+- **Where:** `src/components/VirtualCamDialog.tsx`, `src/components/UserGuideModal.tsx`, `src/components/StudioViewport.tsx`
+- **Problem:** The dialog claimed a “DirectShow / CoreMedia Virtual Sink” that “exposes the transformed frame buffer as an OS webcam device”, but `virtualCameraActive` only toggles a boolean badge; README correctly says OBS Virtual Camera is required.
+- **Fix:** the dialog now describes the toggle as the “Virtual camera status badge” and walks through the documented route (install OBS Studio, Window Capture the studio, Start Virtual Camera, pick “OBS Virtual Camera” in the call app) with a link to OBS. The user-guide paragraph and the viewport checkbox label (“Virtual Camera Badge”) match. The `virtualCameraActive` settings key is unchanged.
+- **Risk:** copy only.
 
-#### GAP-026 · Repository hygiene / sensitive data · Medium · **Needs Decision**
-- **Where:** `.aistudio/artifacts/**/.tempmediaStorage/*` (20 screenshots/photos), `public/assets/aistudio/` (30 MB `.webm` live session, 0.8 MB `.mp4`, 5 unreferenced images)
-- **Problem:** Temporary tool media is committed; `public/` content is copied into every web build and Pages deploy (≈33 MB per deploy). The folder holds photos and a recorded session of a real person; the only consent record is the mock entry in `mockPersonas.ts`. The Python pipeline uses the same folder as its default `--ref_dir`.
-- **Recommendation:** add `.aistudio/**/.tempmediaStorage/` to `.gitignore` and remove it from history; move Python reference media out of `public/` (e.g. `references/`, Git LFS) and keep only the one photo the web app needs; confirm consent for the stored likeness. Deleting data is left to you.
+#### GAP-026 · Repository hygiene / sensitive data · Medium · **Fixed** (decided: apply recommendation)
+- **Where:** `.aistudio/artifacts/**/.tempmediaStorage/*` (18 screenshots/photos), `public/assets/aistudio/` (30 MB `.webm` live session, 0.8 MB `.mp4`, 5 unreferenced images), `main_stream.py`, `.gitignore`, `references/`
+- **Problem:** Temporary tool media was committed; `public/` content is copied into every web build and Pages deploy (≈33 MB per deploy). The folder held photos and a recorded session of a real person; the only consent record is the mock entry in `mockPersonas.ts`. The Python pipeline used the same folder as its default `--ref_dir`.
+- **Fix:** `public/assets/aistudio/` now contains only the default-persona photo the studio loads; the Python reference photos and driving video moved to `references/` (with a copy of that photo, so the identity-bank input set is unchanged) and `main_stream.py` defaults `--ref_dir` to `./references`. The unreferenced 30 MB `.webm` was removed from the tree. `.aistudio/**/.tempmediaStorage/` is untracked and ignored (local files left in place). `references/README.md` and the README layout note that the folder is not shipped and requires consent.
+- **Still open (your action):** (1) the files remain in git history; purging them needs a history rewrite of `main` (e.g. `git filter-repo --path .aistudio --path public/assets/aistudio/Live_Session_-_Arshad__1__79ab7df1.webm --invert-paths`) followed by a force-push, which every clone must then re-fetch; (2) consent for the person pictured in `references/` and in the default persona photo should be recorded somewhere other than the mock data.
 
-#### GAP-040 · Dependencies · Medium · **Needs Decision**
-- **Where:** `package.json` devDependencies `electron@^33.2.1`, `electron-builder@^25.1.8`
-- **Problem:** With the lockfile restored, `npm audit` reports 29 advisories (1 critical, 13 high, 15 moderate). Every one is transitive through the Electron build toolchain (`tar`, `minimatch`, `glob`, `extract-zip`, `app-builder-lib`, `@electron/rebuild`, …). None is part of the shipped web bundle or the Electron runtime; they affect the machine that builds installers.
-- **Recommendation:** upgrade `electron-builder` to 26.x and `electron` to the current major (45.x). Both are semver-major and change the installer toolchain and Chromium version, so they need a desktop build plus a smoke test of camera access, WebGL and auto-update, which could not be done in this pass.
+#### GAP-040 · Dependencies · Medium · **Fixed** (decided: upgrade as recommended)
+- **Where:** `package.json` devDependencies `electron`, `electron-builder`; dependency `electron-updater`
+- **Problem:** With the lockfile restored, `npm audit` reported 29 advisories (1 critical, 13 high, 15 moderate). Every one was transitive through the Electron build toolchain (`tar`, `minimatch`, `glob`, `extract-zip`, `app-builder-lib`, `@electron/rebuild`, …). None is part of the shipped web bundle or the Electron runtime; they affect the machine that builds installers.
+- **Fix:** `electron` 33.2.1 → 45.2.2, `electron-builder` 25.1.8 → 26.18.0, `electron-updater` 6.3.9 → 6.8.11; lockfile regenerated. No main-process code change was needed (`protocol.handle`, `net.fetch`, permission handlers and the updater API are unchanged). Desktop packaging on Windows: the NSIS installer (141 MB) and the unpacked build were produced with exit 0; the packaged app started, created its window, loaded the MediaPipe WASM runtime with a WebGL 2 context, and the updater check correctly reported that no GitHub release exists yet (camera capture needs an interactive session and was not exercised; the renderer also logs that service-worker registration is skipped on the app:// scheme, which is pre-existing and harmless because the files are local).
+- **Residual:** `npm audit` now reports 15 moderate advisories, all one advisory (`minimatch < 11.0.1`, glob-parts amplification DoS) reached only through electron-builder's own build-time dependency tree; npm offers no non-breaking fix and the only pattern input is the project's own `files` list. Re-run `npm audit` after the next electron-builder release. Not verified here: camera access and auto-update inside the packaged app on macOS (no macOS machine) and an end-to-end update from a published release.
 
 #### GAP-027 · Security · Medium · **Deferred**
 - **Where:** `index.html`, `electron/main.cjs`
@@ -260,10 +268,11 @@ Status legend: **Fixed** / **Deferred** (recommendation recorded, not applied) /
 - **Where:** `README.md` (Tests section lists 2 suites; 3 exist), `package.json` `test` script lists files explicitly.
 - **Fix:** README updated; new test files added to the script.
 
-#### GAP-034 · Dependencies · Low · **Needs Decision**
-- **Where:** `package.json`, `metadata.json`, `.env.example`
-- **Problem:** `express`, `dotenv`, `@google/genai`, `@types/express` are unused; `metadata.json` declares a server-side Gemini capability and `.env.example` has `GEMINI_API_KEY`, so they look like intentional AI-Studio scaffolding.
-- **Recommendation:** remove all four and the `GEMINI_API_KEY` line if no Gemini server is planned; the `clean` script's `server.js` reference goes with them.
+#### GAP-034 · Dependencies · Low · **Fixed** (decided: not required, GitHub deployment only)
+- **Where:** `package.json`, `package-lock.json`, `metadata.json`, `.env.example`
+- **Problem:** `express`, `dotenv`, `@google/genai`, `@types/express` were unused; `metadata.json` declared a server-side Gemini capability and `.env.example` had `GEMINI_API_KEY`.
+- **Fix:** all four packages removed and the lockfile regenerated (588 packages); the Gemini capability and `GEMINI_API_KEY` lines removed; the `clean` script no longer references `server.js`.
+- **Risk:** none (nothing imported them).
 
 #### GAP-035 · Performance · Low · **Deferred**
 - **Where:** build output
@@ -274,10 +283,11 @@ Status legend: **Fixed** / **Deferred** (recommendation recorded, not applied) /
 - **Problem:** No ESLint configuration although `eslint-disable-next-line react-hooks/exhaustive-deps` comments exist.
 - **Recommendation:** add `eslint` + `typescript-eslint` + `eslint-plugin-react-hooks` and a `lint:eslint` script.
 
-#### GAP-037 · Configuration · Low · **Needs Decision**
-- **Where:** `tsconfig.json` (`experimentalDecorators`, `useDefineForClassFields: false`, `allowJs`), `vite.config.ts:81` (`allowedHosts: true`)
+#### GAP-037 · Configuration · Low · **Fixed** (decided: remove what is unused, keep what is used)
+- **Where:** `tsconfig.json`, `vite.config.ts`
 - **Problem:** Scaffold leftovers. `useDefineForClassFields: false` changes class-field semantics vs. native ES2022 and no decorators are used. `allowedHosts: true` disables Vite's DNS-rebinding protection in dev (needed by AI Studio per the comment).
-- **Recommendation:** drop the three tsconfig flags; keep `allowedHosts` only when `DISABLE_HMR`/AI-Studio is detected.
+- **Fix:** `experimentalDecorators` and `useDefineForClassFields` removed: no decorators exist and no class relies on `[[Set]]` semantics (no inheritance or accessor shadowing), confirmed by lint, build and tests. `allowJs` **kept**: `tsc` uses it to parse `electron/*.cjs` and `public/sw.js` (verified with `--listFilesOnly`). `allowedHosts` is now relaxed only when `DISABLE_HMR=true` (the AI Studio proxy); the default host check applies everywhere else. Vite's default already allows `localhost` and IP addresses, so `npm run dev` over the LAN is unaffected.
+- **Risk:** none observed.
 
 #### GAP-038 · Correctness · Low · **Fixed**
 - **Where:** `src/utils/faceMath.ts:165`
@@ -298,7 +308,7 @@ Status legend: **Fixed** / **Deferred** (recommendation recorded, not applied) /
 3. **Medium (code):** GAP-006/007/022 Electron → GAP-008 tracker race → GAP-009/019/029 engine → GAP-010/011/012 React lifecycle → GAP-013 SW offline → GAP-016/030/031/039 strict TypeScript & dead code → GAP-017 version → GAP-018 duplicate filter → GAP-020/021 Python.
 4. **Medium (config):** GAP-014 dependencies → GAP-015 Node 22.
 5. **Low:** GAP-032 tests, GAP-033 docs.
-6. **Needs Decision:** GAP-023, 024, 025, 026, 034, 037, 040. **Deferred:** GAP-027, 028, 035, 036.
+6. **Round 2 (decided 2026-11-04, applied):** GAP-023, 024, 025, 026, 034, 037, 040. **Deferred:** GAP-027, 028, 035, 036.
 
 Each fix is one commit referencing its GAP id; `npm run lint`, `npm run build` and `npm test` were run before every commit. Nothing was blocked or reverted.
 
@@ -312,3 +322,9 @@ Each fix is one commit referencing its GAP id; `npm run lint`, `npm run build` a
 | GAP-017 | The login footer and user guide now show the real version (`2.5.0`) instead of the stale `2.4.x` strings. |
 | GAP-021 | Python diagnostics are emitted through `logging` (format `time LEVEL module: message`) instead of bare `print()`. |
 | GAP-039 | The decorative title-bar dots no longer show a pointer cursor or tooltips. |
+| GAP-023 | The forehead/hairline band of the persona now fades into the driver's own hairline instead of being darkened; the driver's forehead is no longer darkened in split view. |
+| GAP-024 | The sign-in page no longer pre-fills or displays `admin123`; a demo notice and one-click demo entry replace it. The OTP step accepts only the displayed demo code `749281`. |
+| GAP-025 | Virtual-camera dialog, user guide and viewport checkbox describe the OBS Studio workflow and call the toggle a status badge. |
+| GAP-026 | Web builds ship one persona photo instead of ≈33 MB of media; the Python pipeline reads `./references` by default. |
+| GAP-037 | `npm run dev` only accepts arbitrary `Host` headers when `DISABLE_HMR=true` (AI Studio). |
+| GAP-040 | Desktop builds use Electron 45 (newer Chromium) and electron-builder 26; the auto-updater and installer formats are unchanged. |
