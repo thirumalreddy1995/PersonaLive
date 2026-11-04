@@ -162,6 +162,9 @@ export interface QualityAssessmentResult {
   warnings: string[];
 }
 
+/** Luma standard deviation (0..255 scale) below which a photo is treated as flat/low-contrast. */
+const LOW_CONTRAST_STD_DEV = 18;
+
 export function evaluateImageQuality(
   width: number,
   height: number,
@@ -195,6 +198,13 @@ export function evaluateImageQuality(
   } else if (averageLuminance < 90 || averageLuminance > 190) {
     lightingCategory = 'Acceptable';
     score -= 8;
+  }
+
+  // 2b. Contrast: flat or hazy lighting loses the skin detail the warp relies on.
+  if (contrastStdDev < LOW_CONTRAST_STD_DEV) {
+    score -= 8;
+    warnings.push('Low contrast detected. Use directional lighting so facial contours are visible.');
+    if (lightingCategory === 'Optimal') lightingCategory = 'Acceptable';
   }
 
   // 3. Sharpness & Blur Heuristic
