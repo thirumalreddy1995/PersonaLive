@@ -128,4 +128,7 @@ src/components/StudioViewport  Canvas, camera control, recording, guidance overl
 src/components/InspectorPanel  Face picker and transformation controls
 electron/main.cjs              Desktop shell (app:// scheme, camera permission, auto-update)
 vite.config.ts                 Serves/copies the MediaPipe WASM runtime at /mediapipe/wasm
+main_stream.py, identity_bank.py, blender.py, mouth_render.py
+                               Python research pipeline (OpenCV/MediaPipe); not part of the web build
+references/                    Reference photos / driving video for the Python pipeline (not shipped)
 ```

@@ -6,9 +6,9 @@ queries MultiViewIdentityBank for optimal reference angle, warps identity geomet
 synthesizes oral interior and dental structures, and blends seamlessly across the hairline.
 
 Usage:
-  python main_stream.py --ref_dir ./public/assets/aistudio
+  python main_stream.py --ref_dir ./references
   python main_stream.py --camera 0 --ref_dir ./references --mode split
-  python main_stream.py --video ./public/assets/aistudio/WhatsApp_Video_2026-11-03_at_9.00.12_PM_cc7a2b70.mp4
+  python main_stream.py --video ./references/WhatsApp_Video_2026-11-03_at_9.00.12_PM_cc7a2b70.mp4
 """
 
 import os
@@ -398,8 +398,8 @@ def main():
     parser.add_argument(
         "--ref_dir",
         type=str,
-        default="./public/assets/aistudio",
-        help="Directory with reference images for Person A"
+        default="./references",
+        help="Directory with reference images for Person A (not shipped with the web app)"
     )
     parser.add_argument(
         "--camera",
