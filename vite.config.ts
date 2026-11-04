@@ -80,7 +80,9 @@ export default defineConfig(() => {
     server: {
       host: '0.0.0.0',
       port: 3000,
-      allowedHosts: true as const,
+      // Vite's host check is only relaxed for the AI Studio proxy (which also sets DISABLE_HMR);
+      // everywhere else the default (localhost + IP addresses) keeps DNS-rebinding protection on.
+      allowedHosts: process.env.DISABLE_HMR === 'true' ? (true as const) : undefined,
       // HMR is disabled in AI Studio via DISABLE_HMR env var.
       // Do not modify—file watching is disabled to prevent flickering during agent edits.
       hmr: process.env.DISABLE_HMR !== 'true',
