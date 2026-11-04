@@ -22,6 +22,7 @@ import {
   computeKinematics,
   FaceTopology,
   INNER_LIP_RING,
+  LandmarkKinematics,
   LM,
   pointBounds,
   smoothingToFilterParams,
@@ -49,6 +50,11 @@ const RESOLUTIONS: Record<TransformationSettings['outputResolution'], [number, n
   '720p': [1280, 720],
   '540p': [960, 540],
 };
+
+/** Output size for a resolution setting, defaulting to 720p for unexpected values. */
+function resolveResolution(resolution: TransformationSettings['outputResolution']): [number, number] {
+  return RESOLUTIONS[resolution] ?? RESOLUTIONS['720p'];
+}
 
 /** Portrait used as the stand-in subject when no webcam is connected. */
 export const DEMO_SUBJECT_URL =
@@ -83,6 +89,8 @@ export class RealtimeFacialEngine {
   private personaPrepareToken = 0;
   private referenceBank = new MultiReferenceBank();
   private currentKeyframeSource: CanvasImageSource | null = null;
+  /** Id of the reference keyframe whose UVs are currently uploaded to the warp renderer. */
+  private currentKeyframeId: string | null = null;
 
   // Tracking state
   private filters: OneEuroFilter[] = [];
@@ -111,6 +119,7 @@ export class RealtimeFacialEngine {
 
   // Loop & settings
   private isRunning = false;
+  private disposed = false;
   private animationFrameId: number | null = null;
   private settings: TransformationSettings;
   private splitPosition = 50;
@@ -144,7 +153,7 @@ export class RealtimeFacialEngine {
     this.ctx = context;
     this.settings = settings;
 
-    const [w, h] = RESOLUTIONS[settings.outputResolution] ?? RESOLUTIONS['720p'];
+    const [w, h] = resolveResolution(settings.outputResolution);
     canvas.width = w;
     canvas.height = h;
 
@@ -185,12 +194,14 @@ export class RealtimeFacialEngine {
     this.patchStatus({ model: 'loading', modelProgress: 0 });
     try {
       await this.tracker.load((p) => {
-        this.patchStatus({ modelProgress: p.progress, modelMessage: p.message });
+        if (!this.disposed) this.patchStatus({ modelProgress: p.progress, modelMessage: p.message });
       });
+      if (this.disposed) return;
       this.patchStatus({ model: 'ready', modelProgress: 1, backend: this.tracker.backend, modelMessage: 'Face tracking ready' });
       // Persona may have been selected while the model was still loading.
       if (this.personaImage && this.status.persona !== 'ready') void this.preparePersona();
     } catch (err) {
+      if (this.disposed) return;
       console.error('Face tracker failed to load', err);
       this.patchStatus({
         model: 'error',
@@ -210,11 +221,13 @@ export class RealtimeFacialEngine {
     const img = new Image();
     img.crossOrigin = 'anonymous';
     img.onload = () => {
+      if (this.disposed) return;
       this.demoImage = img;
       this.demoFailed = false;
       if (!this.videoElement) this.patchStatus({ source: 'demo' });
     };
     img.onerror = () => {
+      if (this.disposed) return;
       this.demoFailed = true;
       if (!this.videoElement) this.patchStatus({ source: 'none' });
     };
@@ -226,6 +239,7 @@ export class RealtimeFacialEngine {
     if (!persona) {
       this.personaId = null;
       this.personaImage = null;
+      this.currentKeyframeId = null;
       this.warp.clearPersona();
       this.patchStatus({ persona: 'none' });
       return;
@@ -238,12 +252,12 @@ export class RealtimeFacialEngine {
     const img = new Image();
     img.crossOrigin = 'anonymous';
     img.onload = () => {
-      if (token !== this.personaPrepareToken) return;
+      if (this.disposed || token !== this.personaPrepareToken) return;
       this.personaImage = img;
       void this.preparePersona();
     };
     img.onerror = () => {
-      if (token !== this.personaPrepareToken) return;
+      if (this.disposed || token !== this.personaPrepareToken) return;
       this.patchStatus({ persona: 'error', personaMessage: 'Could not load the persona photo.' });
     };
     img.src = persona.imageUrl;
@@ -257,7 +271,7 @@ export class RealtimeFacialEngine {
       for (const f of this.filters) f.setParams(p.minCutoff, p.beta);
     }
     if (prev.outputResolution !== settings.outputResolution) {
-      const [w, h] = RESOLUTIONS[settings.outputResolution];
+      const [w, h] = resolveResolution(settings.outputResolution);
       this.canvas.width = w;
       this.canvas.height = h;
       this.warp.resize(w, h);
@@ -287,6 +301,8 @@ export class RealtimeFacialEngine {
   }
 
   public dispose() {
+    this.disposed = true;
+    this.personaPrepareToken++;
     this.stop();
     this.tracker.dispose();
     this.warp.dispose();
@@ -306,7 +322,7 @@ export class RealtimeFacialEngine {
     const token = this.personaPrepareToken;
     try {
       const { faces } = await this.tracker.detectImage(img);
-      if (token !== this.personaPrepareToken) return;
+      if (this.disposed || token !== this.personaPrepareToken) return;
       if (faces.length === 0) {
         this.warp.clearPersona();
         this.patchStatus({
@@ -318,6 +334,7 @@ export class RealtimeFacialEngine {
       const face = faces[0];
       this.warp.setPersona(img, face.landmarks);
       this.currentKeyframeSource = img;
+      this.currentKeyframeId = null;
       this.personaMean = this.sampleMeanColor(img, face.landmarks, img.naturalWidth, img.naturalHeight, false);
 
       // Synthesize calibrated multi-angle, multi-expression identity suite for Person A
@@ -332,8 +349,8 @@ export class RealtimeFacialEngine {
         personaMessage: faces.length > 1 ? 'Multiple faces detected — using the most prominent one.' : undefined,
       });
     } catch (err) {
+      if (this.disposed || token !== this.personaPrepareToken) return;
       console.error('Persona analysis failed', err);
-      if (token !== this.personaPrepareToken) return;
       this.patchStatus({
         persona: 'error',
         personaMessage:
@@ -430,7 +447,9 @@ export class RealtimeFacialEngine {
     if (this.status.faceDetected !== this.faceVisible) this.patchStatus({ faceDetected: this.faceVisible });
 
     // --- 2. Kinematics & metrics -------------------------------------------------------------
-    const { metrics, pose } = this.computeMetrics();
+    // Derived once per frame and shared by the metrics and the persona overlay.
+    const kinematics = this.faceVisible && this.lastFace ? computeKinematics(this.smoothed, this.neutralMouthWidth) : null;
+    const { metrics, pose } = this.computeMetrics(kinematics);
 
     // --- 3. Compose base frame --------------------------------------------------------------
     ctx.fillStyle = '#0b1220';
@@ -441,9 +460,9 @@ export class RealtimeFacialEngine {
       else this.drawStandby(ctx, x, y, w, h);
     };
 
-    const overlayReady = !!(this.faceVisible && this.lastFace && this.warp.hasPersona && this.status.persona === 'ready');
-    if (overlayReady && src && layout) {
-      this.renderPersonaOverlay(layout, src.source, src.width, src.height);
+    const overlayReady = !!(kinematics && this.faceVisible && this.lastFace && this.warp.hasPersona && this.status.persona === 'ready');
+    if (overlayReady && kinematics && src && layout) {
+      this.renderPersonaOverlay(layout, src.source, src.width, src.height, kinematics);
     }
     const drawOverlay = (x: number, y: number, w: number, h: number) => {
       if (!overlayReady) return;
@@ -558,9 +577,9 @@ export class RealtimeFacialEngine {
     if (this.status.faceDetected) this.patchStatus({ faceDetected: false });
   }
 
-  private computeMetrics(): { metrics: FacialMetrics; pose: HeadPose } {
+  private computeMetrics(k: LandmarkKinematics | null): { metrics: FacialMetrics; pose: HeadPose } {
     const s = this.settings;
-    if (!this.faceVisible || !this.lastFace) {
+    if (!k || !this.faceVisible || !this.lastFace) {
       return {
         metrics: {
           eyeAspectRatioLeft: 0,
@@ -577,7 +596,6 @@ export class RealtimeFacialEngine {
         pose: { yaw: 0, pitch: 0, roll: 0 },
       };
     }
-    const k = computeKinematics(this.smoothed, this.neutralMouthWidth);
     const bs = this.lastFace.blendshapes;
     const mouthWidth = Math.hypot(
       this.smoothed[LM.MOUTH.cornerLeft * 2] - this.smoothed[LM.MOUTH.cornerRight * 2],
@@ -614,10 +632,15 @@ export class RealtimeFacialEngine {
   // Persona overlay
   // ---------------------------------------------------------------------------------------------
 
-  private renderPersonaOverlay(layout: SourceLayout, source: CanvasImageSource, srcW: number, srcH: number) {
+  private renderPersonaOverlay(
+    layout: SourceLayout,
+    source: CanvasImageSource,
+    srcW: number,
+    srcH: number,
+    k: LandmarkKinematics
+  ) {
     const s = this.settings;
     this.warpPositions.set(this.smoothed);
-    const k = computeKinematics(this.smoothed, this.neutralMouthWidth);
 
     // 1. Natural smile warmth bias
     if (s.manualSmileBias) {
@@ -664,7 +687,11 @@ export class RealtimeFacialEngine {
         browElevation: bs.browInnerUp ?? 0,
       });
 
-      this.warp.updateUVs(queryResult.primary.landmarks);
+      // UVs only change when the bank picks a different keyframe; skip the per-frame GPU upload otherwise.
+      if (queryResult.primary.id !== this.currentKeyframeId) {
+        this.warp.updateUVs(queryResult.primary.landmarks);
+        this.currentKeyframeId = queryResult.primary.id;
+      }
       if (queryResult.primary.source !== this.currentKeyframeSource) {
         this.warp.updateTexture(queryResult.primary.source);
         this.currentKeyframeSource = queryResult.primary.source;
