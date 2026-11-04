@@ -10,9 +10,13 @@ Eliminates mouth tearing, teeth smearing, and flat black voids during speech:
      to eradicate tooth fluttering and high-frequency jitter.
 """
 
+import logging
+from typing import Tuple, Optional, Any
+
 import cv2
 import numpy as np
-from typing import Tuple, List, Optional, Dict, Any
+
+logger = logging.getLogger(__name__)
 
 
 # MediaPipe FaceMesh Inner Lip Landmark Indices
@@ -227,7 +231,8 @@ class OralCavityRenderer:
                     self.temporal_alpha,
                     0
                 )
-            except Exception:
+            except Exception as e:  # noqa: BLE001 - optical flow is best-effort; EMA is the fallback
+                logger.debug("Optical-flow stabilisation failed (%s); using plain EMA blend", e)
                 stabilized = cv2.addWeighted(
                     current_mouth,
                     1.0 - self.temporal_alpha,
@@ -300,7 +305,6 @@ class OralCavityRenderer:
         stabilized_interior = self.apply_temporal_stabilization(mouth_interior, inner_mask)
 
         # Soft edge feathering along the wet lip line (2-3 pixels)
-        feather_kernel = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (5, 5))
         feathered_mask = cv2.GaussianBlur(inner_mask.astype(np.float32) / 255.0, (5, 5), 0)
         feathered_mask = np.repeat(feathered_mask[:, :, np.newaxis], 3, axis=2)
 

@@ -12,12 +12,14 @@ Usage:
 """
 
 import os
-import sys
 import time
 import argparse
-from typing import List, Tuple, Optional
+import logging
+from typing import Any, List, Tuple, Optional
 import cv2
 import numpy as np
+
+logger = logging.getLogger(__name__)
 
 try:
     import torch
@@ -61,6 +63,10 @@ def warp_triangle(img_src: np.ndarray, img_dst: np.ndarray, t_src: np.ndarray, t
     r1 = cv2.boundingRect(np.float32([t_src]))
     r2 = cv2.boundingRect(np.float32([t_dst]))
 
+    # Zero-area (collinear) triangles have no affine mapping; skipping them keeps the stream alive.
+    if r1[2] <= 0 or r1[3] <= 0 or r2[2] <= 0 or r2[3] <= 0:
+        return
+
     # Offset points by top-left bounds
     t1_rect = []
     t2_rect = []
@@ -72,11 +78,17 @@ def warp_triangle(img_src: np.ndarray, img_dst: np.ndarray, t_src: np.ndarray, t
     mask = np.zeros((r2[3], r2[2], 3), dtype=np.float32)
     cv2.fillConvexPoly(mask, np.int32(t2_rect), (1.0, 1.0, 1.0), 16, 0)
 
-    # Crop source patch
+    # Crop source patch (may be empty when a landmark sits outside the reference image)
     img1_rect = img_src[r1[1]:r1[1] + r1[3], r1[0]:r1[0] + r1[2]]
+    if img1_rect.size == 0:
+        return
 
     # Affine transform
-    warp_mat = cv2.getAffineTransform(np.float32(t1_rect), np.float32(t2_rect))
+    try:
+        warp_mat = cv2.getAffineTransform(np.float32(t1_rect), np.float32(t2_rect))
+    except cv2.error as e:
+        logger.debug("Skipping degenerate triangle: %s", e)
+        return
     img2_rect = cv2.warpAffine(
         img1_rect,
         warp_mat,
@@ -85,8 +97,10 @@ def warp_triangle(img_src: np.ndarray, img_dst: np.ndarray, t_src: np.ndarray, t
         borderMode=cv2.BORDER_REFLECT_101
     )
 
-    # Composite into destination
+    # Composite into destination (the target rect can be clipped at the frame border)
     dst_sub = img_dst[r2[1]:r2[1] + r2[3], r2[0]:r2[0] + r2[2]]
+    if dst_sub.shape != img2_rect.shape:
+        return
     img_dst[r2[1]:r2[1] + r2[3], r2[0]:r2[0] + r2[2]] = dst_sub * (1.0 - mask) + img2_rect * mask
 
 
@@ -157,7 +171,7 @@ class NeuralReenactmentPipeline:
         self.display_mode = display_mode  # "ai_only", "split", "side_by_side"
         self.show_mesh = False
 
-        print(f"[Pipeline] Initializing on {'CUDA / GPU' if self.use_gpu else 'CPU'}...")
+        logger.info("Initializing on %s", "CUDA / GPU" if self.use_gpu else "CPU")
 
         # 1. Ingest Multi-View Reference Bank
         self.identity_bank = MultiViewIdentityBank(
@@ -295,14 +309,15 @@ class NeuralReenactmentPipeline:
         """Starts real-time webcam or video stream loop."""
         cap = cv2.VideoCapture(source)
         if not cap.isOpened():
-            print(f"[Pipeline Error] Cannot open video source: {source}")
+            logger.error("Cannot open video source: %s", source)
             return
 
         w = int(cap.get(cv2.CAP_PROP_FRAME_WIDTH)) or 1280
         h = int(cap.get(cv2.CAP_PROP_FRAME_HEIGHT)) or 720
         fps_in = cap.get(cv2.CAP_PROP_FPS) or 30.0
 
-        print(f"[Pipeline] Video source opened: {w}x{h} @ {fps_in:.1f} FPS")
+        logger.info("Video source opened: %dx%d @ %.1f FPS", w, h, fps_in)
+        # Interactive key bindings are user-facing help, so they stay on stdout.
         print("[Pipeline] Controls:")
         print("  'q' - Quit stream")
         print("  'm' - Cycle display mode (AI only / Split / Side-by-side)")
@@ -322,7 +337,7 @@ class NeuralReenactmentPipeline:
             while True:
                 ret, frame = cap.read()
                 if not ret:
-                    print("[Pipeline] Video stream ended or EOF.")
+                    logger.info("Video stream ended or EOF.")
                     break
 
                 t_start = time.time()
@@ -360,14 +375,14 @@ class NeuralReenactmentPipeline:
                     modes = ["ai_only", "split", "side_by_side"]
                     curr_idx = modes.index(self.display_mode)
                     self.display_mode = modes[(curr_idx + 1) % len(modes)]
-                    print(f"[Pipeline] Display mode changed to: {self.display_mode}")
+                    logger.info("Display mode changed to: %s", self.display_mode)
                 elif key == ord('d'):
                     self.show_mesh = not self.show_mesh
-                    print(f"[Pipeline] Show mesh debug: {self.show_mesh}")
+                    logger.info("Show mesh debug: %s", self.show_mesh)
                 elif key == ord('s'):
                     snapshot_name = f"snapshot_{int(time.time())}.png"
                     cv2.imwrite(snapshot_name, result)
-                    print(f"[Pipeline] Saved snapshot: {snapshot_name}")
+                    logger.info("Saved snapshot: %s", snapshot_name)
 
                 frame_count += 1
         finally:
@@ -375,7 +390,7 @@ class NeuralReenactmentPipeline:
             if writer is not None:
                 writer.release()
             cv2.destroyAllWindows()
-            print(f"[Pipeline] Stopped after {frame_count} frames.")
+            logger.info("Stopped after %d frames.", frame_count)
 
 
 def main():
@@ -418,6 +433,7 @@ def main():
     )
 
     args = parser.parse_args()
+    logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(name)s: %(message)s")
 
     # Fallback reference dir check
     ref_dir = args.ref_dir

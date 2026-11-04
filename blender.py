@@ -8,9 +8,13 @@ Solves forehead seam cuts, visible brow lines, and harsh mask boundaries:
   4. Poisson gradient-domain blending (cv2.seamlessClone) with fallback alpha compositing.
 """
 
+import logging
+from typing import Tuple, Optional
+
 import cv2
 import numpy as np
-from typing import Tuple, Optional
+
+logger = logging.getLogger(__name__)
 
 
 class AnatomicalBlender:
@@ -28,6 +32,8 @@ class AnatomicalBlender:
         self.cranial_extension_factor = cranial_extension_factor
         self.feather_radius = feather_radius
         self.lab_color_blend_ratio = lab_color_blend_ratio
+        # Poisson cloning runs every frame; report its failure once at warning level, then at debug.
+        self._poisson_failure_reported = False
 
     def build_anatomical_mask(
         self,
@@ -278,9 +284,13 @@ class AnatomicalBlender:
                             cv2.NORMAL_CLONE
                         )
                         return cloned
-            except Exception as e:
-                # Fallback gracefully to feathered alpha compositing
-                pass
+            except Exception as e:  # noqa: BLE001 - any OpenCV failure must not abort the live stream
+                # Fall back to feathered alpha compositing below, but never silently.
+                if not self._poisson_failure_reported:
+                    logger.warning("cv2.seamlessClone failed (%s); using feathered alpha compositing", e)
+                    self._poisson_failure_reported = True
+                else:
+                    logger.debug("cv2.seamlessClone failed again: %s", e)
 
         # 4. Fallback: Soft non-linear feathered alpha compositing
         alpha = self.generate_feathered_alpha(refined_mask, self.feather_radius)
