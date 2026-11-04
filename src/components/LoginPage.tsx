@@ -1,13 +1,22 @@
 import React, { useState } from 'react';
-import { Sparkles, Lock, Mail, ShieldCheck, ArrowRight, UserCheck, KeyRound } from 'lucide-react';
+import { Sparkles, Lock, Mail, ShieldCheck, ArrowRight, UserCheck, FlaskConical } from 'lucide-react';
 
 interface LoginPageProps {
   onLogin: (email: string, name: string) => void;
 }
 
+/** Identity used by the one-click demo entry; no account exists behind it. */
+const DEMO_ADMIN_EMAIL = 'admin@personalive.ai';
+const DEMO_ADMIN_NAME = 'Administrator';
+
+/**
+ * Demo sign-in gate. Credentials are not verified and never leave the device: any non-empty
+ * email/password pair opens the local studio. Replace with real authentication before exposing
+ * the app to untrusted users.
+ */
 export const LoginPage: React.FC<LoginPageProps> = ({ onLogin }) => {
-  const [email, setEmail] = useState('admin@personalive.ai');
-  const [password, setPassword] = useState('admin123');
+  const [email, setEmail] = useState('');
+  const [password, setPassword] = useState('');
   const [rememberMe, setRememberMe] = useState(true);
   const [errorMessage, setErrorMessage] = useState<string | null>(null);
 
@@ -22,15 +31,13 @@ export const LoginPage: React.FC<LoginPageProps> = ({ onLogin }) => {
       return;
     }
 
-    // Default admin or any valid credentials
-    const displayName = email.toLowerCase().includes('admin') ? 'Administrator' : email.split('@')[0];
+    // Demo gate: nothing is checked beyond the fields being filled in.
+    const displayName = email.toLowerCase().includes('admin') ? DEMO_ADMIN_NAME : email.split('@')[0];
     onLogin(email, displayName);
   };
 
-  const handleQuickAdminLogin = () => {
-    setEmail('admin@personalive.ai');
-    setPassword('admin123');
-    onLogin('admin@personalive.ai', 'Administrator');
+  const handleDemoLogin = () => {
+    onLogin(DEMO_ADMIN_EMAIL, DEMO_ADMIN_NAME);
   };
 
   return (
@@ -73,36 +80,30 @@ export const LoginPage: React.FC<LoginPageProps> = ({ onLogin }) => {
             </p>
           </div>
 
-          {/* Quick 1-Click Admin Login Banner */}
-          <div className="bg-sky-950/40 border border-sky-800/80 rounded-xl p-3.5 space-y-2.5">
+          {/* Demo-mode notice and one-click entry */}
+          <div className="bg-amber-950/30 border border-amber-800/70 rounded-xl p-3.5 space-y-2.5">
             <div className="flex items-center justify-between text-xs">
-              <span className="font-semibold text-sky-300 flex items-center gap-1.5">
-                <KeyRound className="w-3.5 h-3.5 text-sky-400" />
-                Default Admin Credentials
+              <span className="font-semibold text-amber-300 flex items-center gap-1.5">
+                <FlaskConical className="w-3.5 h-3.5 text-amber-400" />
+                Demo sign-in
               </span>
-              <span className="text-[10px] bg-sky-900/60 text-sky-300 px-1.5 py-0.5 rounded font-mono">
-                Instant Access
+              <span className="text-[10px] bg-amber-900/50 text-amber-300 px-1.5 py-0.5 rounded font-mono">
+                No account required
               </span>
             </div>
 
-            <div className="grid grid-cols-2 gap-2 text-[11px] font-mono bg-slate-950/80 p-2.5 rounded-lg border border-slate-800">
-              <div>
-                <span className="text-slate-500 block text-[10px]">Email:</span>
-                <span className="text-slate-200">admin@personalive.ai</span>
-              </div>
-              <div>
-                <span className="text-slate-500 block text-[10px]">Password:</span>
-                <span className="text-slate-200">admin123</span>
-              </div>
-            </div>
+            <p className="text-[11px] text-slate-400 leading-relaxed">
+              This build has no account service. Credentials are not verified and are never sent anywhere;
+              the sign-in only unlocks the studio on this device.
+            </p>
 
             <button
               type="button"
-              onClick={handleQuickAdminLogin}
+              onClick={handleDemoLogin}
               className="w-full py-2 px-3 rounded-lg bg-sky-500 hover:bg-sky-400 text-slate-950 font-bold text-xs flex items-center justify-center gap-1.5 transition-all shadow-md shadow-sky-500/20 active:scale-[0.98]"
             >
               <UserCheck className="w-4 h-4" />
-              <span>1-Click Sign In as Admin</span>
+              <span>Continue as demo administrator</span>
             </button>
           </div>
 
@@ -124,7 +125,8 @@ export const LoginPage: React.FC<LoginPageProps> = ({ onLogin }) => {
                   type="email"
                   value={email}
                   onChange={(e) => setEmail(e.target.value)}
-                  placeholder="admin@personalive.ai"
+                  placeholder="you@example.com"
+                  autoComplete="username"
                   className="w-full bg-slate-950 border border-slate-800 focus:border-sky-500 rounded-xl pl-9 pr-3 py-2.5 text-xs text-white placeholder-slate-600 focus:outline-none transition-colors"
                 />
               </div>
@@ -141,6 +143,7 @@ export const LoginPage: React.FC<LoginPageProps> = ({ onLogin }) => {
                   value={password}
                   onChange={(e) => setPassword(e.target.value)}
                   placeholder="••••••••"
+                  autoComplete="current-password"
                   className="w-full bg-slate-950 border border-slate-800 focus:border-sky-500 rounded-xl pl-9 pr-3 py-2.5 text-xs text-white placeholder-slate-600 focus:outline-none transition-colors"
                 />
               </div>
@@ -156,9 +159,6 @@ export const LoginPage: React.FC<LoginPageProps> = ({ onLogin }) => {
                 />
                 <span>Remember me</span>
               </label>
-              <span className="text-sky-400 hover:underline cursor-pointer">
-                Forgot password?
-              </span>
             </div>
 
             <button
