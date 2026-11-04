@@ -8,16 +8,11 @@ const CACHE_NAME = `personalive-${BUILD_ID}`;
 const BASE = new URL('./', self.location.href).href;
 const STATIC_ASSETS = ['', 'index.html', 'manifest.json', 'icon.svg'].map((f) => BASE + f);
 
-// Install: Cache essential app shell and activate immediately
+// Install: cache the app shell. The new worker then stays in the "waiting" state until the user
+// clicks "Update Ready — Restart" (which posts SKIP_WAITING, see below) or the app is relaunched.
+// Activating immediately here would trigger `controllerchange` and reload the page mid-session.
 self.addEventListener('install', (event) => {
-  event.waitUntil(
-    caches.open(CACHE_NAME).then((cache) => {
-      return cache.addAll(STATIC_ASSETS);
-    }).then(() => {
-      // Force this service worker to become active without waiting
-      return self.skipWaiting();
-    })
-  );
+  event.waitUntil(caches.open(CACHE_NAME).then((cache) => cache.addAll(STATIC_ASSETS)));
 });
 
 // Activate: Clean up old caches and take control of all clients
