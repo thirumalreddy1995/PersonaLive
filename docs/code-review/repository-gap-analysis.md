@@ -14,21 +14,33 @@
 | `npm run build` | OK; 1 warning (main chunk 546 kB > 500 kB) |
 | `npm audit` | cannot run – **no `package-lock.json`** |
 | GitHub Actions | both workflows run `npm ci`, which requires a lockfile → failing since commit `799a7c4` (last successful Pages deploy is `ac892ca`) |
-| Python | `ast.parse` OK on all 4 modules; no tests; deps not installed locally |
+| Python | `ast.parse` OK on all 4 modules; no tests; deps not installed locally (`main_stream.py` cannot even be imported, see GAP-041) |
+
+## Results after remediation
+
+| Check | Before | After |
+| --- | --- | --- |
+| `npm run lint` | 0 errors, `strict` off | 0 errors with `strict`, `noUnusedLocals`, `noUnusedParameters`, `noFallthroughCasesInSwitch` |
+| `npm test` | 23 / 23 pass | 39 / 39 pass (5 new suites: asset URLs, image statistics, contrast scoring, Electron path containment) |
+| `npm run build` | OK, 1 chunk-size warning | OK, same warning (GAP-035 deferred) |
+| `npm audit` | cannot run (no lockfile) | runs; 29 advisories, all transitive through the Electron build toolchain (GAP-040) |
+| `npm ci` | fails (no lockfile) | succeeds from the committed `package-lock.json` (validated in a clean directory) |
+| CI runtime | Node 20 (EOL) | Node 22 |
+| Python | `main_stream.py` raises `NameError` on import | all four modules compile; entry point imports |
 
 ## Summary
 
 | Severity | Count | Fixed | Deferred | Blocked | Needs Decision |
 | --- | --- | --- | --- | --- | --- |
 | Critical | 1 | 1 | 0 | 0 | 0 |
-| High | 4 | 4 | 0 | 0 | 0 |
-| Medium | 23 | 17 | 2 | 0 | 4 |
+| High | 5 | 5 | 0 | 0 | 0 |
+| Medium | 24 | 17 | 2 | 0 | 5 |
 | Low | 11 | 7 | 2 | 0 | 2 |
-| **Total** | **39** | **29** | **4** | **0** | **6** |
+| **Total** | **41** | **30** | **4** | **0** | **7** |
 
 | Category | Count |
 | --- | --- |
-| Correctness & bugs | 8 |
+| Correctness & bugs | 9 |
 | Error handling & resilience | 8 |
 | Security | 4 |
 | Performance | 3 |
@@ -37,7 +49,7 @@
 | Compiler / analyzer warnings | 1 |
 | Logging & observability | 1 |
 | Testing gaps | 1 |
-| Dependencies & configuration | 5 |
+| Dependencies & configuration | 6 |
 
 Status legend: **Fixed** / **Deferred** (recommendation recorded, not applied) / **Blocked** / **Needs Decision** (requires an API, contract, product or data decision).
 
@@ -50,7 +62,7 @@ Status legend: **Fixed** / **Deferred** (recommendation recorded, not applied) /
 #### GAP-001 · Dependencies & configuration · Critical · **Fixed**
 - **Where:** `package.json`, `.github/workflows/deploy-pages.yml:31`, `.github/workflows/desktop-release.yml:32`
 - **Problem:** `package-lock.json` was deleted in `799a7c4` ("configure dev server…"). Both workflows run `npm ci`, which aborts without a lockfile, so no Pages deploy or desktop release has succeeded since. `npm audit` cannot run either.
-- **Fix:** regenerate and commit `package-lock.json` (lockfile v3) from the resolved tree.
+- **Fix:** regenerate and commit `package-lock.json` (lockfile v3) from the resolved tree; `npm ci --ignore-scripts` from the committed files was verified in a clean directory.
 - **Risk:** none (restores reproducible installs).
 
 ### High
@@ -78,6 +90,12 @@ Status legend: **Fixed** / **Deferred** (recommendation recorded, not applied) /
 - **Problem:** The “Photo quality check” card shows Lighting/Sharpness values that are never measured: `evaluateImageQuality(w, h, 132, 52, 92)` passes constants, and presets pass `1920×1080`. `contrastStdDev` is accepted but ignored. Users are told a dark/blurry photo is “Optimal”.
 - **Fix:** add `measureImageStatistics()` (mean luminance, contrast σ, Laplacian-variance sharpness mapped to 0–100) computed on a down-sampled canvas; use it for uploads and presets; make `contrastStdDev` apply a small low-contrast penalty.
 - **Risk / behaviour change:** quality scores now reflect the actual image, so some photos previously “Approved” may show “Review Required” (enrolment is still allowed). The sharpness→score mapping is a documented heuristic. **[QUESTION]** calibrate thresholds against real reference photos.
+
+#### GAP-041 · Correctness (Python) · High · **Fixed**
+- **Where:** `main_stream.py:18,294`
+- **Problem:** `run_stream(self, source: Any = 0, …)` is annotated with `Any`, which was never imported. Annotations are evaluated when the class body executes, so `python main_stream.py` (or any import of the module) raised `NameError: name 'Any' is not defined` before doing anything: the Python pipeline entry point could not start.
+- **Fix:** import `Any`; drop the unused `sys` import. Committed together with GAP-020.
+- **Risk:** none.
 
 ### Medium
 
@@ -132,8 +150,8 @@ Status legend: **Fixed** / **Deferred** (recommendation recorded, not applied) /
 #### GAP-014 · Dependencies · Medium · **Fixed** (partially – see GAP-034)
 - **Where:** `package.json`
 - **Problem:** Build tooling (`vite`, `@vitejs/plugin-react`, `@tailwindcss/vite`) is listed under `dependencies`; electron-builder packages production dependencies, so the desktop installer ships the Vite toolchain. `motion` and `autoprefixer` are unused (Tailwind v4 does not need autoprefixer). `express`, `dotenv`, `@google/genai`, `@types/express` are unused Gemini-server scaffolding (`metadata.json` still declares `SERVER_SIDE_GEMINI_API`).
-- **Fix:** move build tooling to `devDependencies`; remove `motion` and `autoprefixer`. The Gemini/express group is **Needs Decision** (GAP-034).
-- **Risk:** none for the web bundle (verified by build + tests).
+- **Fix:** move build tooling to `devDependencies`; remove `motion` and `autoprefixer`; lockfile regenerated. The Gemini/express group is **Needs Decision** (GAP-034).
+- **Risk:** none for the web bundle (verified by build + tests). Run `npm prune` locally once to drop the now-extraneous packages from `node_modules`.
 
 #### GAP-015 · Dependencies / CI · Medium · **Fixed**
 - **Where:** `.github/workflows/*.yml`
@@ -202,6 +220,11 @@ Status legend: **Fixed** / **Deferred** (recommendation recorded, not applied) /
 - **Where:** `.aistudio/artifacts/**/.tempmediaStorage/*` (20 screenshots/photos), `public/assets/aistudio/` (30 MB `.webm` live session, 0.8 MB `.mp4`, 5 unreferenced images)
 - **Problem:** Temporary tool media is committed; `public/` content is copied into every web build and Pages deploy (≈33 MB per deploy). The folder holds photos and a recorded session of a real person; the only consent record is the mock entry in `mockPersonas.ts`. The Python pipeline uses the same folder as its default `--ref_dir`.
 - **Recommendation:** add `.aistudio/**/.tempmediaStorage/` to `.gitignore` and remove it from history; move Python reference media out of `public/` (e.g. `references/`, Git LFS) and keep only the one photo the web app needs; confirm consent for the stored likeness. Deleting data is left to you.
+
+#### GAP-040 · Dependencies · Medium · **Needs Decision**
+- **Where:** `package.json` devDependencies `electron@^33.2.1`, `electron-builder@^25.1.8`
+- **Problem:** With the lockfile restored, `npm audit` reports 29 advisories (1 critical, 13 high, 15 moderate). Every one is transitive through the Electron build toolchain (`tar`, `minimatch`, `glob`, `extract-zip`, `app-builder-lib`, `@electron/rebuild`, …). None is part of the shipped web bundle or the Electron runtime; they affect the machine that builds installers.
+- **Recommendation:** upgrade `electron-builder` to 26.x and `electron` to the current major (45.x). Both are semver-major and change the installer toolchain and Chromium version, so they need a desktop build plus a smoke test of camera access, WebGL and auto-update, which could not be done in this pass.
 
 #### GAP-027 · Security · Medium · **Deferred**
 - **Where:** `index.html`, `electron/main.cjs`
@@ -275,6 +298,17 @@ Status legend: **Fixed** / **Deferred** (recommendation recorded, not applied) /
 3. **Medium (code):** GAP-006/007/022 Electron → GAP-008 tracker race → GAP-009/019/029 engine → GAP-010/011/012 React lifecycle → GAP-013 SW offline → GAP-016/030/031/039 strict TypeScript & dead code → GAP-017 version → GAP-018 duplicate filter → GAP-020/021 Python.
 4. **Medium (config):** GAP-014 dependencies → GAP-015 Node 22.
 5. **Low:** GAP-032 tests, GAP-033 docs.
-6. **Needs Decision:** GAP-023, 024, 025, 026, 034, 037. **Deferred:** GAP-027, 028, 035, 036.
+6. **Needs Decision:** GAP-023, 024, 025, 026, 034, 037, 040. **Deferred:** GAP-027, 028, 035, 036.
 
-Each fix is one commit referencing its GAP id; build (`npm run lint`, `npm run build`) and `npm test` are run after every commit.
+Each fix is one commit referencing its GAP id; `npm run lint`, `npm run build` and `npm test` were run before every commit. Nothing was blocked or reverted.
+
+## Behaviour changes to be aware of
+
+| GAP | Change |
+| --- | --- |
+| GAP-003 | A new build no longer force-reloads an open studio; it waits for the “Update Ready — Restart” click or the next launch. |
+| GAP-005 | Photo quality scores are measured from the image. Dark, flat or blurry photos now get lower scores and warnings; enrolment is still permitted. |
+| GAP-013 | When offline, uncached navigations show the cached app shell instead of a browser error page. |
+| GAP-017 | The login footer and user guide now show the real version (`2.5.0`) instead of the stale `2.4.x` strings. |
+| GAP-021 | Python diagnostics are emitted through `logging` (format `time LEVEL module: message`) instead of bare `print()`. |
+| GAP-039 | The decorative title-bar dots no longer show a pointer cursor or tooltips. |
