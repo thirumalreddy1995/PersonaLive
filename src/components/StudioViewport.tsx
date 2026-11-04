@@ -70,8 +70,6 @@ export const StudioViewport: React.FC<StudioViewportProps> = ({
   const recorderRef = useRef<MediaRecorder | null>(null);
   const recordChunksRef = useRef<Blob[]>([]);
   const recordStartRef = useRef<number>(0);
-  const recordingSecondsRef = useRef<number>(0);
-  recordingSecondsRef.current = recordingSeconds;
 
   const toastTimerRef = useRef<number | null>(null);
   const showToast = useCallback((text: string, tone: 'info' | 'error' = 'info', ms = 3000) => {

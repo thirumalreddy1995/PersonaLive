@@ -1,5 +1,5 @@
 import React, { useState } from 'react';
-import { X, ShieldCheck, Mail, Phone, Key, Check, Sparkles, CreditCard } from 'lucide-react';
+import { X, ShieldCheck, Mail, Phone, Sparkles } from 'lucide-react';
 import { UserAccount } from '../types/index.ts';
 
 interface AccountAuthModalProps {
@@ -18,17 +18,14 @@ export const AccountAuthModal: React.FC<AccountAuthModalProps> = ({
   const [step, setStep] = useState<'profile' | 'otp' | 'tier'>('profile');
   const [email, setEmail] = useState(account.email);
   const [phone, setPhone] = useState(account.phone);
-  const [fullName, setFullName] = useState(account.fullName);
+  const fullName = account.fullName;
   const [otpInput, setOtpInput] = useState('');
-  const [otpSent, setOtpSent] = useState(false);
-  const [tier, setTier] = useState(account.tier);
   const [message, setMessage] = useState<string | null>(null);
 
   if (!isOpen) return null;
 
   const handleSendOtp = (e: React.FormEvent) => {
     e.preventDefault();
-    setOtpSent(true);
     setStep('otp');
     setMessage(`Verification code dispatched to ${email || phone}. Demo code: 749281`);
   };
@@ -51,7 +48,6 @@ export const AccountAuthModal: React.FC<AccountAuthModalProps> = ({
   };
 
   const handleSelectTier = (newTier: UserAccount['tier']) => {
-    setTier(newTier);
     onUpdateAccount({ tier: newTier });
     setMessage(`Subscription updated to ${newTier}. Desktop licence unlocked.`);
     setTimeout(() => setMessage(null), 3000);

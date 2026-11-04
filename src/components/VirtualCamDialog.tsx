@@ -1,5 +1,5 @@
 import React from 'react';
-import { X, Video, Monitor, ExternalLink, CheckCircle, ShieldAlert } from 'lucide-react';
+import { X, Video, ShieldAlert } from 'lucide-react';
 
 interface VirtualCamDialogProps {
   isOpen: boolean;

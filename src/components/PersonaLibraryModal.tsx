@@ -22,6 +22,8 @@ const SAMPLE_PRESET_IMAGE = publicAssetUrl('assets/aistudio/WhatsApp_Image_2026-
 const ACCEPTED_IMAGE_TYPES = ['image/jpeg', 'image/png', 'image/webp'];
 /** Uploads are held in memory as data URLs; cap them so a stray RAW/scan cannot freeze the UI. */
 const MAX_UPLOAD_BYTES = 25 * 1024 * 1024;
+/** Usage recorded on the consent entry of every enrolled face. */
+const DEFAULT_AUTHORIZED_USAGE = 'Commercial Streaming & Virtual Presentation';
 
 function loadImage(src: string, crossOrigin: boolean): Promise<HTMLImageElement> {
   return new Promise((resolve, reject) => {
@@ -87,7 +89,6 @@ export const PersonaLibraryModal: React.FC<PersonaLibraryModalProps> = ({
   const [previewImage, setPreviewImage] = useState<string | null>(null);
   const [qualityResult, setQualityResult] = useState<QualityAssessmentResult | null>(null);
   const [signerName, setSignerName] = useState('');
-  const [authorizedUsage, setAuthorizedUsage] = useState('Commercial Streaming & Virtual Presentation');
   const [consentAgreed, setConsentAgreed] = useState(false);
   const [errorMessage, setErrorMessage] = useState<string | null>(null);
   /** Increments per photo selection so a slow assessment cannot overwrite a newer one. */
@@ -194,7 +195,7 @@ export const PersonaLibraryModal: React.FC<PersonaLibraryModalProps> = ({
       },
       consent: {
         signerName: signerName || name,
-        authorizedUsage,
+        authorizedUsage: DEFAULT_AUTHORIZED_USAGE,
         timestamp,
         signatureHash,
         verified: true,

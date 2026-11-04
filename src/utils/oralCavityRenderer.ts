@@ -29,7 +29,6 @@ export interface DentalSynthesisOptions {
   lightingGain: [number, number, number];
   isSpeaking: boolean;
   isSmiling: boolean;
-  blendStrength: number;
 }
 
 /** Upper inner lip contour landmark indices (subject right to left in image space) */
@@ -182,7 +181,7 @@ export class OralCavityRenderer {
     const toothHeight = Math.min(jawOpenPx * 0.62, mouthWidthPx * 0.14);
 
     if (toothHeight > 1.8) {
-      this.renderMaxillaryDentalArch(ctx, dentalWidth, archY, toothHeight, lightingGain, isSmiling);
+      this.renderMaxillaryDentalArch(ctx, dentalWidth, archY, toothHeight, lightingGain);
     }
 
     // 5. Mandibular dental arch (Lower teeth visible when wide open or smiling)
@@ -240,8 +239,7 @@ export class OralCavityRenderer {
     width: number,
     baseY: number,
     height: number,
-    gain: [number, number, number],
-    isSmiling: boolean
+    gain: [number, number, number]
   ): void {
     ctx.save();
 

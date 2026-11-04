@@ -21,7 +21,6 @@ import {
   buildFaceTopology,
   computeKinematics,
   FaceTopology,
-  INNER_LIP_RING,
   LandmarkKinematics,
   LM,
   pointBounds,
@@ -880,7 +879,6 @@ export class RealtimeFacialEngine {
         lightingGain: this.colorGain,
         isSpeaking: metrics.isSpeaking,
         isSmiling: metrics.isSmiling,
-        blendStrength: this.settings.blendStrength,
       });
     }
 

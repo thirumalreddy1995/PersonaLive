@@ -1,5 +1,5 @@
 import React from 'react';
-import { X, Film, Download, Trash2, ShieldCheck, CheckCircle2 } from 'lucide-react';
+import { X, Film, Download, Trash2, ShieldCheck } from 'lucide-react';
 import { RecordedClip } from '../types/index.ts';
 
 interface RecordingsModalProps {

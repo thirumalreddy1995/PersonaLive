@@ -39,21 +39,6 @@ export interface CranialHarmonizationOptions {
 }
 
 export class CranialBoundaryBlender {
-  private static offscreenCanvas: HTMLCanvasElement | null = null;
-  private static offscreenCtx: CanvasRenderingContext2D | null = null;
-
-  private static getOffscreen(width: number, height: number) {
-    if (!this.offscreenCanvas) {
-      this.offscreenCanvas = document.createElement('canvas');
-      this.offscreenCtx = this.offscreenCanvas.getContext('2d', { willReadFrequently: true });
-    }
-    if (this.offscreenCanvas.width !== width || this.offscreenCanvas.height !== height) {
-      this.offscreenCanvas.width = width;
-      this.offscreenCanvas.height = height;
-    }
-    return { canvas: this.offscreenCanvas, ctx: this.offscreenCtx! };
-  }
-
   /**
    * Computes the cranial apex position and forehead upward vector.
    */
@@ -95,7 +80,9 @@ export class CranialBoundaryBlender {
   public static harmonizeForeheadBoundary(
     targetCtx: CanvasRenderingContext2D,
     points: Float32Array,
-    opts: CranialHarmonizationOptions
+    // TODO(GAP-023): blendStrength/colorGain are accepted for API stability but not applied yet;
+    // see docs/code-review/repository-gap-analysis.md before changing the compositing mode.
+    _opts: CranialHarmonizationOptions
   ): void {
     if (points.length < 357 * 2) return;
     const p = (idx: number): Point2D => ({ x: points[idx * 2], y: points[idx * 2 + 1] });
