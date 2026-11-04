@@ -15,6 +15,7 @@ import { OneEuroFilter } from './faceMath.ts';
 import {
   applyEyelidKinematics,
   applyGazeIrisTracking,
+  applyPerspectiveForeshortening,
   applySmileBias,
   applySpeechAnatomy,
   buildFaceTopology,
@@ -35,6 +36,9 @@ import {
   TrackedFace,
 } from './faceTracker.ts';
 import { FacialLightingZones, MeshWarpRenderer } from './meshWarpRenderer.ts';
+import { OralCavityRenderer, extractOralApertureMetrics } from './oralCavityRenderer.ts';
+import { MultiReferenceBank } from './multiReferenceBank.ts';
+import { CranialBoundaryBlender } from './cranialBoundaryBlender.ts';
 
 export type MetricsCallback = (metrics: FacialMetrics, pose: HeadPose, fps: number, latency: number) => void;
 export type StatusCallback = (status: EngineStatus) => void;
@@ -72,11 +76,13 @@ export class RealtimeFacialEngine {
   private demoCanvas: HTMLCanvasElement;
   private demoCtx: CanvasRenderingContext2D;
 
-  // Persona
+  // Persona & Identity Bank
   private personaId: string | null = null;
   private personaImage: HTMLImageElement | null = null;
   private personaMean: [number, number, number] = [128, 128, 128];
   private personaPrepareToken = 0;
+  private referenceBank = new MultiReferenceBank();
+  private currentKeyframeSource: CanvasImageSource | null = null;
 
   // Tracking state
   private filters: OneEuroFilter[] = [];
@@ -311,7 +317,16 @@ export class RealtimeFacialEngine {
       }
       const face = faces[0];
       this.warp.setPersona(img, face.landmarks);
+      this.currentKeyframeSource = img;
       this.personaMean = this.sampleMeanColor(img, face.landmarks, img.naturalWidth, img.naturalHeight, false);
+
+      // Synthesize calibrated multi-angle, multi-expression identity suite for Person A
+      this.referenceBank.clear();
+      const suite = MultiReferenceBank.synthesizeSuiteFromMaster(img, face.landmarks, this.personaMean);
+      for (const kf of suite) {
+        this.referenceBank.addKeyframe(kf);
+      }
+
       this.patchStatus({
         persona: 'ready',
         personaMessage: faces.length > 1 ? 'Multiple faces detected — using the most prominent one.' : undefined,
@@ -612,7 +627,17 @@ export class RealtimeFacialEngine {
     // 2. Anatomical speech constraints: stabilizes upper lip and mustache structure
     applySpeechAnatomy(this.warpPositions, k.mar, k.faceHeight);
 
-    // 3. Eyelid kinematic blinking: folds persona's real eyelid skin down smoothly when blinking
+    // 3. 3D perspective foreshortening & multi-angle head pose compensation
+    applyPerspectiveForeshortening(
+      this.warpPositions,
+      k.yaw,
+      k.pitch,
+      k.faceWidth,
+      k.faceHeight,
+      k.center
+    );
+
+    // 4. Eyelid kinematic blinking: folds persona's real eyelid skin down smoothly when blinking
     const bs = this.lastFace?.blendshapes ?? {};
     applyEyelidKinematics(
       this.warpPositions,
@@ -622,9 +647,28 @@ export class RealtimeFacialEngine {
       bs.eyeBlinkRight ?? 0
     );
 
-    // 4. Neural gaze tracking: translates iris landmarks according to real-time gaze
+    // 5. Neural gaze tracking: translates iris landmarks according to real-time gaze
     if (s.eyeGazeSync) {
       applyGazeIrisTracking(this.warpPositions, k.gazeX, k.gazeY, k.faceWidth);
+    }
+
+    // 6. Multi-Conditioning Identity Bank Querying: aligns reference perspective & expression
+    if (this.referenceBank.getKeyframes().length > 0) {
+      const smileScore = ((bs.mouthSmileLeft ?? 0) + (bs.mouthSmileRight ?? 0)) / 2 + s.manualSmileBias * 0.6;
+      const queryResult = this.referenceBank.query({
+        yaw: k.yaw,
+        pitch: k.pitch,
+        roll: k.roll,
+        mar: k.mar,
+        smile: smileScore,
+        browElevation: bs.browInnerUp ?? 0,
+      });
+
+      this.warp.updateUVs(queryResult.primary.landmarks);
+      if (queryResult.primary.source !== this.currentKeyframeSource) {
+        this.warp.updateTexture(queryResult.primary.source);
+        this.currentKeyframeSource = queryResult.primary.source;
+      }
     }
 
     if (s.lightingAdaptation && this.frameIndex % 5 === 0) {
@@ -697,11 +741,21 @@ export class RealtimeFacialEngine {
         curr[2] = curr[2] * 0.85 + target[2] * 0.15;
       };
 
-      const userForehead = samplePatch(12, 5, 2);
-      const userLeftCheek = samplePatch(18, 13, 2);
-      const userRightCheek = samplePatch(6, 13, 2);
-      const userNose = samplePatch(12, 11, 2);
-      const userChin = samplePatch(12, 19, 2);
+      // Sample directly from driver's tracked anatomical landmarks
+      const sampleLandmark = (idx: number): [number, number, number] => {
+        const lx = srcPts[idx * 2];
+        const ly = srcPts[idx * 2 + 1];
+        const nx = Math.round(clamp(((lx - b.minX) / Math.max(1, b.width)) * size, 1, size - 2));
+        const ny = Math.round(clamp(((ly - b.minY) / Math.max(1, b.height)) * size, 1, size - 2));
+        return samplePatch(nx, ny, 1);
+      };
+
+      const userForehead = sampleLandmark(LM.FOREHEAD);
+      const userLeftCheek = sampleLandmark(LM.LEFT_CHEEK);
+      const userRightCheek = sampleLandmark(LM.RIGHT_CHEEK);
+      const userNose = sampleLandmark(LM.NOSE_BRIDGE);
+      // Chin tip: landmark 152 is safely located at the inferior mandibular apex, never inside the mouth
+      const userChin = sampleLandmark(LM.CHIN);
 
       blendGain(this.zoneLighting.forehead, computeGain(userForehead));
       blendGain(this.zoneLighting.leftCheek, computeGain(userLeftCheek));
@@ -762,8 +816,8 @@ export class RealtimeFacialEngine {
   }
 
   /**
-   * Advanced graphics post-pass: adds realistic oral aperture depth & lip vermilion anti-aliasing
-   * during speech, and dynamic corneal specular highlights to bring lifelike vitality to eyes.
+   * Advanced graphics post-pass: renders photorealistic intra-oral cavity (maxillary/mandibular
+   * teeth, gums, tongue articulation, pharyngeal depth) and natural corneal specular catchlights.
    */
   private drawRealisticPostPass(
     ctx: CanvasRenderingContext2D,
@@ -782,35 +836,25 @@ export class RealtimeFacialEngine {
     ctx.translate(x, y);
     ctx.scale(sx, sy);
 
-    // 1. Oral cavity depth & lip vermilion blending during speech
-    if (metrics.mouthAspectRatio > 0.04) {
-      // Soft upper-lip ambient occlusion shadow under the upper incisors
-      const upperLip = [78, 191, 80, 81, 82, 13, 312, 311, 310, 415, 308];
-      ctx.beginPath();
-      ctx.moveTo(pts[upperLip[0] * 2], pts[upperLip[0] * 2 + 1]);
-      for (let i = 1; i < upperLip.length; i++) {
-        ctx.lineTo(pts[upperLip[i] * 2], pts[upperLip[i] * 2 + 1]);
-      }
-      ctx.strokeStyle = 'rgba(15, 5, 8, 0.42)';
-      ctx.lineWidth = 2.5;
-      ctx.shadowColor = 'rgba(0, 0, 0, 0.65)';
-      ctx.shadowBlur = 4;
-      ctx.stroke();
-      ctx.shadowBlur = 0;
+    // 1. Forehead & hairline cranial boundary harmonization (eliminates brow/temple seam lines)
+    CranialBoundaryBlender.harmonizeForeheadBoundary(ctx, pts, {
+      canvasWidth: this.canvas.width,
+      canvasHeight: this.canvas.height,
+      blendStrength: this.settings.blendStrength,
+      colorGain: this.colorGain,
+    });
+    CranialBoundaryBlender.softenHairlineEdges(ctx, pts);
 
-      // Soft anti-aliased vermilion blending contour
-      ctx.beginPath();
-      ctx.moveTo(pts[INNER_LIP_RING[0] * 2], pts[INNER_LIP_RING[0] * 2 + 1]);
-      for (let i = 1; i < INNER_LIP_RING.length; i++) {
-        ctx.lineTo(pts[INNER_LIP_RING[i] * 2], pts[INNER_LIP_RING[i] * 2 + 1]);
-      }
-      ctx.closePath();
-      const r = Math.round(clamp(this.personaMean[0] * this.colorGain[0], 0, 255));
-      const g = Math.round(clamp(this.personaMean[1] * this.colorGain[1], 0, 255));
-      const b = Math.round(clamp(this.personaMean[2] * this.colorGain[2], 0, 255));
-      ctx.strokeStyle = `rgba(${r}, ${g}, ${b}, 0.35)`;
-      ctx.lineWidth = 1.8;
-      ctx.stroke();
+    // 2. Anatomical Intra-Oral Dental & Depth Synthesis Engine
+    const apertureMetrics = extractOralApertureMetrics(pts);
+    if (apertureMetrics) {
+      OralCavityRenderer.renderOralCavity(ctx, pts, {
+        metrics: apertureMetrics,
+        lightingGain: this.colorGain,
+        isSpeaking: metrics.isSpeaking,
+        isSmiling: metrics.isSmiling,
+        blendStrength: this.settings.blendStrength,
+      });
     }
 
     // 2. Corneal specular catchlights (natural moisture & vitality in eyes)
@@ -821,8 +865,8 @@ export class RealtimeFacialEngine {
       const rightIrisY = pts[LM.RIGHT_IRIS_CENTER * 2 + 1];
 
       // Subtle corneal catchlight positioned at upper-right pupil (matching typical key light)
-      const glintSize = 2.2;
-      ctx.fillStyle = 'rgba(255, 255, 255, 0.9)';
+      const glintSize = 2.0;
+      ctx.fillStyle = 'rgba(255, 255, 255, 0.88)';
       ctx.shadowColor = 'rgba(255, 255, 255, 0.8)';
       ctx.shadowBlur = 2;
 

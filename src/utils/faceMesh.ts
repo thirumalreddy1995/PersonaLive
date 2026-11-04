@@ -371,3 +371,56 @@ export function applyGazeIrisTracking(
   }
 }
 
+/**
+ * 3D perspective foreshortening & multi-angle head pose compensation:
+ * When turning head in yaw or pitch, anatomically adjusts landmark spacing
+ * across cylindrical/spherical cranial profile so retreating cheek foreshortens
+ * naturally rather than flattening in 2D.
+ */
+export function applyPerspectiveForeshortening(
+  points: Float32Array,
+  yawDeg: number,
+  pitchDeg: number,
+  faceWidth: number,
+  faceHeight: number,
+  center: Point2D
+) {
+  if (Math.abs(yawDeg) < 1.0 && Math.abs(pitchDeg) < 1.0) return;
+  const yawRad = (yawDeg * Math.PI) / 180;
+  const pitchRad = (pitchDeg * Math.PI) / 180;
+
+  const sinYaw = Math.sin(yawRad);
+  const cosYaw = Math.cos(yawRad);
+  const sinPitch = Math.sin(pitchRad);
+
+  const radiusX = faceWidth * 0.52;
+  const radiusY = faceHeight * 0.55;
+  const n = Math.min(468, points.length / 2);
+
+  for (let i = 0; i < n; i++) {
+    const px = points[i * 2];
+    const py = points[i * 2 + 1];
+
+    const dx = (px - center.x) / radiusX;
+    const dy = (py - center.y) / radiusY;
+    const rSq = dx * dx + dy * dy;
+
+    // Approximate anatomical facial depth Z on ellipsoid profile
+    const zNorm = Math.sqrt(Math.max(0, 1.0 - Math.min(1.0, rSq * 0.75)));
+    const zDepth = zNorm * radiusX * 0.45;
+
+    // 3D rotation foreshortening projection
+    if (Math.abs(yawDeg) >= 1.0) {
+      // Perspective compression along line of sight
+      const foreshortenX = (dx * radiusX) * (cosYaw - 1.0) * 0.35 + zDepth * sinYaw * 0.42;
+      points[i * 2] += foreshortenX;
+    }
+
+    if (Math.abs(pitchDeg) >= 1.0) {
+      // Pitch tilt foreshortening (jaw / forehead foreshortening)
+      const foreshortenY = zDepth * sinPitch * 0.38;
+      points[i * 2 + 1] -= foreshortenY;
+    }
+  }
+}
+

@@ -4,6 +4,7 @@ import { FaceLandmarker } from '@mediapipe/tasks-vision';
 import {
   applyEyelidKinematics,
   applyGazeIrisTracking,
+  applyPerspectiveForeshortening,
   applySmileBias,
   applySpeechAnatomy,
   buildFaceTopology,
@@ -16,6 +17,7 @@ import {
   SEPARATING_TRIANGLES,
   smoothingToFilterParams,
 } from './faceMesh.ts';
+import { extractOralApertureMetrics } from './oralCavityRenderer.ts';
 
 const TESSELLATION = FaceLandmarker.FACE_LANDMARKS_TESSELATION;
 const OVAL = FaceLandmarker.FACE_LANDMARKS_FACE_OVAL;
@@ -179,4 +181,20 @@ test('applyGazeIrisTracking shifts irises according to gaze vector', () => {
   const beforeX = pts[LM.LEFT_IRIS_CENTER * 2];
   applyGazeIrisTracking(pts, 0.8, 0, 200);
   assert.ok(pts[LM.LEFT_IRIS_CENTER * 2] > beforeX, 'left iris shifted rightwards with gaze');
+});
+
+test('applyPerspectiveForeshortening adjusts landmark spacing on head turns', () => {
+  const pts = syntheticFace({ eyesOpen: true, mouthOpen: false });
+  const beforeCheekL = pts[LM.LEFT_CHEEK * 2];
+  // Yaw right +25 deg (subject turns head to their right)
+  applyPerspectiveForeshortening(pts, 25, 0, 200, 200, { x: 400, y: 400 });
+  assert.notEqual(pts[LM.LEFT_CHEEK * 2], beforeCheekL, 'cheek landmark adjusted with 3D rotation');
+});
+
+test('extractOralApertureMetrics correctly calculates jaw opening and mouth width', () => {
+  const pts = syntheticFace({ eyesOpen: true, mouthOpen: true });
+  const metrics = extractOralApertureMetrics(pts);
+  assert.ok(metrics !== null, 'metrics extracted');
+  assert.ok(metrics!.mar > 0.3, 'mouth opening correctly measured');
+  assert.equal(metrics!.mouthWidthPx, 80, 'mouth width is 80px');
 });

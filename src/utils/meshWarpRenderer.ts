@@ -54,6 +54,7 @@ uniform vec3 uGainChin;
 varying vec2 vUv;
 varying float vFeather;
 varying vec3 vLighting;
+varying vec2 vNormPos;
 
 void main() {
   vec2 clip = vec2(aPosition.x / uResolution.x * 2.0 - 1.0, 1.0 - aPosition.y / uResolution.y * 2.0);
@@ -63,6 +64,7 @@ void main() {
 
   // Normalized position relative to face bounding box [0, 1]
   vec2 nPos = clamp((aPosition - uFaceBounds.xy) / max(uFaceBounds.zw, vec2(1.0)), 0.0, 1.0);
+  vNormPos = nPos;
 
   // Smooth spatial basis functions across forehead, cheeks, nose, and chin/jaw
   float wForehead = clamp((0.45 - nPos.y) / 0.45, 0.0, 1.0);
@@ -88,25 +90,49 @@ uniform float uOpacity;
 varying vec2 vUv;
 varying float vFeather;
 varying vec3 vLighting;
+varying vec2 vNormPos;
 
 void main() {
   vec4 c = texture2D(uTexture, vUv);
   if (c.a < 0.02) discard;
 
-  // Multi-zone directional lighting adaptation
-  vec3 lit = c.rgb * vLighting;
+  // 1. High-frequency micro-texture preservation (unsharp pore & follicle contrast)
+  // Eliminates the blurry synthetic "diffusion / wax museum" look
+  vec2 d = vec2(0.0011, 0.0011);
+  vec4 t0 = texture2D(uTexture, vUv + vec2(-d.x, 0.0));
+  vec4 t1 = texture2D(uTexture, vUv + vec2( d.x, 0.0));
+  vec4 t2 = texture2D(uTexture, vUv + vec2(0.0, -d.y));
+  vec4 t3 = texture2D(uTexture, vUv + vec2(0.0,  d.y));
+  vec3 blurred = (t0.rgb + t1.rgb + t2.rgb + t3.rgb) * 0.25;
+  vec3 highPass = c.rgb - blurred;
+  vec3 microSkin = c.rgb + highPass * 0.35;
 
-  // Subsurface skin scattering: warm diffusion in transitions to eliminate plastic look
+  // 2. Multi-zone directional lighting adaptation
+  vec3 lit = clamp(microSkin, 0.0, 1.0) * vLighting;
+
+  // 3. Dual-lobe physiological subsurface scattering (SSS)
+  // Epidermal surface layer + Subdermal blood vessel capillary diffusion
   float lum = dot(lit, vec3(0.299, 0.587, 0.114));
-  vec3 sss = lit * vec3(1.04, 0.99, 0.95);
-  float sssWeight = clamp((0.4 - abs(lum - 0.45)) * 0.5, 0.0, 0.2);
-  vec3 naturalSkin = mix(lit, sss, sssWeight);
+  vec3 subdermal = lit * vec3(1.10, 0.94, 0.86);
+  float sssWeight = clamp((0.42 - abs(lum - 0.44)) * 0.55, 0.0, 0.28);
+  vec3 sssSkin = mix(lit, subdermal, sssWeight);
 
-  // Smooth Hermite feathering curve for boundary
-  float f = smoothstep(0.0, 1.0, vFeather);
-  float a = uOpacity * f * c.a;
+  // 4. Natural sebum micro-specular sheen (skin vitality on cheekbones & ridges)
+  float specLum = max(0.0, dot(vLighting, vec3(0.333)) - 0.88);
+  vec3 specSheen = vec3(0.09, 0.11, 0.13) * specLum * pow(lum, 1.8);
+  vec3 naturalSkin = clamp(sssSkin + specSheen, 0.0, 1.0);
 
-  gl_FragColor = vec4(clamp(naturalSkin, 0.0, 1.0) * a, a);
+  // 5. Quintic smootherstep feathering curve for outer facial boundary
+  float t = clamp(vFeather, 0.0, 1.0);
+  float f = t * t * t * (t * (t * 6.0 - 15.0) + 10.0);
+
+  // 6. Cranial hairline feathering: smoothly dissolves the upper forehead boundary
+  // into the driver's hairline and temple shadow, eliminating horizontal seam cuts
+  float cranialFalloff = smoothstep(0.0, 0.15, vNormPos.y);
+
+  float a = uOpacity * f * cranialFalloff * c.a;
+
+  gl_FragColor = vec4(naturalSkin * a, a);
 }`;
 
 export class MeshWarpRenderer {
@@ -253,6 +279,34 @@ export class MeshWarpRenderer {
   clearPersona() {
     this.personaImage = null;
     this.personaUv = null;
+  }
+
+  /**
+   * Fast dynamic UV coordinate update without re-uploading texture pixels.
+   * Used when switching or interpolating between multi-angle reference keyframes.
+   */
+  updateUVs(uv: Float32Array) {
+    this.personaUv = uv;
+    const gl = this.gl;
+    if (!gl) return;
+    gl.bindBuffer(gl.ARRAY_BUFFER, this.uvBuffer);
+    gl.bufferData(gl.ARRAY_BUFFER, uv, gl.DYNAMIC_DRAW);
+  }
+
+  /**
+   * Fast texture re-bind when switching keyframe source images.
+   */
+  updateTexture(image: HTMLImageElement | HTMLCanvasElement) {
+    if (this.personaImage === image) return;
+    this.personaImage = image;
+    this.personaSize = {
+      width: image instanceof HTMLImageElement ? image.naturalWidth : image.width,
+      height: image instanceof HTMLImageElement ? image.naturalHeight : image.height,
+    };
+    const gl = this.gl;
+    if (!gl) return;
+    gl.bindTexture(gl.TEXTURE_2D, this.texture);
+    gl.texImage2D(gl.TEXTURE_2D, 0, gl.RGBA, gl.RGBA, gl.UNSIGNED_BYTE, image);
   }
 
   get hasPersona() {
