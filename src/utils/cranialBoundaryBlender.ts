@@ -9,13 +9,16 @@
  *    and projects the forehead upward along the anatomical cranial normal vector
  *    so the mesh seamlessly transitions into the driver's true hair root boundary.
  *
- * 2. Gradient-Domain Boundary Transfer:
- *    Samples the live driver's skin and ambient lighting along the upper cranial contour,
- *    derives the spatial chromatic delta, and applies a smooth quintic Poisson-like
- *    gradient feather across the forehead-to-hairline and temple transition zones.
+ * 2. Alpha Boundary Feather:
+ *    Erases a soft gradient band from the persona layer's alpha across the forehead-to-hairline
+ *    and temple transition zones, so the driver's own hair roots and temple shadow show through.
  *
  * 3. Directional Anti-Aliased Boundary Smoothing:
  *    Eliminates edge fringing, step contrast cuts, and haloing along the brow and temples.
+ *
+ * Both passes use `destination-out`, so they must run on a *transparent* layer that holds only
+ * the persona (see `FacialTransformationEngine.composeOverlayLayer`). On an opaque canvas
+ * `destination-out` cannot reveal anything underneath and merely darkens pixels toward black.
  */
 
 import { Point2D } from './faceMath.ts';
@@ -31,29 +34,7 @@ export const SUPRAORBITAL_RIDGE = [
   70, 63, 105, 66, 107, 9, 336, 296, 334, 293, 300,
 ];
 
-export interface CranialHarmonizationOptions {
-  canvasWidth: number;
-  canvasHeight: number;
-  blendStrength: number;
-  colorGain: [number, number, number];
-}
-
 export class CranialBoundaryBlender {
-  private static offscreenCanvas: HTMLCanvasElement | null = null;
-  private static offscreenCtx: CanvasRenderingContext2D | null = null;
-
-  private static getOffscreen(width: number, height: number) {
-    if (!this.offscreenCanvas) {
-      this.offscreenCanvas = document.createElement('canvas');
-      this.offscreenCtx = this.offscreenCanvas.getContext('2d', { willReadFrequently: true });
-    }
-    if (this.offscreenCanvas.width !== width || this.offscreenCanvas.height !== height) {
-      this.offscreenCanvas.width = width;
-      this.offscreenCanvas.height = height;
-    }
-    return { canvas: this.offscreenCanvas, ctx: this.offscreenCtx! };
-  }
-
   /**
    * Computes the cranial apex position and forehead upward vector.
    */
@@ -86,17 +67,15 @@ export class CranialBoundaryBlender {
   }
 
   /**
-   * Harmonizes the forehead and hairline boundary in the composite frame.
+   * Harmonizes the forehead and hairline boundary on the transparent persona layer.
    *
-   * Draws a soft gradient-domain Poisson transition band across the upper cranial contour,
-   * softly diffusing the persona's forehead edge into the driver's ambient background,
-   * hair roots, and temple shadows without any visible demarcation line.
+   * Erases a soft gradient band from the layer's alpha across the upper cranial contour, so the
+   * persona's forehead edge dissolves into the driver's hair roots and temple shadows without a
+   * visible demarcation line once the layer is composited over the live frame.
+   *
+   * @param targetCtx 2D context of a canvas with an alpha channel that contains only the persona.
    */
-  public static harmonizeForeheadBoundary(
-    targetCtx: CanvasRenderingContext2D,
-    points: Float32Array,
-    opts: CranialHarmonizationOptions
-  ): void {
+  public static harmonizeForeheadBoundary(targetCtx: CanvasRenderingContext2D, points: Float32Array): void {
     if (points.length < 357 * 2) return;
     const p = (idx: number): Point2D => ({ x: points[idx * 2], y: points[idx * 2 + 1] });
 
@@ -146,13 +125,12 @@ export class CranialBoundaryBlender {
       apex.y - bandHeight * 0.5
     );
 
-    // Softly feather from persona skin into ambient background
+    // Softly feather from persona skin into the driver's hairline (alpha erased, not darkened)
     grad.addColorStop(0.0, 'rgba(0, 0, 0, 0.0)');
     grad.addColorStop(0.35, 'rgba(0, 0, 0, 0.04)');
     grad.addColorStop(0.70, 'rgba(0, 0, 0, 0.12)');
     grad.addColorStop(1.0, 'rgba(0, 0, 0, 0.22)');
 
-    // Blend using soft-light / destination-out feathering
     targetCtx.fillStyle = grad;
     targetCtx.globalCompositeOperation = 'destination-out';
     targetCtx.fill();
@@ -161,13 +139,12 @@ export class CranialBoundaryBlender {
   }
 
   /**
-   * Applies hairline micro-texture edge anti-aliasing to blend individual hair roots
-   * and temple fuzz naturally into the persona's forehead skin.
+   * Applies hairline micro-texture edge anti-aliasing: thins the persona layer's alpha along the
+   * cranial contour with a blurred stroke so hair roots and temple fuzz show through naturally.
+   *
+   * @param ctx 2D context of a canvas with an alpha channel that contains only the persona.
    */
-  public static softenHairlineEdges(
-    ctx: CanvasRenderingContext2D,
-    points: Float32Array
-  ): void {
+  public static softenHairlineEdges(ctx: CanvasRenderingContext2D, points: Float32Array): void {
     if (points.length < 357 * 2) return;
     const p = (idx: number): Point2D => ({ x: points[idx * 2], y: points[idx * 2 + 1] });
 
@@ -177,6 +154,7 @@ export class CranialBoundaryBlender {
     ctx.lineJoin = 'round';
     ctx.strokeStyle = 'rgba(0, 0, 0, 0.08)';
     ctx.filter = 'blur(4px)';
+    ctx.globalCompositeOperation = 'destination-out';
 
     ctx.beginPath();
     const first = p(CRANIAL_UPPER_BOUNDARY[0]);

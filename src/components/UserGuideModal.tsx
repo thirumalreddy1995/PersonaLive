@@ -2,18 +2,14 @@ import React, { useState } from 'react';
 import {
   X,
   BookOpen,
-  Camera,
   Sparkles,
   Video,
   ShieldCheck,
   Cpu,
   Code,
   Terminal,
-  Layers,
   Sliders,
   CheckCircle2,
-  ChevronRight,
-  ExternalLink,
   Download,
   RefreshCw,
   GitBranch,
@@ -48,7 +44,7 @@ export const UserGuideModal: React.FC<UserGuideModalProps> = ({
               <h2 className="font-semibold text-base text-slate-100 flex items-center gap-2">
                 PersonaLive Studio: End-to-End User & Developer Guide
                 <span className="text-[10px] bg-sky-950 text-sky-400 font-mono px-2 py-0.5 rounded border border-sky-800">
-                  Desktop Edition v2.4
+                  Desktop Edition v{__PL_APP_VERSION__}
                 </span>
               </h2>
               <p className="text-xs text-slate-400">
@@ -188,7 +184,7 @@ export const UserGuideModal: React.FC<UserGuideModalProps> = ({
                     <span>Virtual Camera & Recording</span>
                   </div>
                   <p className="text-slate-400 leading-relaxed">
-                    Keep the <strong>"DirectShow / OBS VirtualCam Sink"</strong> checkbox checked to expose your transformed appearance as a system-wide webcam to Zoom, Teams, and OBS. Click <strong>"Record Stream"</strong> or <strong>"Snapshot"</strong> to save high-fidelity recordings with embedded C2PA provenance credentials.
+                    To use the output in Zoom, Teams, Meet or Discord, capture the studio window with OBS Studio and start its virtual camera; the <strong>"Virtual Camera Badge"</strong> checkbox only shows the on-air indicator in the title bar. Click <strong>"Record Stream"</strong> or <strong>"Snapshot"</strong> to save recordings with the AI-Transformed watermark.
                   </p>
                 </div>
               </div>

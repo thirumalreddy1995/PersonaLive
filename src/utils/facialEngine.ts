@@ -21,7 +21,7 @@ import {
   buildFaceTopology,
   computeKinematics,
   FaceTopology,
-  INNER_LIP_RING,
+  LandmarkKinematics,
   LM,
   pointBounds,
   smoothingToFilterParams,
@@ -49,6 +49,11 @@ const RESOLUTIONS: Record<TransformationSettings['outputResolution'], [number, n
   '720p': [1280, 720],
   '540p': [960, 540],
 };
+
+/** Output size for a resolution setting, defaulting to 720p for unexpected values. */
+function resolveResolution(resolution: TransformationSettings['outputResolution']): [number, number] {
+  return RESOLUTIONS[resolution] ?? RESOLUTIONS['720p'];
+}
 
 /** Portrait used as the stand-in subject when no webcam is connected. */
 export const DEMO_SUBJECT_URL =
@@ -83,6 +88,8 @@ export class RealtimeFacialEngine {
   private personaPrepareToken = 0;
   private referenceBank = new MultiReferenceBank();
   private currentKeyframeSource: CanvasImageSource | null = null;
+  /** Id of the reference keyframe whose UVs are currently uploaded to the warp renderer. */
+  private currentKeyframeId: string | null = null;
 
   // Tracking state
   private filters: OneEuroFilter[] = [];
@@ -96,6 +103,9 @@ export class RealtimeFacialEngine {
   // Lighting adaptation
   private samplerCanvas: HTMLCanvasElement;
   private samplerCtx: CanvasRenderingContext2D;
+  /** Transparent copy of the warp output; alpha-only boundary passes run here before compositing. */
+  private overlayLayer: HTMLCanvasElement;
+  private overlayCtx: CanvasRenderingContext2D;
   private colorGain: [number, number, number] = [1, 1, 1];
   private zoneLighting: FacialLightingZones = {
     forehead: [1, 1, 1],
@@ -111,6 +121,7 @@ export class RealtimeFacialEngine {
 
   // Loop & settings
   private isRunning = false;
+  private disposed = false;
   private animationFrameId: number | null = null;
   private settings: TransformationSettings;
   private splitPosition = 50;
@@ -144,7 +155,7 @@ export class RealtimeFacialEngine {
     this.ctx = context;
     this.settings = settings;
 
-    const [w, h] = RESOLUTIONS[settings.outputResolution] ?? RESOLUTIONS['720p'];
+    const [w, h] = resolveResolution(settings.outputResolution);
     canvas.width = w;
     canvas.height = h;
 
@@ -162,6 +173,13 @@ export class RealtimeFacialEngine {
     this.samplerCanvas.width = 24;
     this.samplerCanvas.height = 24;
     this.samplerCtx = this.samplerCanvas.getContext('2d', { willReadFrequently: true })!;
+
+    this.overlayLayer = document.createElement('canvas');
+    this.overlayLayer.width = w;
+    this.overlayLayer.height = h;
+    const overlayContext = this.overlayLayer.getContext('2d');
+    if (!overlayContext) throw new Error('Could not get 2D context for the overlay layer');
+    this.overlayCtx = overlayContext;
 
     const params = smoothingToFilterParams(settings.temporalSmoothing);
     for (let i = 0; i < LANDMARK_COUNT * 2; i++) {
@@ -185,12 +203,14 @@ export class RealtimeFacialEngine {
     this.patchStatus({ model: 'loading', modelProgress: 0 });
     try {
       await this.tracker.load((p) => {
-        this.patchStatus({ modelProgress: p.progress, modelMessage: p.message });
+        if (!this.disposed) this.patchStatus({ modelProgress: p.progress, modelMessage: p.message });
       });
+      if (this.disposed) return;
       this.patchStatus({ model: 'ready', modelProgress: 1, backend: this.tracker.backend, modelMessage: 'Face tracking ready' });
       // Persona may have been selected while the model was still loading.
       if (this.personaImage && this.status.persona !== 'ready') void this.preparePersona();
     } catch (err) {
+      if (this.disposed) return;
       console.error('Face tracker failed to load', err);
       this.patchStatus({
         model: 'error',
@@ -210,11 +230,13 @@ export class RealtimeFacialEngine {
     const img = new Image();
     img.crossOrigin = 'anonymous';
     img.onload = () => {
+      if (this.disposed) return;
       this.demoImage = img;
       this.demoFailed = false;
       if (!this.videoElement) this.patchStatus({ source: 'demo' });
     };
     img.onerror = () => {
+      if (this.disposed) return;
       this.demoFailed = true;
       if (!this.videoElement) this.patchStatus({ source: 'none' });
     };
@@ -226,6 +248,7 @@ export class RealtimeFacialEngine {
     if (!persona) {
       this.personaId = null;
       this.personaImage = null;
+      this.currentKeyframeId = null;
       this.warp.clearPersona();
       this.patchStatus({ persona: 'none' });
       return;
@@ -238,12 +261,12 @@ export class RealtimeFacialEngine {
     const img = new Image();
     img.crossOrigin = 'anonymous';
     img.onload = () => {
-      if (token !== this.personaPrepareToken) return;
+      if (this.disposed || token !== this.personaPrepareToken) return;
       this.personaImage = img;
       void this.preparePersona();
     };
     img.onerror = () => {
-      if (token !== this.personaPrepareToken) return;
+      if (this.disposed || token !== this.personaPrepareToken) return;
       this.patchStatus({ persona: 'error', personaMessage: 'Could not load the persona photo.' });
     };
     img.src = persona.imageUrl;
@@ -257,9 +280,11 @@ export class RealtimeFacialEngine {
       for (const f of this.filters) f.setParams(p.minCutoff, p.beta);
     }
     if (prev.outputResolution !== settings.outputResolution) {
-      const [w, h] = RESOLUTIONS[settings.outputResolution];
+      const [w, h] = resolveResolution(settings.outputResolution);
       this.canvas.width = w;
       this.canvas.height = h;
+      this.overlayLayer.width = w;
+      this.overlayLayer.height = h;
       this.warp.resize(w, h);
       this.resetTracking();
     }
@@ -287,6 +312,8 @@ export class RealtimeFacialEngine {
   }
 
   public dispose() {
+    this.disposed = true;
+    this.personaPrepareToken++;
     this.stop();
     this.tracker.dispose();
     this.warp.dispose();
@@ -306,7 +333,7 @@ export class RealtimeFacialEngine {
     const token = this.personaPrepareToken;
     try {
       const { faces } = await this.tracker.detectImage(img);
-      if (token !== this.personaPrepareToken) return;
+      if (this.disposed || token !== this.personaPrepareToken) return;
       if (faces.length === 0) {
         this.warp.clearPersona();
         this.patchStatus({
@@ -318,6 +345,7 @@ export class RealtimeFacialEngine {
       const face = faces[0];
       this.warp.setPersona(img, face.landmarks);
       this.currentKeyframeSource = img;
+      this.currentKeyframeId = null;
       this.personaMean = this.sampleMeanColor(img, face.landmarks, img.naturalWidth, img.naturalHeight, false);
 
       // Synthesize calibrated multi-angle, multi-expression identity suite for Person A
@@ -332,8 +360,8 @@ export class RealtimeFacialEngine {
         personaMessage: faces.length > 1 ? 'Multiple faces detected — using the most prominent one.' : undefined,
       });
     } catch (err) {
+      if (this.disposed || token !== this.personaPrepareToken) return;
       console.error('Persona analysis failed', err);
-      if (token !== this.personaPrepareToken) return;
       this.patchStatus({
         persona: 'error',
         personaMessage:
@@ -430,7 +458,9 @@ export class RealtimeFacialEngine {
     if (this.status.faceDetected !== this.faceVisible) this.patchStatus({ faceDetected: this.faceVisible });
 
     // --- 2. Kinematics & metrics -------------------------------------------------------------
-    const { metrics, pose } = this.computeMetrics();
+    // Derived once per frame and shared by the metrics and the persona overlay.
+    const kinematics = this.faceVisible && this.lastFace ? computeKinematics(this.smoothed, this.neutralMouthWidth) : null;
+    const { metrics, pose } = this.computeMetrics(kinematics);
 
     // --- 3. Compose base frame --------------------------------------------------------------
     ctx.fillStyle = '#0b1220';
@@ -441,13 +471,14 @@ export class RealtimeFacialEngine {
       else this.drawStandby(ctx, x, y, w, h);
     };
 
-    const overlayReady = !!(this.faceVisible && this.lastFace && this.warp.hasPersona && this.status.persona === 'ready');
-    if (overlayReady && src && layout) {
-      this.renderPersonaOverlay(layout, src.source, src.width, src.height);
+    const overlayReady = !!(kinematics && this.faceVisible && this.lastFace && this.warp.hasPersona && this.status.persona === 'ready');
+    if (overlayReady && kinematics && src && layout) {
+      this.renderPersonaOverlay(layout, src.source, src.width, src.height, kinematics);
+      this.composeOverlayLayer();
     }
     const drawOverlay = (x: number, y: number, w: number, h: number) => {
       if (!overlayReady) return;
-      ctx.drawImage(this.warp.canvas, 0, 0, W, H, x, y, w, h);
+      ctx.drawImage(this.overlayLayer, 0, 0, W, H, x, y, w, h);
       this.drawRealisticPostPass(ctx, x, y, w, h, metrics);
     };
 
@@ -558,9 +589,9 @@ export class RealtimeFacialEngine {
     if (this.status.faceDetected) this.patchStatus({ faceDetected: false });
   }
 
-  private computeMetrics(): { metrics: FacialMetrics; pose: HeadPose } {
+  private computeMetrics(k: LandmarkKinematics | null): { metrics: FacialMetrics; pose: HeadPose } {
     const s = this.settings;
-    if (!this.faceVisible || !this.lastFace) {
+    if (!k || !this.faceVisible || !this.lastFace) {
       return {
         metrics: {
           eyeAspectRatioLeft: 0,
@@ -577,7 +608,6 @@ export class RealtimeFacialEngine {
         pose: { yaw: 0, pitch: 0, roll: 0 },
       };
     }
-    const k = computeKinematics(this.smoothed, this.neutralMouthWidth);
     const bs = this.lastFace.blendshapes;
     const mouthWidth = Math.hypot(
       this.smoothed[LM.MOUTH.cornerLeft * 2] - this.smoothed[LM.MOUTH.cornerRight * 2],
@@ -614,10 +644,15 @@ export class RealtimeFacialEngine {
   // Persona overlay
   // ---------------------------------------------------------------------------------------------
 
-  private renderPersonaOverlay(layout: SourceLayout, source: CanvasImageSource, srcW: number, srcH: number) {
+  private renderPersonaOverlay(
+    layout: SourceLayout,
+    source: CanvasImageSource,
+    srcW: number,
+    srcH: number,
+    k: LandmarkKinematics
+  ) {
     const s = this.settings;
     this.warpPositions.set(this.smoothed);
-    const k = computeKinematics(this.smoothed, this.neutralMouthWidth);
 
     // 1. Natural smile warmth bias
     if (s.manualSmileBias) {
@@ -664,7 +699,11 @@ export class RealtimeFacialEngine {
         browElevation: bs.browInnerUp ?? 0,
       });
 
-      this.warp.updateUVs(queryResult.primary.landmarks);
+      // UVs only change when the bank picks a different keyframe; skip the per-frame GPU upload otherwise.
+      if (queryResult.primary.id !== this.currentKeyframeId) {
+        this.warp.updateUVs(queryResult.primary.landmarks);
+        this.currentKeyframeId = queryResult.primary.id;
+      }
       if (queryResult.primary.source !== this.currentKeyframeSource) {
         this.warp.updateTexture(queryResult.primary.source);
         this.currentKeyframeSource = queryResult.primary.source;
@@ -686,6 +725,21 @@ export class RealtimeFacialEngine {
       faceBounds: [bounds.minX, bounds.minY, bounds.width, bounds.height],
       drawPersonaEyes: !s.eyeGazeSync || (k.earLeft < 0.18 && k.earRight < 0.18),
     });
+  }
+
+  /**
+   * Copies the warp output onto the transparent overlay layer and runs the alpha-only boundary
+   * passes there. `destination-out` on this layer erases persona alpha so the driver's hairline
+   * shows through after compositing; on the opaque output canvas it would only darken pixels.
+   */
+  private composeOverlayLayer() {
+    const octx = this.overlayCtx;
+    const W = this.overlayLayer.width;
+    const H = this.overlayLayer.height;
+    octx.clearRect(0, 0, W, H);
+    octx.drawImage(this.warp.canvas, 0, 0, W, H);
+    CranialBoundaryBlender.harmonizeForeheadBoundary(octx, this.warpPositions);
+    CranialBoundaryBlender.softenHairlineEdges(octx, this.warpPositions);
   }
 
   /** Estimates the wearer's facial skin tone across 5 spatial zones and derives lighting gains. */
@@ -836,16 +890,9 @@ export class RealtimeFacialEngine {
     ctx.translate(x, y);
     ctx.scale(sx, sy);
 
-    // 1. Forehead & hairline cranial boundary harmonization (eliminates brow/temple seam lines)
-    CranialBoundaryBlender.harmonizeForeheadBoundary(ctx, pts, {
-      canvasWidth: this.canvas.width,
-      canvasHeight: this.canvas.height,
-      blendStrength: this.settings.blendStrength,
-      colorGain: this.colorGain,
-    });
-    CranialBoundaryBlender.softenHairlineEdges(ctx, pts);
+    // Forehead/hairline harmonization runs on the transparent overlay layer (composeOverlayLayer).
 
-    // 2. Anatomical Intra-Oral Dental & Depth Synthesis Engine
+    // 1. Anatomical Intra-Oral Dental & Depth Synthesis Engine
     const apertureMetrics = extractOralApertureMetrics(pts);
     if (apertureMetrics) {
       OralCavityRenderer.renderOralCavity(ctx, pts, {
@@ -853,7 +900,6 @@ export class RealtimeFacialEngine {
         lightingGain: this.colorGain,
         isSpeaking: metrics.isSpeaking,
         isSmiling: metrics.isSmiling,
-        blendStrength: this.settings.blendStrength,
       });
     }
 

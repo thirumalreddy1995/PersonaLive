@@ -17,10 +17,13 @@ Provides:
 
 import os
 import glob
+import logging
 import math
-from typing import List, Dict, Tuple, Optional, Any
+from typing import List, Tuple, Optional
 import cv2
 import numpy as np
+
+logger = logging.getLogger(__name__)
 
 try:
     import torch
@@ -126,7 +129,7 @@ class MultiViewIdentityBank:
                 self.face_app = FaceAnalysis(name='buffalo_l', providers=providers)
                 self.face_app.prepare(ctx_id=0 if self.use_gpu else -1, det_size=(640, 640))
             except Exception as e:
-                print(f"[IdentityBank Warning] InsightFace initialization fallback: {e}")
+                logger.warning("InsightFace initialisation failed; identity embeddings disabled: %s", e)
                 self.face_app = None
 
         if reference_dir:
@@ -261,12 +264,12 @@ class MultiViewIdentityBank:
         ArcFace embedding, and registers it into the bank.
         """
         if not os.path.exists(image_path):
-            print(f"[IdentityBank] Image not found: {image_path}")
+            logger.warning("Reference image not found: %s", image_path)
             return None
 
         img_bgr = cv2.imread(image_path)
         if img_bgr is None:
-            print(f"[IdentityBank] Could not decode image: {image_path}")
+            logger.warning("Could not decode reference image: %s", image_path)
             return None
 
         h, w = img_bgr.shape[:2]
@@ -282,7 +285,7 @@ class MultiViewIdentityBank:
 
         if landmarks is None:
             # Fallback estimation if no mesh was extracted
-            print(f"[IdentityBank] No face mesh detected in: {image_path}")
+            logger.warning("No face mesh detected in reference image: %s", image_path)
             return None
 
         # Compute pose and expression metrics
@@ -316,9 +319,10 @@ class MultiViewIdentityBank:
         )
 
         self.references.append(entry)
-        print(f"[IdentityBank] Ingested '{os.path.basename(image_path)}': "
-              f"Yaw={yaw:.1f}°, Pitch={pitch:.1f}°, Aperture={aperture:.2f}, "
-              f"MouthOpen={'YES' if is_mouth_open else 'NO'}")
+        logger.info(
+            "Ingested '%s': yaw=%.1f pitch=%.1f aperture=%.2f mouth_open=%s",
+            os.path.basename(image_path), yaw, pitch, aperture, is_mouth_open,
+        )
         return entry
 
     def load_directory(self, directory_path: str) -> int:
@@ -342,7 +346,7 @@ class MultiViewIdentityBank:
             self.identity_embedding_mean = np.mean(embeddings, axis=0)
             self.identity_embedding_mean /= (np.linalg.norm(self.identity_embedding_mean) + 1e-6)
 
-        print(f"[IdentityBank] Total references ingested: {count}")
+        logger.info("Total references ingested: %d", count)
         return count
 
     def get_best_reference(

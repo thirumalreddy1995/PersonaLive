@@ -1,12 +1,11 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { MultiReferenceBank, ReferenceKeyframe, DriverState } from './multiReferenceBank.ts';
+import { MultiReferenceBank, DriverState } from './multiReferenceBank.ts';
 import { CranialBoundaryBlender } from './cranialBoundaryBlender.ts';
 import { extractOralApertureMetrics } from './oralCavityRenderer.ts';
 import {
   applySpeechAnatomy,
   applyPerspectiveForeshortening,
-  computeKinematics,
   pointBounds,
   LM,
 } from './faceMesh.ts';
@@ -140,7 +139,6 @@ test('OralCavityRenderer & Aperture: accurately extracts mouth dimensions and vi
 test('Speech anatomy & 3D perspective foreshortening preserve facial structure', () => {
   const pts = createSyntheticLandmarks();
   const initialNoseY = pts[LM.NOSE_TIP * 2 + 1];
-  const initialUpperLipY = pts[LM.MOUTH.upperInner * 2 + 1];
 
   // Under high MAR (speech), speech anatomy prevents upper lip / mustache from sagging downward
   applySpeechAnatomy(pts, 0.35, 230);

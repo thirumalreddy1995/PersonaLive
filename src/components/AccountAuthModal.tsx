@@ -1,6 +1,9 @@
 import React, { useState } from 'react';
-import { X, ShieldCheck, Mail, Phone, Key, Check, Sparkles, CreditCard } from 'lucide-react';
+import { X, ShieldCheck, Mail, Phone, Sparkles } from 'lucide-react';
 import { UserAccount } from '../types/index.ts';
+
+/** The only code the simulated OTP step accepts; shown on screen because no code is ever sent. */
+const DEMO_OTP_CODE = '749281';
 
 interface AccountAuthModalProps {
   isOpen: boolean;
@@ -18,24 +21,21 @@ export const AccountAuthModal: React.FC<AccountAuthModalProps> = ({
   const [step, setStep] = useState<'profile' | 'otp' | 'tier'>('profile');
   const [email, setEmail] = useState(account.email);
   const [phone, setPhone] = useState(account.phone);
-  const [fullName, setFullName] = useState(account.fullName);
+  const fullName = account.fullName;
   const [otpInput, setOtpInput] = useState('');
-  const [otpSent, setOtpSent] = useState(false);
-  const [tier, setTier] = useState(account.tier);
   const [message, setMessage] = useState<string | null>(null);
 
   if (!isOpen) return null;
 
   const handleSendOtp = (e: React.FormEvent) => {
     e.preventDefault();
-    setOtpSent(true);
     setStep('otp');
-    setMessage(`Verification code dispatched to ${email || phone}. Demo code: 749281`);
+    setMessage(`Demo mode: no code is sent to ${email || phone}. Enter the demo code ${DEMO_OTP_CODE}.`);
   };
 
   const handleVerifyOtp = (e: React.FormEvent) => {
     e.preventDefault();
-    if (otpInput === '749281' || otpInput.length === 6) {
+    if (otpInput.trim() === DEMO_OTP_CODE) {
       onUpdateAccount({
         email,
         phone,
@@ -46,12 +46,11 @@ export const AccountAuthModal: React.FC<AccountAuthModalProps> = ({
       setStep('profile');
       setTimeout(() => setMessage(null), 3000);
     } else {
-      setMessage('Invalid verification code. Enter demo OTP 749281.');
+      setMessage(`Invalid verification code. Enter demo OTP ${DEMO_OTP_CODE}.`);
     }
   };
 
   const handleSelectTier = (newTier: UserAccount['tier']) => {
-    setTier(newTier);
     onUpdateAccount({ tier: newTier });
     setMessage(`Subscription updated to ${newTier}. Desktop licence unlocked.`);
     setTimeout(() => setMessage(null), 3000);
@@ -68,7 +67,7 @@ export const AccountAuthModal: React.FC<AccountAuthModalProps> = ({
             </div>
             <div>
               <h2 className="font-semibold text-base text-slate-100">Studio Account & Licence</h2>
-              <p className="text-xs text-slate-400">Authentication, OTP verification, and subscription tiers</p>
+              <p className="text-xs text-slate-400">Demo account: verification and licence are simulated on this device</p>
             </div>
           </div>
 
@@ -95,7 +94,7 @@ export const AccountAuthModal: React.FC<AccountAuthModalProps> = ({
                 <div>
                   <h3 className="font-semibold text-slate-100 text-sm">{account.fullName}</h3>
                   <p className="text-xs text-slate-400">{account.email}</p>
-                  <p className="text-[11px] text-slate-500 font-mono mt-1">Licence: {account.licenseKey}</p>
+                  <p className="text-[11px] text-slate-500 font-mono mt-1">Demo licence: {account.licenseKey}</p>
                 </div>
                 <div className="text-right">
                   <span className="px-2.5 py-1 rounded-full text-xs font-bold bg-sky-950 text-sky-400 border border-sky-800">
@@ -171,7 +170,7 @@ export const AccountAuthModal: React.FC<AccountAuthModalProps> = ({
               <div className="text-center space-y-1">
                 <h3 className="font-semibold text-slate-100 text-sm">Enter 6-Digit OTP</h3>
                 <p className="text-xs text-slate-400">
-                  Verification code sent to {phone || email}
+                  Demo mode: no code was sent to {phone || email}
                 </p>
               </div>
 
@@ -181,11 +180,11 @@ export const AccountAuthModal: React.FC<AccountAuthModalProps> = ({
                   maxLength={6}
                   value={otpInput}
                   onChange={(e) => setOtpInput(e.target.value)}
-                  placeholder="749281"
+                  placeholder={DEMO_OTP_CODE}
                   className="w-full tracking-widest text-center font-mono text-xl bg-slate-950 border border-slate-800 rounded py-3 text-sky-400 focus:outline-none focus:border-sky-500"
                 />
                 <span className="text-[10px] text-slate-500 block text-center">
-                  * For test environment, enter demo code: 749281
+                  * Demo verification: enter the demo code {DEMO_OTP_CODE}
                 </span>
               </div>
 

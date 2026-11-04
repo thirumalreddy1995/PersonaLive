@@ -11,7 +11,9 @@
  * and mouth interior (teeth, tongue) show through naturally. Persona eyes can optionally be
  * painted back in with triangle fans.
  *
- * Falls back to a Canvas 2D per-triangle affine warp when WebGL is unavailable.
+ * Falls back to a Canvas 2D per-triangle affine warp when WebGL is unavailable or cannot be
+ * initialised, and survives WebGL context loss (GPU reset, tab backgrounding) by rebuilding its
+ * GPU resources when the context is restored.
  */
 import type { FaceTopology } from './faceMesh.ts';
 
@@ -37,6 +39,8 @@ export interface WarpFrameOptions {
   /** Paint persona eyes over the wearer's eyes (otherwise the wearer's real eyes show). */
   drawPersonaEyes: boolean;
 }
+
+type PersonaSource = HTMLImageElement | HTMLCanvasElement;
 
 const VERTEX_SHADER = `
 attribute vec2 aPosition;
@@ -135,19 +139,15 @@ void main() {
   gl_FragColor = vec4(naturalSkin * a, a);
 }`;
 
-export class MeshWarpRenderer {
-  public readonly canvas: HTMLCanvasElement;
-  private gl: WebGLRenderingContext | null = null;
-  private ctx2d: CanvasRenderingContext2D | null = null;
-
-  private program: WebGLProgram | null = null;
-  private positionBuffer: WebGLBuffer | null = null;
-  private uvBuffer: WebGLBuffer | null = null;
-  private featherBuffer: WebGLBuffer | null = null;
-  private indexBuffer: WebGLBuffer | null = null;
-  private eyeIndexBuffer: WebGLBuffer | null = null;
-  private texture: WebGLTexture | null = null;
-  private locations: {
+interface GLResources {
+  program: WebGLProgram;
+  positionBuffer: WebGLBuffer;
+  uvBuffer: WebGLBuffer;
+  featherBuffer: WebGLBuffer;
+  indexBuffer: WebGLBuffer;
+  eyeIndexBuffer: WebGLBuffer;
+  texture: WebGLTexture;
+  locations: {
     aPosition: number;
     aUv: number;
     aFeather: number;
@@ -160,111 +160,187 @@ export class MeshWarpRenderer {
     uGainNose: WebGLUniformLocation | null;
     uGainChin: WebGLUniformLocation | null;
     uOpacity: WebGLUniformLocation | null;
-  } | null = null;
+  };
+}
+
+function sourceSize(image: PersonaSource): { width: number; height: number } {
+  return image instanceof HTMLImageElement
+    ? { width: image.naturalWidth, height: image.naturalHeight }
+    : { width: image.width, height: image.height };
+}
+
+export class MeshWarpRenderer {
+  private _canvas: HTMLCanvasElement;
+  private gl: WebGLRenderingContext | null = null;
+  private ctx2d: CanvasRenderingContext2D | null = null;
+  private resources: GLResources | null = null;
+  private contextLost = false;
 
   private topology: FaceTopology | null = null;
-  private personaImage: CanvasImageSource | null = null;
+  private personaImage: PersonaSource | null = null;
   private personaUv: Float32Array | null = null;
   private personaSize = { width: 1, height: 1 };
 
   constructor(width: number, height: number) {
-    this.canvas = document.createElement('canvas');
-    this.canvas.width = width;
-    this.canvas.height = height;
+    this._canvas = document.createElement('canvas');
+    this._canvas.width = width;
+    this._canvas.height = height;
+
     const gl =
-      (this.canvas.getContext('webgl', { alpha: true, premultipliedAlpha: true, antialias: true, preserveDrawingBuffer: false }) as WebGLRenderingContext | null) ||
-      (this.canvas.getContext('experimental-webgl') as WebGLRenderingContext | null);
+      (this._canvas.getContext('webgl', { alpha: true, premultipliedAlpha: true, antialias: true, preserveDrawingBuffer: false }) as WebGLRenderingContext | null) ||
+      (this._canvas.getContext('experimental-webgl') as WebGLRenderingContext | null);
+
     if (gl) {
-      this.gl = gl;
-      this.initGL(gl);
-    } else {
-      this.ctx2d = this.canvas.getContext('2d');
+      try {
+        this.resources = this.createResources(gl);
+        this.gl = gl;
+        this._canvas.addEventListener('webglcontextlost', this.handleContextLost);
+        this._canvas.addEventListener('webglcontextrestored', this.handleContextRestored);
+        return;
+      } catch (err) {
+        // Shader/program creation failed (driver quirk, blocked GPU). A canvas that already has a
+        // WebGL context cannot hand out a 2D one, so start over with a fresh canvas.
+        console.warn('WebGL mesh warp unavailable, falling back to Canvas 2D warp.', err);
+        this._canvas = document.createElement('canvas');
+        this._canvas.width = width;
+        this._canvas.height = height;
+      }
     }
+    this.ctx2d = this._canvas.getContext('2d');
   }
 
-  get usesWebGL() {
+  /** Transparent canvas holding the warped persona for the current frame. */
+  get canvas(): HTMLCanvasElement {
+    return this._canvas;
+  }
+
+  get usesWebGL(): boolean {
     return this.gl !== null;
   }
 
   resize(width: number, height: number) {
-    if (this.canvas.width === width && this.canvas.height === height) return;
-    this.canvas.width = width;
-    this.canvas.height = height;
+    if (this._canvas.width === width && this._canvas.height === height) return;
+    this._canvas.width = width;
+    this._canvas.height = height;
     this.gl?.viewport(0, 0, width, height);
   }
 
-  private initGL(gl: WebGLRenderingContext) {
-    const compile = (type: number, source: string) => {
-      const shader = gl.createShader(type)!;
+  // ---------------------------------------------------------------------------------------------
+  // WebGL resource lifecycle
+  // ---------------------------------------------------------------------------------------------
+
+  private createResources(gl: WebGLRenderingContext): GLResources {
+    const compile = (type: number, source: string): WebGLShader => {
+      const shader = gl.createShader(type);
+      if (!shader) throw new Error('Could not create WebGL shader');
       gl.shaderSource(shader, source);
       gl.compileShader(shader);
       if (!gl.getShaderParameter(shader, gl.COMPILE_STATUS)) {
-        throw new Error(gl.getShaderInfoLog(shader) || 'Shader compile failed');
+        const log = gl.getShaderInfoLog(shader) || 'Shader compile failed';
+        gl.deleteShader(shader);
+        throw new Error(log);
       }
       return shader;
     };
-    const program = gl.createProgram()!;
+    const program = gl.createProgram();
+    if (!program) throw new Error('Could not create WebGL program');
     gl.attachShader(program, compile(gl.VERTEX_SHADER, VERTEX_SHADER));
     gl.attachShader(program, compile(gl.FRAGMENT_SHADER, FRAGMENT_SHADER));
     gl.linkProgram(program);
     if (!gl.getProgramParameter(program, gl.LINK_STATUS)) {
-      throw new Error(gl.getProgramInfoLog(program) || 'Program link failed');
+      const log = gl.getProgramInfoLog(program) || 'Program link failed';
+      gl.deleteProgram(program);
+      throw new Error(log);
     }
-    this.program = program;
-    this.locations = {
-      aPosition: gl.getAttribLocation(program, 'aPosition'),
-      aUv: gl.getAttribLocation(program, 'aUv'),
-      aFeather: gl.getAttribLocation(program, 'aFeather'),
-      uResolution: gl.getUniformLocation(program, 'uResolution'),
-      uTexture: gl.getUniformLocation(program, 'uTexture'),
-      uFaceBounds: gl.getUniformLocation(program, 'uFaceBounds'),
-      uGainForehead: gl.getUniformLocation(program, 'uGainForehead'),
-      uGainLeftCheek: gl.getUniformLocation(program, 'uGainLeftCheek'),
-      uGainRightCheek: gl.getUniformLocation(program, 'uGainRightCheek'),
-      uGainNose: gl.getUniformLocation(program, 'uGainNose'),
-      uGainChin: gl.getUniformLocation(program, 'uGainChin'),
-      uOpacity: gl.getUniformLocation(program, 'uOpacity'),
+
+    const buffer = (): WebGLBuffer => {
+      const b = gl.createBuffer();
+      if (!b) throw new Error('Could not create WebGL buffer');
+      return b;
     };
-    this.positionBuffer = gl.createBuffer();
-    this.uvBuffer = gl.createBuffer();
-    this.featherBuffer = gl.createBuffer();
-    this.indexBuffer = gl.createBuffer();
-    this.eyeIndexBuffer = gl.createBuffer();
-    this.texture = gl.createTexture();
+    const texture = gl.createTexture();
+    if (!texture) throw new Error('Could not create WebGL texture');
 
     gl.enable(gl.BLEND);
     gl.blendFunc(gl.ONE, gl.ONE_MINUS_SRC_ALPHA);
     gl.disable(gl.DEPTH_TEST);
     gl.disable(gl.CULL_FACE);
-    gl.viewport(0, 0, this.canvas.width, this.canvas.height);
+    gl.viewport(0, 0, this._canvas.width, this._canvas.height);
+
+    return {
+      program,
+      positionBuffer: buffer(),
+      uvBuffer: buffer(),
+      featherBuffer: buffer(),
+      indexBuffer: buffer(),
+      eyeIndexBuffer: buffer(),
+      texture,
+      locations: {
+        aPosition: gl.getAttribLocation(program, 'aPosition'),
+        aUv: gl.getAttribLocation(program, 'aUv'),
+        aFeather: gl.getAttribLocation(program, 'aFeather'),
+        uResolution: gl.getUniformLocation(program, 'uResolution'),
+        uTexture: gl.getUniformLocation(program, 'uTexture'),
+        uFaceBounds: gl.getUniformLocation(program, 'uFaceBounds'),
+        uGainForehead: gl.getUniformLocation(program, 'uGainForehead'),
+        uGainLeftCheek: gl.getUniformLocation(program, 'uGainLeftCheek'),
+        uGainRightCheek: gl.getUniformLocation(program, 'uGainRightCheek'),
+        uGainNose: gl.getUniformLocation(program, 'uGainNose'),
+        uGainChin: gl.getUniformLocation(program, 'uGainChin'),
+        uOpacity: gl.getUniformLocation(program, 'uOpacity'),
+      },
+    };
   }
 
-  setTopology(topology: FaceTopology) {
-    this.topology = topology;
+  private deleteResources(gl: WebGLRenderingContext, r: GLResources) {
+    gl.deleteBuffer(r.positionBuffer);
+    gl.deleteBuffer(r.uvBuffer);
+    gl.deleteBuffer(r.featherBuffer);
+    gl.deleteBuffer(r.indexBuffer);
+    gl.deleteBuffer(r.eyeIndexBuffer);
+    gl.deleteTexture(r.texture);
+    gl.deleteProgram(r.program);
+  }
+
+  /** True when GPU resources are usable this frame. */
+  private get glReady(): boolean {
+    return this.gl !== null && this.resources !== null && !this.contextLost;
+  }
+
+  private handleContextLost = (event: Event) => {
+    // preventDefault() tells the browser we intend to restore; without it no restore event fires.
+    event.preventDefault();
+    this.contextLost = true;
+    this.resources = null;
+    console.warn('WebGL context lost; persona overlay paused until the context is restored.');
+  };
+
+  private handleContextRestored = () => {
     const gl = this.gl;
     if (!gl) return;
-    gl.bindBuffer(gl.ELEMENT_ARRAY_BUFFER, this.indexBuffer);
+    try {
+      this.resources = this.createResources(gl);
+      this.contextLost = false;
+      if (this.topology) this.uploadTopology(gl, this.resources, this.topology);
+      if (this.personaImage) this.uploadTexture(gl, this.resources, this.personaImage);
+      if (this.personaUv) this.uploadUvs(gl, this.resources, this.personaUv, gl.STATIC_DRAW);
+      console.info('WebGL context restored; persona overlay resumed.');
+    } catch (err) {
+      console.error('Could not rebuild WebGL resources after context restore.', err);
+    }
+  };
+
+  private uploadTopology(gl: WebGLRenderingContext, r: GLResources, topology: FaceTopology) {
+    gl.bindBuffer(gl.ELEMENT_ARRAY_BUFFER, r.indexBuffer);
     gl.bufferData(gl.ELEMENT_ARRAY_BUFFER, topology.triangles, gl.STATIC_DRAW);
-    gl.bindBuffer(gl.ELEMENT_ARRAY_BUFFER, this.eyeIndexBuffer);
+    gl.bindBuffer(gl.ELEMENT_ARRAY_BUFFER, r.eyeIndexBuffer);
     gl.bufferData(gl.ELEMENT_ARRAY_BUFFER, topology.eyeTriangles, gl.STATIC_DRAW);
-    gl.bindBuffer(gl.ARRAY_BUFFER, this.featherBuffer);
+    gl.bindBuffer(gl.ARRAY_BUFFER, r.featherBuffer);
     gl.bufferData(gl.ARRAY_BUFFER, topology.featherWeights, gl.STATIC_DRAW);
   }
 
-  /**
-   * @param image persona portrait
-   * @param uv flat normalized [u, v, ...] landmark positions inside the portrait (y down, 0..1)
-   */
-  setPersona(image: HTMLImageElement | HTMLCanvasElement, uv: Float32Array) {
-    this.personaImage = image;
-    this.personaUv = uv;
-    this.personaSize = {
-      width: image instanceof HTMLImageElement ? image.naturalWidth : image.width,
-      height: image instanceof HTMLImageElement ? image.naturalHeight : image.height,
-    };
-    const gl = this.gl;
-    if (!gl) return;
-    gl.bindTexture(gl.TEXTURE_2D, this.texture);
+  private uploadTexture(gl: WebGLRenderingContext, r: GLResources, image: PersonaSource) {
+    gl.bindTexture(gl.TEXTURE_2D, r.texture);
     gl.pixelStorei(gl.UNPACK_FLIP_Y_WEBGL, false);
     gl.pixelStorei(gl.UNPACK_PREMULTIPLY_ALPHA_WEBGL, false);
     gl.texImage2D(gl.TEXTURE_2D, 0, gl.RGBA, gl.RGBA, gl.UNSIGNED_BYTE, image);
@@ -272,8 +348,34 @@ export class MeshWarpRenderer {
     gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_WRAP_T, gl.CLAMP_TO_EDGE);
     gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MIN_FILTER, gl.LINEAR);
     gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MAG_FILTER, gl.LINEAR);
-    gl.bindBuffer(gl.ARRAY_BUFFER, this.uvBuffer);
-    gl.bufferData(gl.ARRAY_BUFFER, uv, gl.STATIC_DRAW);
+  }
+
+  private uploadUvs(gl: WebGLRenderingContext, r: GLResources, uv: Float32Array, usage: number) {
+    gl.bindBuffer(gl.ARRAY_BUFFER, r.uvBuffer);
+    gl.bufferData(gl.ARRAY_BUFFER, uv, usage);
+  }
+
+  // ---------------------------------------------------------------------------------------------
+  // Public API
+  // ---------------------------------------------------------------------------------------------
+
+  setTopology(topology: FaceTopology) {
+    this.topology = topology;
+    if (this.gl && this.resources && this.glReady) this.uploadTopology(this.gl, this.resources, topology);
+  }
+
+  /**
+   * @param image persona portrait
+   * @param uv flat normalized [u, v, ...] landmark positions inside the portrait (y down, 0..1)
+   */
+  setPersona(image: PersonaSource, uv: Float32Array) {
+    this.personaImage = image;
+    this.personaUv = uv;
+    this.personaSize = sourceSize(image);
+    if (this.gl && this.resources && this.glReady) {
+      this.uploadTexture(this.gl, this.resources, image);
+      this.uploadUvs(this.gl, this.resources, uv, this.gl.STATIC_DRAW);
+    }
   }
 
   clearPersona() {
@@ -283,30 +385,19 @@ export class MeshWarpRenderer {
 
   /**
    * Fast dynamic UV coordinate update without re-uploading texture pixels.
-   * Used when switching or interpolating between multi-angle reference keyframes.
+   * Used when switching between multi-angle reference keyframes.
    */
   updateUVs(uv: Float32Array) {
     this.personaUv = uv;
-    const gl = this.gl;
-    if (!gl) return;
-    gl.bindBuffer(gl.ARRAY_BUFFER, this.uvBuffer);
-    gl.bufferData(gl.ARRAY_BUFFER, uv, gl.DYNAMIC_DRAW);
+    if (this.gl && this.resources && this.glReady) this.uploadUvs(this.gl, this.resources, uv, this.gl.DYNAMIC_DRAW);
   }
 
-  /**
-   * Fast texture re-bind when switching keyframe source images.
-   */
-  updateTexture(image: HTMLImageElement | HTMLCanvasElement) {
+  /** Fast texture re-bind when switching keyframe source images. */
+  updateTexture(image: PersonaSource) {
     if (this.personaImage === image) return;
     this.personaImage = image;
-    this.personaSize = {
-      width: image instanceof HTMLImageElement ? image.naturalWidth : image.width,
-      height: image instanceof HTMLImageElement ? image.naturalHeight : image.height,
-    };
-    const gl = this.gl;
-    if (!gl) return;
-    gl.bindTexture(gl.TEXTURE_2D, this.texture);
-    gl.texImage2D(gl.TEXTURE_2D, 0, gl.RGBA, gl.RGBA, gl.UNSIGNED_BYTE, image);
+    this.personaSize = sourceSize(image);
+    if (this.gl && this.resources && this.glReady) this.uploadTexture(this.gl, this.resources, image);
   }
 
   get hasPersona() {
@@ -316,34 +407,38 @@ export class MeshWarpRenderer {
   /** Renders the warped persona into this.canvas (transparent background). */
   render(opts: WarpFrameOptions) {
     if (!this.hasPersona) return;
-    if (this.gl) this.renderGL(this.gl, opts);
-    else if (this.ctx2d) this.render2D(this.ctx2d, opts);
+    if (this.gl) {
+      if (!this.resources || this.contextLost || this.gl.isContextLost()) return;
+      this.renderGL(this.gl, this.resources, opts);
+    } else if (this.ctx2d) {
+      this.render2D(this.ctx2d, opts);
+    }
   }
 
-  private renderGL(gl: WebGLRenderingContext, opts: WarpFrameOptions) {
+  private renderGL(gl: WebGLRenderingContext, r: GLResources, opts: WarpFrameOptions) {
     const topo = this.topology!;
-    const loc = this.locations!;
+    const loc = r.locations;
     gl.clearColor(0, 0, 0, 0);
     gl.clear(gl.COLOR_BUFFER_BIT);
-    gl.useProgram(this.program);
+    gl.useProgram(r.program);
 
-    gl.bindBuffer(gl.ARRAY_BUFFER, this.positionBuffer);
+    gl.bindBuffer(gl.ARRAY_BUFFER, r.positionBuffer);
     gl.bufferData(gl.ARRAY_BUFFER, opts.positions, gl.DYNAMIC_DRAW);
     gl.enableVertexAttribArray(loc.aPosition);
     gl.vertexAttribPointer(loc.aPosition, 2, gl.FLOAT, false, 0, 0);
 
-    gl.bindBuffer(gl.ARRAY_BUFFER, this.uvBuffer);
+    gl.bindBuffer(gl.ARRAY_BUFFER, r.uvBuffer);
     gl.enableVertexAttribArray(loc.aUv);
     gl.vertexAttribPointer(loc.aUv, 2, gl.FLOAT, false, 0, 0);
 
-    gl.bindBuffer(gl.ARRAY_BUFFER, this.featherBuffer);
+    gl.bindBuffer(gl.ARRAY_BUFFER, r.featherBuffer);
     gl.enableVertexAttribArray(loc.aFeather);
     gl.vertexAttribPointer(loc.aFeather, 1, gl.FLOAT, false, 0, 0);
 
     gl.activeTexture(gl.TEXTURE0);
-    gl.bindTexture(gl.TEXTURE_2D, this.texture);
+    gl.bindTexture(gl.TEXTURE_2D, r.texture);
     gl.uniform1i(loc.uTexture, 0);
-    gl.uniform2f(loc.uResolution, this.canvas.width, this.canvas.height);
+    gl.uniform2f(loc.uResolution, this._canvas.width, this._canvas.height);
 
     // Multi-zone directional lighting
     const z = opts.zoneLighting;
@@ -360,15 +455,15 @@ export class MeshWarpRenderer {
     gl.uniform3f(loc.uGainNose, nGain[0], nGain[1], nGain[2]);
     gl.uniform3f(loc.uGainChin, cGain[0], cGain[1], cGain[2]);
 
-    const bounds = opts.faceBounds ?? [0, 0, this.canvas.width, this.canvas.height];
+    const bounds = opts.faceBounds ?? [0, 0, this._canvas.width, this._canvas.height];
     gl.uniform4f(loc.uFaceBounds, bounds[0], bounds[1], bounds[2], bounds[3]);
     gl.uniform1f(loc.uOpacity, opts.opacity);
 
-    gl.bindBuffer(gl.ELEMENT_ARRAY_BUFFER, this.indexBuffer);
+    gl.bindBuffer(gl.ELEMENT_ARRAY_BUFFER, r.indexBuffer);
     gl.drawElements(gl.TRIANGLES, topo.triangles.length, gl.UNSIGNED_SHORT, 0);
 
     if (opts.drawPersonaEyes && topo.eyeTriangles.length) {
-      gl.bindBuffer(gl.ELEMENT_ARRAY_BUFFER, this.eyeIndexBuffer);
+      gl.bindBuffer(gl.ELEMENT_ARRAY_BUFFER, r.eyeIndexBuffer);
       gl.drawElements(gl.TRIANGLES, topo.eyeTriangles.length, gl.UNSIGNED_SHORT, 0);
     }
   }
@@ -380,7 +475,7 @@ export class MeshWarpRenderer {
     const img = this.personaImage!;
     const { width: iw, height: ih } = this.personaSize;
     const pos = opts.positions;
-    ctx.clearRect(0, 0, this.canvas.width, this.canvas.height);
+    ctx.clearRect(0, 0, this._canvas.width, this._canvas.height);
     ctx.globalAlpha = opts.opacity;
 
     const drawList = (indices: Uint16Array) => {
@@ -425,13 +520,15 @@ export class MeshWarpRenderer {
   dispose() {
     const gl = this.gl;
     if (gl) {
-      gl.deleteBuffer(this.positionBuffer);
-      gl.deleteBuffer(this.uvBuffer);
-      gl.deleteBuffer(this.featherBuffer);
-      gl.deleteBuffer(this.indexBuffer);
-      gl.deleteBuffer(this.eyeIndexBuffer);
-      gl.deleteTexture(this.texture);
-      if (this.program) gl.deleteProgram(this.program);
+      this._canvas.removeEventListener('webglcontextlost', this.handleContextLost);
+      this._canvas.removeEventListener('webglcontextrestored', this.handleContextRestored);
+      if (this.resources && !gl.isContextLost()) this.deleteResources(gl, this.resources);
+      // Release the GPU context eagerly instead of waiting for garbage collection.
+      gl.getExtension('WEBGL_lose_context')?.loseContext();
+      this.resources = null;
+      this.gl = null;
     }
+    this.ctx2d = null;
+    this.clearPersona();
   }
 }

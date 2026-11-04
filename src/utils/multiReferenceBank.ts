@@ -15,7 +15,6 @@
  * with temporal hysteresis to guarantee jitter-free transitions.
  */
 
-import { Point2D } from './faceMath.ts';
 import { FacialLightingZones } from './meshWarpRenderer.ts';
 
 export interface ReferenceKeyframe {
@@ -58,7 +57,6 @@ export class MultiReferenceBank {
   private keyframes: ReferenceKeyframe[] = [];
   private activeKeyframeId: string | null = null;
   private currentBlendWeight = 1.0;
-  private secondaryKeyframeId: string | null = null;
 
   // Hysteresis threshold: only switch primary keyframe if alternative is notably better
   private readonly SWITCH_HYSTERESIS = 0.15;
@@ -88,14 +86,9 @@ export class MultiReferenceBank {
     return this.keyframes;
   }
 
-  public getKeyframeById(id: string): ReferenceKeyframe | undefined {
-    return this.keyframes.find((k) => k.id === id);
-  }
-
   public clear(): void {
     this.keyframes = [];
     this.activeKeyframeId = null;
-    this.secondaryKeyframeId = null;
   }
 
   /**
@@ -176,7 +169,6 @@ export class MultiReferenceBank {
 
     // Determine secondary keyframe for smooth cross-attention
     const secondaryKeyframe = runnerUp.keyframe.id !== primaryKeyframe.id ? runnerUp.keyframe : best.keyframe;
-    this.secondaryKeyframeId = secondaryKeyframe.id;
 
     // Calculate cross-attention interpolation weight
     const totalDist = best.dist + runnerUp.dist + 1e-4;

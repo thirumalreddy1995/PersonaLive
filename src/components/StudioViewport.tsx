@@ -70,13 +70,22 @@ export const StudioViewport: React.FC<StudioViewportProps> = ({
   const recorderRef = useRef<MediaRecorder | null>(null);
   const recordChunksRef = useRef<Blob[]>([]);
   const recordStartRef = useRef<number>(0);
-  const recordingSecondsRef = useRef<number>(0);
-  recordingSecondsRef.current = recordingSeconds;
 
+  const toastTimerRef = useRef<number | null>(null);
   const showToast = useCallback((text: string, tone: 'info' | 'error' = 'info', ms = 3000) => {
+    if (toastTimerRef.current !== null) window.clearTimeout(toastTimerRef.current);
     setToast({ text, tone });
-    window.setTimeout(() => setToast(null), ms);
+    toastTimerRef.current = window.setTimeout(() => {
+      toastTimerRef.current = null;
+      setToast(null);
+    }, ms);
   }, []);
+  useEffect(
+    () => () => {
+      if (toastTimerRef.current !== null) window.clearTimeout(toastTimerRef.current);
+    },
+    []
+  );
 
   // ---------------------------------------------------------------------------------------
   // Engine lifecycle
@@ -93,8 +102,8 @@ export const StudioViewport: React.FC<StudioViewportProps> = ({
       }
     );
     engine.loadDemoSubject();
-    engine.setPersona(activePersona);
-    engine.setSplitPosition(splitPosition);
+    // Persona, settings and split position are pushed by their own effects below, which run
+    // right after this one on mount.
     void engine.init();
     engine.start();
 
@@ -223,7 +232,8 @@ export const StudioViewport: React.FC<StudioViewportProps> = ({
 
   const handleToggleRecord = () => {
     if (isRecording) {
-      recorderRef.current?.stop();
+      const recorder = recorderRef.current;
+      if (recorder && recorder.state !== 'inactive') recorder.stop();
       return;
     }
     const canvas = canvasRef.current;
@@ -239,14 +249,29 @@ export const StudioViewport: React.FC<StudioViewportProps> = ({
       const stream = canvas.captureStream(30);
       const recorder = new MediaRecorder(stream, mimeType ? { mimeType, videoBitsPerSecond: 6_000_000 } : undefined);
       recordChunksRef.current = [];
+      let failed = false;
+      const releaseRecorder = () => {
+        stream.getTracks().forEach((t) => t.stop());
+        recorderRef.current = null;
+        setIsRecording(false);
+      };
       recorder.ondataavailable = (e) => {
         if (e.data.size > 0) recordChunksRef.current.push(e.data);
       };
+      recorder.onerror = (event) => {
+        // An encoder failure also fires "stop"; flag it so no partial clip is saved.
+        failed = true;
+        const error = (event as Event & { error?: unknown }).error;
+        console.error('Recording failed', error ?? event);
+        recordChunksRef.current = [];
+        releaseRecorder();
+        showToast('Recording stopped because the video encoder reported an error.', 'error', 4500);
+      };
       recorder.onstop = () => {
-        stream.getTracks().forEach((t) => t.stop());
+        if (failed) return;
+        releaseRecorder();
         const blob = new Blob(recordChunksRef.current, { type: recorder.mimeType || mimeType || 'video/webm' });
         const duration = Math.max(1, Math.round((performance.now() - recordStartRef.current) / 1000));
-        setIsRecording(false);
         onSaveRecording({ durationSeconds: duration, blob, mimeType: blob.type });
         showToast(`Recording saved (${duration}s). Open Recordings to download it.`);
       };
@@ -572,7 +597,7 @@ export const StudioViewport: React.FC<StudioViewportProps> = ({
               className="accent-sky-500 w-3.5 h-3.5 rounded"
             />
             <Video className="w-3.5 h-3.5 text-emerald-400" />
-            <span className="font-medium">Virtual Camera Output</span>
+            <span className="font-medium">Virtual Camera Badge</span>
           </label>
         </div>
       </div>

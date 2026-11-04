@@ -1,5 +1,5 @@
 import React from 'react';
-import { X, Download, Monitor, CheckCircle2, ExternalLink, ArrowRight, Sparkles, Laptop } from 'lucide-react';
+import { X, Download, CheckCircle2, ArrowRight, Sparkles, Laptop } from 'lucide-react';
 
 interface InstallAppModalProps {
   isOpen: boolean;

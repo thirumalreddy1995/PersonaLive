@@ -1,4 +1,4 @@
-import React, { useEffect, useState } from 'react';
+import React, { useEffect, useRef, useState } from 'react';
 import {
   X,
   Upload,
@@ -13,6 +13,47 @@ import {
 } from 'lucide-react';
 import { AuthorizedPersona, CATEGORY_LABEL, PersonaCategory } from '../types/index.ts';
 import { evaluateImageQuality, generateConsentHash, QualityAssessmentResult } from '../utils/faceMath.ts';
+import { publicAssetUrl } from '../utils/assetUrl.ts';
+import { measureImageStatistics } from '../utils/imageStatistics.ts';
+
+/** Bundled sample portrait (lives in public/, so it must be resolved against the Vite base path). */
+const SAMPLE_PRESET_IMAGE = publicAssetUrl('assets/aistudio/WhatsApp_Image_2026-11-03_at_4.39.43_PM_bff2bf8c.jpeg');
+
+const ACCEPTED_IMAGE_TYPES = ['image/jpeg', 'image/png', 'image/webp'];
+/** Uploads are held in memory as data URLs; cap them so a stray RAW/scan cannot freeze the UI. */
+const MAX_UPLOAD_BYTES = 25 * 1024 * 1024;
+/** Usage recorded on the consent entry of every enrolled face. */
+const DEFAULT_AUTHORIZED_USAGE = 'Commercial Streaming & Virtual Presentation';
+
+function loadImage(src: string, crossOrigin: boolean): Promise<HTMLImageElement> {
+  return new Promise((resolve, reject) => {
+    const img = new Image();
+    if (crossOrigin) img.crossOrigin = 'anonymous';
+    img.onload = () => resolve(img);
+    img.onerror = () => reject(new Error('The photo could not be decoded. Try a different JPG, PNG or WebP file.'));
+    img.src = src;
+  });
+}
+
+/**
+ * Decodes the photo and scores it from measured luminance, contrast and sharpness. If the pixels
+ * cannot be read (cross-origin image without CORS headers), the resolution-only score is returned
+ * with an explicit warning rather than fabricated lighting/sharpness values.
+ */
+async function assessPhoto(src: string, crossOrigin: boolean): Promise<QualityAssessmentResult> {
+  const img = await loadImage(src, crossOrigin);
+  const width = img.naturalWidth;
+  const height = img.naturalHeight;
+  try {
+    const stats = measureImageStatistics(img);
+    return evaluateImageQuality(width, height, stats.averageLuminance, stats.contrastStdDev, stats.estimatedSharpness);
+  } catch (err) {
+    console.warn('Photo statistics unavailable, scoring resolution only.', err);
+    const result = evaluateImageQuality(width, height);
+    result.warnings.push('Lighting and sharpness could not be measured for this image.');
+    return result;
+  }
+}
 
 interface PersonaLibraryModalProps {
   isOpen: boolean;
@@ -45,13 +86,13 @@ export const PersonaLibraryModal: React.FC<PersonaLibraryModalProps> = ({
   const [name, setName] = useState('');
   const [role, setRole] = useState('');
   const [category, setCategory] = useState<PersonaCategory | null>(null);
-  const [imageUrl, setImageUrl] = useState('');
   const [previewImage, setPreviewImage] = useState<string | null>(null);
   const [qualityResult, setQualityResult] = useState<QualityAssessmentResult | null>(null);
   const [signerName, setSignerName] = useState('');
-  const [authorizedUsage, setAuthorizedUsage] = useState('Commercial Streaming & Virtual Presentation');
   const [consentAgreed, setConsentAgreed] = useState(false);
   const [errorMessage, setErrorMessage] = useState<string | null>(null);
+  /** Increments per photo selection so a slow assessment cannot overwrite a newer one. */
+  const assessmentToken = useRef(0);
 
   useEffect(() => {
     if (isOpen) setActiveTab(initialTab);
@@ -59,30 +100,46 @@ export const PersonaLibraryModal: React.FC<PersonaLibraryModalProps> = ({
 
   if (!isOpen) return null;
 
+  const startAssessment = (src: string, crossOrigin: boolean) => {
+    const token = ++assessmentToken.current;
+    setQualityResult(null);
+    void assessPhoto(src, crossOrigin)
+      .then((result) => {
+        if (token !== assessmentToken.current) return;
+        setQualityResult(result);
+        setErrorMessage(null);
+      })
+      .catch((err: unknown) => {
+        if (token !== assessmentToken.current) return;
+        setPreviewImage(null);
+        setErrorMessage(err instanceof Error ? err.message : 'The photo could not be loaded.');
+      });
+  };
+
   // Handle image selection
   const handleFileChange = (e: React.ChangeEvent<HTMLInputElement>) => {
     const file = e.target.files?.[0];
     if (!file) return;
 
-    if (!['image/jpeg', 'image/png', 'image/webp'].includes(file.type)) {
+    if (!ACCEPTED_IMAGE_TYPES.includes(file.type)) {
       setErrorMessage('Supported formats: JPG, JPEG, PNG, or WebP.');
+      return;
+    }
+    if (file.size > MAX_UPLOAD_BYTES) {
+      setErrorMessage(`That file is ${(file.size / 1_048_576).toFixed(0)} MB; please use a photo under 25 MB.`);
       return;
     }
 
     const reader = new FileReader();
+    reader.onerror = () => setErrorMessage('The file could not be read. Check that it is not open in another program.');
     reader.onload = (event) => {
-      const result = event.target?.result as string;
+      const result = event.target?.result;
+      if (typeof result !== 'string') {
+        setErrorMessage('The file could not be read.');
+        return;
+      }
       setPreviewImage(result);
-      setImageUrl(result);
-
-      // Perform quality evaluation on loaded image
-      const img = new Image();
-      img.src = result;
-      img.onload = () => {
-        const quality = evaluateImageQuality(img.width, img.height, 132, 52, 92);
-        setQualityResult(quality);
-        setErrorMessage(null);
-      };
+      startAssessment(result, false);
     };
     reader.readAsDataURL(file);
   };
@@ -90,14 +147,12 @@ export const PersonaLibraryModal: React.FC<PersonaLibraryModalProps> = ({
   // Sample avatar presets for quick testing
   const handleSelectPreset = (presetUrl: string, presetName: string, presetRole: string, presetCategory: PersonaCategory) => {
     setPreviewImage(presetUrl);
-    setImageUrl(presetUrl);
     setName(presetName);
     setRole(presetRole);
     setCategory(presetCategory);
     setSignerName(presetName);
-    const quality = evaluateImageQuality(1920, 1080, 138, 50, 94);
-    setQualityResult(quality);
     setErrorMessage(null);
+    startAssessment(presetUrl, true);
   };
 
   const handleEnrollSubmit = (e: React.FormEvent) => {
@@ -140,7 +195,7 @@ export const PersonaLibraryModal: React.FC<PersonaLibraryModalProps> = ({
       },
       consent: {
         signerName: signerName || name,
-        authorizedUsage,
+        authorizedUsage: DEFAULT_AUTHORIZED_USAGE,
         timestamp,
         signatureHash,
         verified: true,
@@ -366,7 +421,7 @@ export const PersonaLibraryModal: React.FC<PersonaLibraryModalProps> = ({
                     type="button"
                     onClick={() =>
                       handleSelectPreset(
-                        '/assets/aistudio/WhatsApp_Image_2026-11-03_at_4.39.43_PM_bff2bf8c.jpeg',
+                        SAMPLE_PRESET_IMAGE,
                         'Arshad',
                         'Verified Presenter',
                         'men'
@@ -374,10 +429,7 @@ export const PersonaLibraryModal: React.FC<PersonaLibraryModalProps> = ({
                     }
                     className="p-2 rounded bg-slate-950 border border-slate-800 hover:border-sky-500 text-left flex items-center gap-2"
                   >
-                    <img
-                      src="/assets/aistudio/WhatsApp_Image_2026-11-03_at_4.39.43_PM_bff2bf8c.jpeg"
-                      className="w-8 h-8 rounded object-cover"
-                    />
+                    <img src={SAMPLE_PRESET_IMAGE} alt="Arshad" className="w-8 h-8 rounded object-cover" />
                     <div className="text-[11px] truncate">
                       <p className="font-medium text-slate-200">Arshad</p>
                       <p className="text-slate-500">Presenter</p>
@@ -462,6 +514,13 @@ export const PersonaLibraryModal: React.FC<PersonaLibraryModalProps> = ({
                           Face landmarks are mapped when you activate this face.
                         </div>
                       </div>
+                      {qualityResult.warnings.length > 0 && (
+                        <ul className="text-[11px] text-amber-300/90 space-y-0.5 pt-1 list-disc list-inside">
+                          {qualityResult.warnings.map((warning) => (
+                            <li key={warning}>{warning}</li>
+                          ))}
+                        </ul>
+                      )}
                     </div>
                   </div>
                 </div>

@@ -1,5 +1,5 @@
 import React, { useState } from 'react';
-import { Camera, ShieldCheck, UserCheck, Video, Settings as SettingsIcon, Film, Sparkles, BookOpen, LogOut, Download, RefreshCw, Monitor } from 'lucide-react';
+import { ShieldCheck, Video, Film, Sparkles, BookOpen, LogOut, Download, RefreshCw, Monitor } from 'lucide-react';
 import { UserAccount, AuthorizedPersona } from '../types/index.ts';
 import { usePWAInstall } from '../hooks/usePWAInstall.ts';
 import { InstallAppModal } from './InstallAppModal.tsx';
@@ -36,10 +36,11 @@ export const DesktopTitlebar: React.FC<DesktopTitlebarProps> = ({
     <header className="h-11 bg-slate-950 border-b border-slate-800 flex items-center justify-between px-3 select-none z-30">
       {/* Left: Window Controls (macOS/Windows style) & App Title */}
       <div className="flex items-center gap-3">
-        <div className="flex items-center gap-1.5 mr-2">
-          <div className="w-3 h-3 rounded-full bg-rose-500/80 hover:bg-rose-500 cursor-pointer transition-colors" title="Close Studio" />
-          <div className="w-3 h-3 rounded-full bg-amber-500/80 hover:bg-amber-500 cursor-pointer transition-colors" title="Minimize" />
-          <div className="w-3 h-3 rounded-full bg-emerald-500/80 hover:bg-emerald-500 cursor-pointer transition-colors" title="Maximize" />
+        {/* Decorative traffic lights; the real window controls belong to the OS / Electron frame. */}
+        <div className="flex items-center gap-1.5 mr-2" aria-hidden="true">
+          <div className="w-3 h-3 rounded-full bg-rose-500/80" />
+          <div className="w-3 h-3 rounded-full bg-amber-500/80" />
+          <div className="w-3 h-3 rounded-full bg-emerald-500/80" />
         </div>
 
         <div className="h-4 w-px bg-slate-800" />
@@ -51,7 +52,7 @@ export const DesktopTitlebar: React.FC<DesktopTitlebarProps> = ({
           <span className="font-semibold text-sm tracking-tight text-slate-100 flex items-center gap-2">
             PersonaLive Desktop
             <span className="text-[10px] font-mono px-1.5 py-0.5 rounded bg-slate-800 text-slate-400 border border-slate-700">
-              v2.5.0 · {__PL_BUILD_ID__.slice(0, 7)}
+              v{__PL_APP_VERSION__} · {__PL_BUILD_ID__.slice(0, 7)}
             </span>
           </span>
         </div>

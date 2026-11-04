@@ -1,4 +1,5 @@
 import { AuthorizedPersona } from '../types/index.ts';
+import { publicAssetUrl } from './assetUrl.ts';
 
 export const INITIAL_PERSONAS: AuthorizedPersona[] = [
   {
@@ -6,7 +7,7 @@ export const INITIAL_PERSONAS: AuthorizedPersona[] = [
     name: 'Arshad',
     role: 'Verified Presenter',
     category: 'men',
-    imageUrl: '/assets/aistudio/WhatsApp_Image_2026-11-03_at_4.39.43_PM_bff2bf8c.jpeg',
+    imageUrl: publicAssetUrl('assets/aistudio/WhatsApp_Image_2026-11-03_at_4.39.43_PM_bff2bf8c.jpeg'),
     createdAt: '2026-11-03',
     qualityScore: 98,
     metrics: {
