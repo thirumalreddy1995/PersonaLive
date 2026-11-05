@@ -312,11 +312,11 @@ export function parseCsv(text: string): Record<string, string>[] {
 
 const REJECT_PROMPT: RegExp[] = [
   // not frontal
-  /\b(profile|side view|over (his|her|their) (left |right )?shoulder|looking (away|down|up|sideways|off|back)|from behind|sidelong|glance|glancing|tilt(ed)? shot|aerial|low angle|high angle|from above|from below|three[- ]quarter|3\/4|dutch angle|bird'?s[- ]eye|worm'?s[- ]eye|back view|rear view|turned|head tilted)\b/i,
+  /\b(profile|side view|over (his|her|their) (left |right )?shoulder|looking (away|down|up|sideways|off|back)|from behind|sidelong|glance|glancing|tilt(ed)? shot|aerial|low angle|high angle|from above|from below|three[- ]quarter|3\/4|dutch angle|bird'?s[- ]eye|worm'?s[- ]eye|back view|rear view|turned|slightly angled|angled|head tilted|arms crossed|crossed arms)\b/i,
   // not neutral or mouth open
   /\b(laugh\w*|grin\w*|smil\w*|scream\w*|shout\w*|yell(ing|s|ed)?|sing(ing|s)?|gasp\w*|shock\w*|surpris\w*|stunned|open mouth|mouth open|mouth agape|yawn\w*|wink\w*|cry\w*|crying|tears|tongue|pout\w*|frown\w*|snarl\w*|angry|enraged|furious|disgust\w*|terrified|scared|panicked|excited|enthusiastic|joyful|funny|zany|mischievous|flirt\w*|seductive|kiss\w*|biting|chewing|eating|drinking|smok\w*|talking|speaking|whisper\w*)\b/i,
   // occlusion and headwear
-  /\b(sunglasses|goggles|mask\w*|helmet|veil\w*|hood\w*|hat|cap|beanie|turban|hijab|headscarf|head scarf|bandana|headband|crown|tiara|eye ?patch|hand(s)? (on|over|covering|touching|near) (his|her|their|the) (face|cheek|chin|mouth|eyes?|forehead|head)|holding|phone|microphone|cigarette|pipe|umbrella|scarf|balaclava|niqab|burqa|visor|earmuffs|headphones)\b/i,
+  /\b(sunglasses|goggles|mask\w*|helmet|veil\w*|hood\w*|hat|cap|beanie|fedora|beret|bonnet|sombrero|cowboy|headpiece|headwear|headdress|turban|hijab|headscarf|head scarf|bandana|headband|crown|tiara|eye ?patch|hand(s)? (on|over|covering|touching|near) (his|her|their|the) (face|cheek|chin|mouth|eyes?|forehead|head)|holding|phone|microphone|cigarette|pipe|umbrella|scarf|balaclava|niqab|burqa|visor|earmuffs|headphones)\b/i,
   // framing and rendering that hides the face or its colour
   /\b(wide shot|full[- ]body|long shot|panoramic|extreme close[- ]?up|close[- ]?up of (the |his |her )?(eyes?|lips|mouth|nose|ear|hands?)|macro|silhouette\w*|back[- ]?lit|black and white|monochrome|grayscale|greyscale|sepia|b&w|noir|infrared|night vision|thermal|x-ray|negative|double exposure|underwater|neon|blacklight|strobe|rainbow light|split lighting|rim light(ing)? only)\b/i,
   // more than one person

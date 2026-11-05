@@ -19,6 +19,8 @@
  *   --degrade <n>      how many of them get a degraded copy (default 4)
  *   --models <list>    generator models to accept (default Flux1.pro,Flux1.dev,Flux1.schnell,SDXL; DALL-E 3 is excluded)
  *   --out <dir>        output folder (default realism-review/personas)
+ *   --replace <ids>    keep the existing manifest and swap only these ids (e.g. p05,p09) for new
+ *                      faces with the same gender and ethnicity, never reusing an excluded image
  *   --dry-run          print the selection and coverage without copying anything
  */
 import fs from 'node:fs';
@@ -34,11 +36,12 @@ interface Args {
   degrade: number;
   models: string[];
   out: string;
+  replace: string[];
   dryRun: boolean;
 }
 
 function parseArgs(argv: string[]): Args {
-  const args: Args = { source: '', count: 24, degrade: 4, models: ['Flux1.pro', 'Flux1.dev', 'Flux1.schnell', 'SDXL'], out: PERSONAS_DIR, dryRun: false };
+  const args: Args = { source: '', count: 24, degrade: 4, models: ['Flux1.pro', 'Flux1.dev', 'Flux1.schnell', 'SDXL'], out: PERSONAS_DIR, replace: [], dryRun: false };
   for (let i = 0; i < argv.length; i++) {
     const a = argv[i];
     const next = () => {
@@ -61,6 +64,9 @@ function parseArgs(argv: string[]): Args {
         break;
       case '--out':
         args.out = path.resolve(next());
+        break;
+      case '--replace':
+        args.replace = next().split(',').map((s) => s.trim()).filter(Boolean);
         break;
       case '--dry-run':
         args.dryRun = true;
@@ -112,7 +118,7 @@ function indexImages(dir: string): Map<string, string> {
   return map;
 }
 
-function loadCandidates(source: string, models: string[]): Candidate[] {
+function loadCandidates(source: string, models: string[], requireFiles = true): Candidate[] {
   const csvFile = fs
     .readdirSync(source)
     .map((f) => path.join(source, f))
@@ -126,7 +132,7 @@ function loadCandidates(source: string, models: string[]): Candidate[] {
   const modelCol = findColumn(columns, [/^model(_name)?$/i, /model/i]);
   if (!promptCol || !fileCol) throw new Error(`Could not find the prompt/file columns in ${csvFile}; columns: ${columns.join(', ')}`);
   const images = indexImages(source);
-  const planMode = images.size === 0;
+  const planMode = images.size === 0 || !requireFiles;
   const wanted = new Set(models.map((m) => m.toLowerCase().replace(/[^a-z0-9]/g, '')));
   const out: Candidate[] = [];
   const rejected = new Map<string, number>();
@@ -134,7 +140,7 @@ function loadCandidates(source: string, models: string[]): Candidate[] {
     const model = modelCol ? row[modelCol] : 'unknown';
     if (modelCol && !wanted.has(model.toLowerCase().replace(/[^a-z0-9]/g, ''))) continue;
     const ref = row[fileCol];
-    const file = planMode ? null : (images.get(ref) ?? images.get(path.basename(ref)) ?? images.get(path.basename(ref, path.extname(ref))) ?? null);
+    const file = images.get(ref) ?? images.get(path.basename(ref)) ?? images.get(path.basename(ref, path.extname(ref))) ?? null;
     if (!planMode && !file) continue;
     const prompt = row[promptCol];
     const attributes = parsePromptAttributes(prompt);
@@ -158,12 +164,80 @@ function printCoverage(entries: PersonaManifestEntry[]) {
   else console.log('coverage: all required attributes present');
 }
 
+/**
+ * Swaps the named manifest entries for new candidates that match the old entry's gender and
+ * ethnicity (so the coverage, e.g. the South Asian count, is kept). Images already in the manifest
+ * or in `excluded.json` (every image ever swapped out) are never picked again.
+ */
+function replaceEntries(manifestFile: string, outDir: string, ids: string[], candidates: Candidate[], finalize: boolean): { manifest: PersonaManifest; swapped: Array<{ id: string; candidate: Candidate }> } {
+  const manifest = JSON.parse(fs.readFileSync(manifestFile, 'utf8')) as PersonaManifest;
+  const excludedFile = path.join(outDir, 'excluded.json');
+  const excluded = new Set<string>(fs.existsSync(excludedFile) ? (JSON.parse(fs.readFileSync(excludedFile, 'utf8')) as string[]) : []);
+  for (const p of manifest.personas) excluded.add(p.source.imageId);
+  const swapped: Array<{ id: string; candidate: Candidate }> = [];
+  for (const id of ids) {
+    const entry = manifest.personas.find((p) => p.id === id && !p.degradedOf);
+    if (!entry) throw new Error(`No clean persona ${id} in the manifest`);
+    const match = candidates.find(
+      (c) => !excluded.has(c.imageId) && c.attributes.gender === entry.attributes.gender && c.attributes.ethnicity === entry.attributes.ethnicity
+    );
+    if (!match) throw new Error(`No unused candidate with gender ${entry.attributes.gender} and ethnicity ${entry.attributes.ethnicity} for ${id}`);
+    excluded.add(match.imageId);
+    swapped.push({ id, candidate: match });
+  }
+  // The exclusion list grows only when the swap is final, so the plan run and the run after the
+  // download pick the same faces.
+  if (finalize) fs.writeFileSync(excludedFile, JSON.stringify([...excluded].sort(), null, 2) + '\n');
+  return { manifest, swapped };
+}
+
 async function main() {
   const args = parseArgs(process.argv.slice(2));
-  const candidates = loadCandidates(args.source, args.models);
+  const candidates = loadCandidates(args.source, args.models, args.replace.length === 0);
   console.log(`${candidates.length} frontal neutral candidates from ${path.relative(ROOT, args.source) || args.source}`);
   // Deterministic order: by image id, so the same download yields the same set.
   candidates.sort((a, b) => a.imageId.localeCompare(b.imageId));
+
+  if (args.replace.length) {
+    const manifestFile = path.join(args.out, 'manifest.json');
+    const probe = replaceEntries(manifestFile, args.out, args.replace, candidates, false);
+    const finalize = probe.swapped.every((sw) => sw.candidate.file !== null);
+    const { manifest, swapped } = finalize ? replaceEntries(manifestFile, args.out, args.replace, candidates, true) : probe;
+    for (const { id, candidate } of swapped) {
+      const old = manifest.personas.find((p) => p.id === id)!;
+      console.log(`  ${id}: ${old.source.imageId} → ${candidate.imageId} ${JSON.stringify(candidate.attributes)}`);
+      if (candidate.file === null) continue;
+      const file = `${id}${path.extname(candidate.originalFile).toLowerCase()}`;
+      fs.copyFileSync(candidate.file, path.join(args.out, file));
+      Object.assign(old, {
+        file,
+        category: candidate.attributes.gender === 'woman' ? 'women' : 'men',
+        source: { dataset: 'SFHQ-T2I', imageId: candidate.imageId, model: candidate.model, originalFile: candidate.originalFile, kagglePath: `images/images/${candidate.originalFile}` },
+        prompt: candidate.prompt,
+        attributes: candidate.attributes,
+      });
+      // A degraded copy of a swapped persona is rebuilt from the new photo.
+      const degraded = manifest.personas.find((p) => p.degradedOf === id);
+      if (degraded) {
+        const { image, jpeg } = degradeImage(decodeImageFile(path.join(args.out, file)), WHATSAPP_LIKE);
+        fs.writeFileSync(path.join(args.out, degraded.file), jpeg);
+        writePng(path.join(args.out, `${id}-degraded-preview.png`), image);
+        Object.assign(degraded, { category: old.category, source: { ...old.source, degradation: degraded.source.degradation }, prompt: old.prompt, attributes: old.attributes });
+      }
+    }
+    if (swapped.some((s) => s.candidate.file === null)) {
+      const selection = { source: path.relative(ROOT, args.source) || args.source, createdAt: new Date().toISOString(), files: swapped.map((s) => `images/images/${s.candidate.originalFile}`) };
+      fs.writeFileSync(path.join(args.out, 'selection.json'), JSON.stringify(selection, null, 2) + '\n');
+      console.log(`\nreplacements written to ${path.relative(ROOT, path.join(args.out, 'selection.json'))}; fetch them, then run this command again.`);
+      return;
+    }
+    manifest.createdAt = new Date().toISOString();
+    fs.writeFileSync(manifestFile, JSON.stringify(manifest, null, 2) + '\n');
+    printCoverage(manifest.personas.filter((p) => !p.degradedOf));
+    console.log(`manifest updated: ${path.relative(ROOT, manifestFile)}`);
+    return;
+  }
+
   const chosen = selectPersonas(candidates, args.count);
   const entries: PersonaManifestEntry[] = chosen.map((c, i) => {
     const id = `p${String(i + 1).padStart(2, '0')}`;

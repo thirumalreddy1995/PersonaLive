@@ -69,6 +69,11 @@ test('the r0 preset reproduces the R0 behaviour whatever the defaults are', () =
   assert.equal(flags.realMouth, false);
   assert.equal(flags.eyePassThrough, false);
   assert.equal(Object.keys(flags).length, REALISM_FLAG_DEFS.length, 'preset covers every flag');
+  const r1 = parseRealismFlagString('r1').flags;
+  assert.equal(r1.realMouth, true);
+  assert.equal(r1.oralCavity, false);
+  assert.equal(r1.closedLipMask, false);
+  assert.equal(Object.keys(r1).length, REALISM_FLAG_DEFS.length, 'r1 preset covers every flag');
   // Later tokens override the preset.
   assert.equal(parseRealismFlagString('r0,oralCavity=0').flags.oralCavity, false);
 });

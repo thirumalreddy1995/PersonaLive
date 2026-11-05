@@ -21,6 +21,7 @@
  *   --personas <all | ids | dir>        persona test set: all manifest entries, a comma list of ids, or a folder of images
  *   --category <men|women>              category for personas given as a folder without a manifest (default men)
  *   --frames                            write the frame PNGs in grid mode too
+ *   --regions                           also write t<sec>-regions.png: the metric patches drawn on driver and output
  *   --flags <string>          realism flag overrides, e.g. "oralCavity=0,syntheticSuite=off" or the preset "r0"
  *   --settings <string>       transformation settings overrides, e.g. "temporalSmoothing=20,blendStrength=100"
  *   --run <name>              output folder name (default: <date>-<flags>)
@@ -42,6 +43,7 @@ import type { RealismDebugState, SerializedBurst, SerializedCapture } from '../.
 import * as M from './metrics.ts';
 import { SheetRow, blank, blit, compositeOnChecker, contactSheet, crop, decodeImageFile, decodePngDataUrl, drawText, imageDataUrl, scaleImage, writeDataUrlPng, writePng } from './png.ts';
 import { REVIEW_DIR, ROOT, driveAppShell, hookState, launchBrowser, sleep, startPreview, waitForHookState } from './session.ts';
+import { regionsSheet } from './regions.ts';
 import { PersonaEntry, loadPersonaSet } from './personaSet.ts';
 
 const CLIP_EXTENSIONS = ['.webm', '.mp4', '.mov', '.mkv', '.y4m'];
@@ -52,6 +54,7 @@ interface Args {
   personas: string | null;
   category: 'men' | 'women';
   frames: boolean;
+  regions: boolean;
   flags: string;
   settings: string;
   run: string | null;
@@ -70,6 +73,7 @@ function parseArgs(argv: string[]): Args {
     personas: null,
     category: 'men',
     frames: false,
+    regions: false,
     flags: '',
     settings: '',
     run: null,
@@ -103,6 +107,9 @@ function parseArgs(argv: string[]): Args {
       }
       case '--frames':
         args.frames = true;
+        break;
+      case '--regions':
+        args.regions = true;
         break;
       case '--flags':
         args.flags = next();
@@ -365,6 +372,8 @@ async function captureClip(page: Page, args: Args, o: CaptureOptions): Promise<C
       foreheadToneStep: M.foreheadToneStep(output, driver, lms),
       files,
     });
+
+    if (args.regions) writePng(path.join(o.clipDir, `${tag}-regions.png`), regionsSheet(driver, output, lms));
 
     // Contact sheet row: 2x face crops of driver, output and persona layer.
     const regions = M.faceRegions(lms, output.width, output.height);

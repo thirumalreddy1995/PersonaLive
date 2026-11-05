@@ -15,7 +15,7 @@
  * initialised, and survives WebGL context loss (GPU reset, tab backgrounding) by rebuilding its
  * GPU resources when the context is restored.
  */
-import type { FaceTopology } from './faceMesh.ts';
+import { closedLipMaskForZone, type FaceTopology } from './faceMesh.ts';
 
 export interface FacialLightingZones {
   forehead: [number, number, number];
@@ -42,6 +42,8 @@ export interface WarpFrameOptions {
   lipFade?: number;
   /** 0..1: scale of the eye pass-through ring set with setEyeFade (0 disables it, e.g. while blinking). */
   eyeFade?: number;
+  /** 0..1: closed-lip mask strength (persona removed just outside the wearer's lip contour while the mouth is closed). */
+  closedLipMask?: number;
   /** Shader "beautification" stages; all on reproduces the pre-R1 look. */
   shader?: { unsharp: boolean; subsurface: boolean; sebum: boolean };
 }
@@ -53,6 +55,7 @@ attribute vec2 aPosition;
 attribute vec2 aUv;
 attribute float aFeather;
 attribute float aLip;
+attribute float aLipZone;
 attribute float aEyeFade;
 
 uniform vec2 uResolution;
@@ -68,6 +71,7 @@ varying float vFeather;
 varying vec3 vLighting;
 varying vec2 vNormPos;
 varying float vLip;
+varying float vLipZone;
 varying float vEyeFade;
 
 void main() {
@@ -76,6 +80,7 @@ void main() {
   vUv = aUv;
   vFeather = aFeather;
   vLip = aLip;
+  vLipZone = aLipZone;
   vEyeFade = aEyeFade;
 
   // Normalized position relative to face bounding box [0, 1]
@@ -107,12 +112,14 @@ uniform float uSubsurface;
 uniform float uSebum;
 uniform float uLipFade;
 uniform float uEyeFade;
+uniform float uClosedLipMask;
 
 varying vec2 vUv;
 varying float vFeather;
 varying vec3 vLighting;
 varying vec2 vNormPos;
 varying float vLip;
+varying float vLipZone;
 varying float vEyeFade;
 
 void main() {
@@ -153,7 +160,12 @@ void main() {
 
   // 7. Keep my real mouth / eye pass-through: fade the persona on the lip band as the mouth opens
   // and in a ring around the eye holes, so the wearer's own lips, lids and lashes show.
-  float holes = (1.0 - clamp(vLip * uLipFade, 0.0, 1.0)) * (1.0 - clamp(vEyeFade * uEyeFade, 0.0, 1.0));
+  // Closed-lip mask: just outside the wearer's outer lip contour (zone 1..2, feathered to zone 3)
+  // the persona is removed while the mouth is closed, so fuller persona lips end at the wearer's
+  // vermilion border instead of drawing a painted outline.
+  float closedMask = smoothstep(1.0, 1.3, vLipZone) * (1.0 - smoothstep(2.0, 3.0, vLipZone)) * uClosedLipMask * (1.0 - uLipFade);
+  float lipHole = max(clamp(vLip * uLipFade, 0.0, 1.0), closedMask);
+  float holes = (1.0 - lipHole) * (1.0 - clamp(vEyeFade * uEyeFade, 0.0, 1.0));
 
   float a = uOpacity * f * cranialFalloff * c.a * holes;
 
@@ -166,6 +178,7 @@ interface GLResources {
   uvBuffer: WebGLBuffer;
   featherBuffer: WebGLBuffer;
   lipBuffer: WebGLBuffer;
+  lipZoneBuffer: WebGLBuffer;
   eyeFadeBuffer: WebGLBuffer;
   indexBuffer: WebGLBuffer;
   eyeIndexBuffer: WebGLBuffer;
@@ -175,6 +188,7 @@ interface GLResources {
     aUv: number;
     aFeather: number;
     aLip: number;
+    aLipZone: number;
     aEyeFade: number;
     uResolution: WebGLUniformLocation | null;
     uTexture: WebGLUniformLocation | null;
@@ -190,6 +204,7 @@ interface GLResources {
     uSebum: WebGLUniformLocation | null;
     uLipFade: WebGLUniformLocation | null;
     uEyeFade: WebGLUniformLocation | null;
+    uClosedLipMask: WebGLUniformLocation | null;
   };
 }
 
@@ -304,6 +319,7 @@ export class MeshWarpRenderer {
       uvBuffer: buffer(),
       featherBuffer: buffer(),
       lipBuffer: buffer(),
+      lipZoneBuffer: buffer(),
       eyeFadeBuffer: buffer(),
       indexBuffer: buffer(),
       eyeIndexBuffer: buffer(),
@@ -313,6 +329,7 @@ export class MeshWarpRenderer {
         aUv: gl.getAttribLocation(program, 'aUv'),
         aFeather: gl.getAttribLocation(program, 'aFeather'),
         aLip: gl.getAttribLocation(program, 'aLip'),
+        aLipZone: gl.getAttribLocation(program, 'aLipZone'),
         aEyeFade: gl.getAttribLocation(program, 'aEyeFade'),
         uResolution: gl.getUniformLocation(program, 'uResolution'),
         uTexture: gl.getUniformLocation(program, 'uTexture'),
@@ -328,6 +345,7 @@ export class MeshWarpRenderer {
         uSebum: gl.getUniformLocation(program, 'uSebum'),
         uLipFade: gl.getUniformLocation(program, 'uLipFade'),
         uEyeFade: gl.getUniformLocation(program, 'uEyeFade'),
+        uClosedLipMask: gl.getUniformLocation(program, 'uClosedLipMask'),
       },
     };
   }
@@ -337,6 +355,7 @@ export class MeshWarpRenderer {
     gl.deleteBuffer(r.uvBuffer);
     gl.deleteBuffer(r.featherBuffer);
     gl.deleteBuffer(r.lipBuffer);
+    gl.deleteBuffer(r.lipZoneBuffer);
     gl.deleteBuffer(r.eyeFadeBuffer);
     gl.deleteBuffer(r.indexBuffer);
     gl.deleteBuffer(r.eyeIndexBuffer);
@@ -382,6 +401,8 @@ export class MeshWarpRenderer {
     gl.bufferData(gl.ARRAY_BUFFER, topology.featherWeights, gl.STATIC_DRAW);
     gl.bindBuffer(gl.ARRAY_BUFFER, r.lipBuffer);
     gl.bufferData(gl.ARRAY_BUFFER, topology.lipWeights, gl.STATIC_DRAW);
+    gl.bindBuffer(gl.ARRAY_BUFFER, r.lipZoneBuffer);
+    gl.bufferData(gl.ARRAY_BUFFER, topology.lipZones, gl.STATIC_DRAW);
     if (!this.eyeFadeWeights || this.eyeFadeWeights.length !== topology.vertexCount) {
       this.eyeFadeWeights = new Float32Array(topology.vertexCount);
     }
@@ -499,6 +520,10 @@ export class MeshWarpRenderer {
     gl.enableVertexAttribArray(loc.aLip);
     gl.vertexAttribPointer(loc.aLip, 1, gl.FLOAT, false, 0, 0);
 
+    gl.bindBuffer(gl.ARRAY_BUFFER, r.lipZoneBuffer);
+    gl.enableVertexAttribArray(loc.aLipZone);
+    gl.vertexAttribPointer(loc.aLipZone, 1, gl.FLOAT, false, 0, 0);
+
     gl.bindBuffer(gl.ARRAY_BUFFER, r.eyeFadeBuffer);
     gl.enableVertexAttribArray(loc.aEyeFade);
     gl.vertexAttribPointer(loc.aEyeFade, 1, gl.FLOAT, false, 0, 0);
@@ -532,6 +557,7 @@ export class MeshWarpRenderer {
     gl.uniform1f(loc.uSebum, shader.sebum ? 1 : 0);
     gl.uniform1f(loc.uLipFade, opts.lipFade ?? 0);
     gl.uniform1f(loc.uEyeFade, opts.eyeFade ?? 0);
+    gl.uniform1f(loc.uClosedLipMask, opts.closedLipMask ?? 0);
 
     gl.bindBuffer(gl.ELEMENT_ARRAY_BUFFER, r.indexBuffer);
     gl.drawElements(gl.TRIANGLES, topo.triangles.length, gl.UNSIGNED_SHORT, 0);
@@ -553,9 +579,11 @@ export class MeshWarpRenderer {
     ctx.globalAlpha = opts.opacity;
     const lipFade = opts.lipFade ?? 0;
     const eyeFade = opts.eyeFade ?? 0;
+    const closedMask = (opts.closedLipMask ?? 0) * (1 - lipFade);
     const eyeW = this.eyeFadeWeights;
     // Per-vertex hole fades become a per-triangle alpha here (no per-pixel interpolation in 2D).
-    const holeAlpha = (v: number) => (1 - topo.lipWeights[v] * lipFade) * (1 - (eyeW ? eyeW[v] : 0) * eyeFade);
+    const holeAlpha = (v: number) =>
+      (1 - Math.max(topo.lipWeights[v] * lipFade, closedLipMaskForZone(topo.lipZones[v]) * closedMask)) * (1 - (eyeW ? eyeW[v] : 0) * eyeFade);
 
     const drawList = (indices: Uint16Array) => {
       for (let i = 0; i < indices.length; i += 3) {

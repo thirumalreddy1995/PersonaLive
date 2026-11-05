@@ -812,6 +812,8 @@ export class RealtimeFacialEngine {
     const lipFade = flags.realMouth && s.keepRealMouth ? lipFadeForMar(k.mar) : 0;
     // Eye pass-through ring: only while the wearer's real eyes are showing (R1 §6).
     const eyeFade = flags.eyePassThrough && !drawPersonaEyes ? 1 : 0;
+    // Closed-lip mask (R2): persona lips end at the wearer's lip contour while the mouth is closed.
+    const closedLipMask = flags.closedLipMask && s.keepRealMouth ? 1 : 0;
     this.lastLipFade = lipFade;
 
     this.warp.render({
@@ -823,6 +825,7 @@ export class RealtimeFacialEngine {
       drawPersonaEyes,
       lipFade,
       eyeFade,
+      closedLipMask,
       shader: { unsharp: flags.shaderUnsharp, subsurface: flags.shaderSubsurface, sebum: flags.shaderSebum },
     });
   }

@@ -34,7 +34,8 @@ export type RealismFlagKey =
   | 'shaderSubsurface'
   | 'shaderSebum'
   | 'realMouth'
-  | 'eyePassThrough';
+  | 'eyePassThrough'
+  | 'closedLipMask';
 
 export const REALISM_FLAG_DEFS: ReadonlyArray<RealismFlagDef> = [
   {
@@ -130,6 +131,13 @@ export const REALISM_FLAG_DEFS: ReadonlyArray<RealismFlagDef> = [
     defaultValue: true,
     group: 'mouth-eyes',
   },
+  {
+    key: 'closedLipMask',
+    label: 'Closed-lip mask',
+    description: 'With the mouth closed, removes persona lip colour outside the wearer\'s outer lip contour (feathered to the next ring) so fuller persona lips draw no painted outline (R2).',
+    defaultValue: false,
+    group: 'mouth-eyes',
+  },
 ];
 
 /**
@@ -137,10 +145,14 @@ export const REALISM_FLAG_DEFS: ReadonlyArray<RealismFlagDef> = [
  * the current defaults are. Update this only when a phase report changes defaults.
  */
 export const R0_FLAG_STRING =
-  'speechAnatomy=1,perspectiveForeshortening=1,eyelidKinematics=1,foreheadHarmonize=1,hairlineSoften=1,oralCavity=1,catchlights=1,syntheticSuite=1,shaderUnsharp=1,shaderSubsurface=1,shaderSebum=1,realMouth=0,eyePassThrough=0';
+  'speechAnatomy=1,perspectiveForeshortening=1,eyelidKinematics=1,foreheadHarmonize=1,hairlineSoften=1,oralCavity=1,catchlights=1,syntheticSuite=1,shaderUnsharp=1,shaderSubsurface=1,shaderSebum=1,realMouth=0,eyePassThrough=0,closedLipMask=0';
+
+/** The R1 defaults, as a flag string: `--flags r1` reproduces the end-of-R1 behaviour. */
+export const R1_FLAG_STRING =
+  'speechAnatomy=0,perspectiveForeshortening=0,eyelidKinematics=0,foreheadHarmonize=1,hairlineSoften=1,oralCavity=0,catchlights=0,syntheticSuite=0,shaderUnsharp=0,shaderSubsurface=0,shaderSebum=0,realMouth=1,eyePassThrough=1,closedLipMask=0';
 
 /** Named flag presets accepted by parseRealismFlagString (case-insensitive). */
-export const REALISM_FLAG_PRESETS: Record<string, string> = { r0: R0_FLAG_STRING };
+export const REALISM_FLAG_PRESETS: Record<string, string> = { r0: R0_FLAG_STRING, r1: R1_FLAG_STRING };
 
 export type RealismFlags = Record<RealismFlagKey, boolean>;
 

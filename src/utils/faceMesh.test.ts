@@ -8,6 +8,7 @@ import {
   applySmileBias,
   applySpeechAnatomy,
   buildFaceTopology,
+  closedLipMaskForZone,
   computeKinematics,
   eyeFadeWeights,
   fanTriangles,
@@ -243,4 +244,25 @@ test('lipFadeForMar is 0 for a closed mouth and 1 once the mouth is clearly open
   assert.ok(mid > 0.4 && mid < 0.6, `mid ${mid}`);
   assert.equal(lipFadeForMar(0, 0.2), 0.2);
   assert.equal(lipFadeForMar(0.3, 0.2), 1);
+});
+
+test('lip zones tag the inner ring, outer contour, the ring outside and the rest', () => {
+  const topo = buildFaceTopology(TESSELLATION, OVAL, 468);
+  for (const v of INNER_LIP_RING) assert.equal(topo.lipZones[v], 0);
+  for (const v of OUTER_LIP_RING) assert.equal(topo.lipZones[v], 1);
+  const ring1 = [...topo.lipZones].filter((z) => z === 2).length;
+  assert.ok(ring1 >= OUTER_LIP_RING.length, `ring outside the contour has ${ring1} vertices`);
+  assert.equal(topo.lipZones[LM.NOSE_TIP], 3);
+  assert.equal(topo.lipZones[LM.CHIN], 3);
+});
+
+test('closedLipMaskForZone keeps the lip band, masks just outside the contour and feathers out', () => {
+  assert.equal(closedLipMaskForZone(0), 0);
+  assert.equal(closedLipMaskForZone(0.9), 0);
+  assert.equal(closedLipMaskForZone(1), 0);
+  assert.equal(closedLipMaskForZone(1.3), 1);
+  assert.equal(closedLipMaskForZone(2), 1);
+  const mid = closedLipMaskForZone(2.5);
+  assert.ok(mid > 0.4 && mid < 0.6, `mid ${mid}`);
+  assert.equal(closedLipMaskForZone(3), 0);
 });

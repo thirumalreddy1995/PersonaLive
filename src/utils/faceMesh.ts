@@ -60,6 +60,12 @@ export interface FaceTopology {
    * with a feather of about one tessellation ring past the persona's lip colour.
    */
   lipWeights: Float32Array;
+  /**
+   * Lip zone per vertex: 0 on the inner lip ring, 1 on the outer lip contour, 2 one tessellation
+   * ring outside it, 3 everywhere else. Interpolated in the shader, values between 1 and 2 are the
+   * band just outside the wearer's vermilion border where fuller persona lips spill.
+   */
+  lipZones: Float32Array;
   /** BFS ring distance of every vertex from the eye rings (0 on the rings; -1 if unreachable). */
   eyeRingDistance: Int16Array;
   /** Number of vertices referenced (468 mesh points; iris points are not part of the surface). */
@@ -134,6 +140,10 @@ export function buildFaceTopology(
   const lipRingDistance = ringDistance(adjacency, [...INNER_LIP_RING, ...OUTER_LIP_RING], vertexCount);
   const lipWeights = new Float32Array(vertexCount);
   for (let v = 0; v < vertexCount; v++) lipWeights[v] = lipRingDistance[v] === 0 ? 1 : lipRingDistance[v] === 1 ? LIP_FEATHER_RING1 : 0;
+  const lipZones = new Float32Array(vertexCount).fill(3);
+  for (let v = 0; v < vertexCount; v++) if (lipRingDistance[v] === 1) lipZones[v] = 2;
+  for (const v of OUTER_LIP_RING) if (v < vertexCount) lipZones[v] = 1;
+  for (const v of INNER_LIP_RING) if (v < vertexCount) lipZones[v] = 0;
 
   const eyeRingDistance = ringDistance(adjacency, [...LEFT_EYE_RING, ...RIGHT_EYE_RING], vertexCount);
 
@@ -142,9 +152,26 @@ export function buildFaceTopology(
     eyeTriangles: new Uint16Array(eyeTriangles),
     featherWeights,
     lipWeights,
+    lipZones,
     eyeRingDistance,
     vertexCount,
   };
+}
+
+/**
+ * Closed-lip mask weight for an interpolated lip zone (see FaceTopology.lipZones): 0 inside the
+ * wearer's lip ring, rising to 1 just past the outer contour and fading back to 0 by the second
+ * ring outside. Mirrors the shader; used by the 2D fallback and the tests.
+ */
+export function closedLipMaskForZone(zone: number): number {
+  const rise = smoothstep(1.0, 1.3, zone);
+  const fall = 1 - smoothstep(2.0, 3.0, zone);
+  return rise * fall;
+}
+
+function smoothstep(a: number, b: number, x: number): number {
+  const t = clamp((x - a) / (b - a), 0, 1);
+  return t * t * (3 - 2 * t);
 }
 
 /** BFS hop count from a set of seed vertices over the tessellation graph (-1 when unreachable). */
