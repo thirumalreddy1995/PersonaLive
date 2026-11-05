@@ -566,7 +566,8 @@ async function main() {
     await driveAppShell(page, url, flagString === 'defaults' ? '' : flagString, args.settings);
     if (args.persona) await page.getByText(args.persona, { exact: false }).first().click({ timeout: 10000 });
     const state = (await hookState(page))!;
-    const liveSettings = await page.evaluate(() => window.__personaLiveRealism!.settings.get());
+    // Builds before the settings hook (R0) have no `settings` on the window hook.
+    const liveSettings = await page.evaluate(() => window.__personaLiveRealism!.settings?.get() ?? null);
     const app = { url, browser: args.browser, canvas: [state.canvasWidth, state.canvasHeight], persona: args.persona ?? 'default', settingsOverrides: parsedSettings.settings, settings: liveSettings };
 
     if (!personas) {
