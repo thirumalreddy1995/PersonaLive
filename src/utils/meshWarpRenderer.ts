@@ -54,8 +54,13 @@ export interface RelightOptions {
 
 /** The low-pass framebuffers run at 1/RELIGHT_SCALE of the canvas (and of the persona texture). */
 export const RELIGHT_SCALE = 8;
-/** Gaussian sigma of the low pass as a share of face width (plan R3: radius 6–10% of face width). */
-export const RELIGHT_RADIUS_SHARE = 0.08;
+/**
+ * Gaussian sigma of the low pass as a share of face width (setting relightRadius). The plan said
+ * 6–10%; measured on clips A, D and E the persona cheeks came out 4.8 / 3.8 / 3.1 L darker than the
+ * wearer's at 8 / 6 / 5% (the low pass averages the cheek highlight away), and 5% is where the
+ * cheek-vs-neck gap sits inside ±3 ΔE of the wearer's own on all three clips.
+ */
+export const RELIGHT_RADIUS_SHARE = 0.05;
 /** Soft pass-through edges: the fade spans this many camera-blur radii (R3 item 4), clamped to 1..12 px. */
 export const SOFT_HOLE_RADII = 1.5;
 

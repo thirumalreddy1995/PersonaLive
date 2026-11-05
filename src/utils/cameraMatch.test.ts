@@ -86,7 +86,8 @@ test('steady camera match follows a slow EMA, ignores small errors and holds dur
 
 test('R3 relight helpers: low-pass sigma, blur taps, soft-hole radius, UV width and the derivatives preamble', () => {
   // 8% of a 300 px face at 1/8 scale is 3 texels; tiny and huge faces are clamped.
-  assert.ok(Math.abs(lowPassSigma(300) - 3) < 1e-9);
+  assert.ok(Math.abs(lowPassSigma(300, 0.08) - 3) < 1e-9);
+  assert.ok(Math.abs(lowPassSigma(480) - 3) < 1e-9, 'the default share is 5%');
   assert.equal(lowPassSigma(10), 1);
   assert.equal(lowPassSigma(100000), 40);
   // Small sigmas sample every texel; larger ones spread the 15 taps so ±7 taps still cover ~2.8 sigma.

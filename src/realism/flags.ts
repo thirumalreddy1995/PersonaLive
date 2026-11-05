@@ -3,9 +3,9 @@
  *
  * Every visual stage of the persona pipeline that the realism pass touches sits behind one of
  * these flags so before/after can be compared live (debug panel) and headlessly (capture tool).
- * Defaults are the behaviour of the latest finished phase (R1: no painted mouth or glints, warp on
- * the tracked landmarks, one real keyframe, no shader beautification, real mouth and eye
- * pass-through on). `--flags r0` restores the pre-R1 behaviour; a default changes only after a
+ * Defaults are the behaviour of the latest finished phase (R3: relit from the real frame, rest-mouth
+ * lip window, steady camera match, soft pass-through edges, on top of R1/R2's tracked warp, real
+ * mouth and eye pass-through, rigid forehead, WebGL2 texture pipeline). `--flags r0` restores the pre-R1 behaviour; a default changes only after a
  * phase report shows the comparison.
  *
  * This module is pure (no DOM, no Vite env) so the capture tool and the unit tests can import it.
@@ -176,14 +176,14 @@ export const REALISM_FLAG_DEFS: ReadonlyArray<RealismFlagDef> = [
     label: 'Relight from the real frame',
     description:
       'Frequency-separation relighting (R3): the persona keeps its own detail (pores, brows, stubble) over the wearer\'s low-pass shading, with its chroma matched toward the wearer\'s at the face boundary (setting skinToneMatch). Replaces the 5-zone gain while on.',
-    defaultValue: false,
+    defaultValue: true,
     group: 'shader',
   },
   {
     key: 'steadyCameraMatch',
     label: 'Steady camera match',
     description: 'Camera-match estimates go through a slow EMA with a dead band and hold during fast head motion, so the blur tracks the camera\'s steady softness rather than per-frame motion blur (R3 item 3).',
-    defaultValue: false,
+    defaultValue: true,
     group: 'texture',
   },
   {
@@ -197,21 +197,21 @@ export const REALISM_FLAG_DEFS: ReadonlyArray<RealismFlagDef> = [
     key: 'restMouth',
     label: 'Rest-mouth calibration',
     description: 'Learns the wearer\'s resting mouth aperture from frontal frames (low percentile over ~2 s, recalibrated while frontal) and places the lip-fade thresholds above it (R3 item 1).',
-    defaultValue: false,
+    defaultValue: true,
     group: 'mouth-eyes',
   },
   {
     key: 'softHoles',
     label: 'Soft pass-through edges',
     description: 'Widens the eye and mouth pass-through fades to the camera-match blur radius so their edges do not sit sharper than the matched skin (R3 item 4).',
-    defaultValue: false,
+    defaultValue: true,
     group: 'mouth-eyes',
   },
   {
     key: 'closedLipMask',
     label: 'Closed-lip mask',
     description: 'With the mouth closed, removes persona lip colour outside the wearer\'s outer lip contour (feathered to the next ring) so fuller persona lips draw no painted outline (R2).',
-    defaultValue: true,
+    defaultValue: false,
     group: 'mouth-eyes',
   },
 ];
