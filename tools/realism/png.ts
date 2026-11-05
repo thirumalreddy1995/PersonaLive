@@ -3,6 +3,7 @@
  */
 import fs from 'node:fs';
 import path from 'node:path';
+import * as jpeg from 'jpeg-js';
 import { PNG } from 'pngjs';
 import type { Rect, RgbaImage } from './metrics.ts';
 
@@ -14,6 +15,31 @@ export function decodePngBuffer(buffer: Buffer): RgbaImage {
 export function decodePngDataUrl(dataUrl: string): RgbaImage {
   const comma = dataUrl.indexOf(',');
   return decodePngBuffer(Buffer.from(dataUrl.slice(comma + 1), 'base64'));
+}
+
+export function decodeJpegBuffer(buffer: Buffer): RgbaImage {
+  const out = jpeg.decode(buffer, { useTArray: true, formatAsRGBA: true, maxMemoryUsageInMB: 1024 });
+  return { width: out.width, height: out.height, data: new Uint8ClampedArray(out.data.buffer, out.data.byteOffset, out.data.length) };
+}
+
+/** Decodes a PNG or JPEG file by its extension. */
+export function decodeImageFile(file: string): RgbaImage {
+  const buffer = fs.readFileSync(file);
+  if (/\.jpe?g$/i.test(file)) return decodeJpegBuffer(buffer);
+  if (/\.png$/i.test(file)) return decodePngBuffer(buffer);
+  throw new Error(`Unsupported image type: ${file} (PNG or JPEG only)`);
+}
+
+/** Baseline JPEG with 4:2:0-like quality loss, as messaging apps produce (quality 0..100). */
+export function encodeJpeg(img: RgbaImage, quality: number): Buffer {
+  return jpeg.encode({ width: img.width, height: img.height, data: Buffer.from(img.data.buffer, img.data.byteOffset, img.data.length) }, quality).data;
+}
+
+/** The file as a data URL the browser can load (PNG, JPEG or WebP by extension). */
+export function imageDataUrl(file: string): string {
+  const ext = path.extname(file).toLowerCase();
+  const mime = ext === '.png' ? 'image/png' : ext === '.webp' ? 'image/webp' : 'image/jpeg';
+  return `data:${mime};base64,${fs.readFileSync(file).toString('base64')}`;
 }
 
 export function encodePng(img: RgbaImage): Buffer {
@@ -111,6 +137,54 @@ export function blit(dst: RgbaImage, src: RgbaImage, x: number, y: number) {
     if (w <= 0) continue;
     dst.data.set(src.data.subarray(row * src.width * 4, (row * src.width + w) * 4), (dy * dst.width + x) * 4);
   }
+}
+
+// --- Outline drawing (review overlays) --------------------------------------------------------------
+
+export function setPixel(img: RgbaImage, x: number, y: number, rgb: [number, number, number]) {
+  const px = Math.round(x);
+  const py = Math.round(y);
+  if (px < 0 || py < 0 || px >= img.width || py >= img.height) return;
+  const o = (py * img.width + px) * 4;
+  img.data[o] = rgb[0];
+  img.data[o + 1] = rgb[1];
+  img.data[o + 2] = rgb[2];
+  img.data[o + 3] = 255;
+}
+
+export function drawLine(img: RgbaImage, x0: number, y0: number, x1: number, y1: number, rgb: [number, number, number], thickness = 1) {
+  const steps = Math.max(1, Math.ceil(Math.hypot(x1 - x0, y1 - y0)));
+  const half = (thickness - 1) / 2;
+  for (let i = 0; i <= steps; i++) {
+    const t = i / steps;
+    const x = x0 + (x1 - x0) * t;
+    const y = y0 + (y1 - y0) * t;
+    for (let dy = -half; dy <= half; dy++) for (let dx = -half; dx <= half; dx++) setPixel(img, x + dx, y + dy, rgb);
+  }
+}
+
+export function drawCircle(img: RgbaImage, cx: number, cy: number, r: number, rgb: [number, number, number], thickness = 1) {
+  const steps = Math.max(12, Math.ceil(2 * Math.PI * r));
+  let px = cx + r;
+  let py = cy;
+  for (let i = 1; i <= steps; i++) {
+    const a = (2 * Math.PI * i) / steps;
+    const x = cx + r * Math.cos(a);
+    const y = cy + r * Math.sin(a);
+    drawLine(img, px, py, x, y, rgb, thickness);
+    px = x;
+    py = y;
+  }
+}
+
+export function drawPolyline(img: RgbaImage, points: Array<{ x: number; y: number }>, rgb: [number, number, number], closed = true, thickness = 1) {
+  for (let i = 1; i < points.length; i++) drawLine(img, points[i - 1].x, points[i - 1].y, points[i].x, points[i].y, rgb, thickness);
+  if (closed && points.length > 2) drawLine(img, points[points.length - 1].x, points[points.length - 1].y, points[0].x, points[0].y, rgb, thickness);
+}
+
+export function drawDot(img: RgbaImage, x: number, y: number, rgb: [number, number, number], size = 3) {
+  const half = (size - 1) / 2;
+  for (let dy = -half; dy <= half; dy++) for (let dx = -half; dx <= half; dx++) setPixel(img, x + dx, y + dy, rgb);
 }
 
 // --- Tiny 5x7 bitmap font for labels ---------------------------------------------------------------

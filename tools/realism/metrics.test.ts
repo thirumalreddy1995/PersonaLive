@@ -21,6 +21,15 @@ import {
   sharpnessMatch,
   skinToneMatch,
   textureSlide,
+  excludeDarkPixels,
+  foreheadStep,
+  medianOf,
+  percentileOf,
+  relativeTargets,
+  sharpnessCheck,
+  skinToneCheck,
+  trimAtHairline,
+  worstOf,
 } from './metrics.ts';
 
 // --- Fixtures -------------------------------------------------------------------------------------
@@ -306,4 +315,88 @@ test('personaTopEdge, hairlineAlignment and jitter', () => {
   assert.equal(hairlineAlignment([null], [1]), null);
   assert.equal(jitter([10, 11, 9, 9]), 1);
   assert.equal(jitter([5]), 0);
+});
+
+// --- Relative targets -----------------------------------------------------------------------------
+
+test('skinToneCheck passes within ±3 ΔE of the driver and fails outside', () => {
+  assert.equal(skinToneCheck(14, 12).pass, true);
+  assert.equal(skinToneCheck(14, 12).gap, 2);
+  assert.equal(skinToneCheck(16, 12).pass, false);
+  assert.equal(skinToneCheck(9, 12).pass, true);
+  assert.equal(skinToneCheck(8.9, 12).pass, false);
+  assert.equal(skinToneCheck(null, 12).pass, null);
+});
+
+test('sharpnessCheck passes within ±15% of the driver ratio', () => {
+  const ok = sharpnessCheck(0.8, 0.7);
+  assert.equal(ok.pass, true);
+  assert.ok(Math.abs(ok.gap! - 0.1428) < 0.001);
+  assert.equal(sharpnessCheck(1.0, 0.7).pass, false);
+  assert.equal(sharpnessCheck(0.6, 0.7).pass, true);
+  assert.equal(sharpnessCheck(0.5, 0.7).pass, false);
+  assert.equal(sharpnessCheck(1, 0).gap, null);
+  const t = relativeTargets({ skinToneCheekVsNeck: 24.9, driverCheekVsNeck: 14.8, skinToneCheekVsEars: 25.5, driverCheekVsEars: 23, sharpnessRatio: 25.5, driverSharpnessRatio: 0.73 });
+  assert.equal(t.skinToneNeck.pass, false);
+  assert.equal(t.skinToneEars.pass, true);
+  assert.equal(t.sharpness.pass, false);
+});
+
+// --- Forehead patches -----------------------------------------------------------------------------
+
+test('excludeDarkPixels drops pixels far darker than the reference patch', () => {
+  const pts = syntheticFace();
+  const r = faceRegions(pts, W, H);
+  const img = image((x, y) => (r.foreheadUpper[y * W + x] && x < CX ? [30, 20, 15] : [190, 150, 125]));
+  const out = excludeDarkPixels(img, r.foreheadUpper, r.foreheadLower);
+  assert.ok(out.excluded > 0);
+  assert.equal(maskCount(out.mask) + out.excluded, maskCount(r.foreheadUpper));
+  for (let i = 0; i < out.mask.length; i++) if (out.mask[i]) assert.ok(img.data[i * 4] > 100);
+});
+
+test('trimAtHairline cuts the band at the first mostly-dark row', () => {
+  const pts = syntheticFace();
+  const r = faceRegions(pts, W, H);
+  const topY = CY - RY;
+  const skin = new Uint8Array(r.foreheadUpper.length);
+  for (let y = 0; y < H; y++) for (let x = 0; x < W; x++) if (r.foreheadUpper[y * W + x] && y >= topY - 13) skin[y * W + x] = 1;
+  const out = trimAtHairline(r.foreheadUpper, skin, { x: CX, y: topY }, { x: 0, y: -1 }, W, H);
+  assert.equal(out.hairlineAt, 13);
+  for (let i = 0; i < out.mask.length; i++) if (out.mask[i]) assert.ok(Math.floor(i / W) >= topY - 13);
+  const none = trimAtHairline(r.foreheadUpper, r.foreheadUpper, { x: CX, y: topY }, { x: 0, y: -1 }, W, H);
+  assert.equal(none.hairlineAt, null);
+});
+
+test('foreheadStep measures the strip between the mesh top and the hairline, not the hair', () => {
+  const pts = syntheticFace();
+  const topY = CY - RY;
+  const skin: [number, number, number] = [190, 150, 125];
+  const uniform = image(() => skin);
+  const flat = foreheadStep(uniform, pts)!;
+  assert.ok(flat.deltaE < 0.01);
+  assert.equal(flat.hairlineAt, null);
+  // Hair above a lighter real-skin strip 13 px tall; the persona (lower band) keeps the skin tone.
+  const banded = image((_x, y) => (y < topY - 13 ? [30, 20, 15] : y < topY ? [215, 170, 150] : skin));
+  const step = foreheadStep(banded, pts)!;
+  assert.equal(step.hairlineAt, 13);
+  assert.ok(step.deltaE > 5, `deltaE ${step.deltaE}`);
+  assert.ok(step.excluded.upper > 0);
+  assert.ok(step.pixels.upper > 0);
+  // The reported upper outline stops at the hairline.
+  for (const p of step.patches.upper) assert.ok(p.y >= topY - 13.5, `outline y ${p.y}`);
+  const both = foreheadToneStep(banded, uniform, pts)!;
+  assert.ok(both.delta > 5);
+});
+
+// --- Aggregates -----------------------------------------------------------------------------------
+
+test('medianOf, percentileOf and worstOf', () => {
+  assert.equal(medianOf([3, 1, 2]), 2);
+  assert.equal(medianOf([1, 2, 3, 4]), 2.5);
+  assert.equal(medianOf([NaN]), null);
+  assert.equal(percentileOf([1, 2, 3, 4, 5, 6, 7, 8, 9, 10], 0.9), 9);
+  assert.equal(percentileOf([5], 0.9), 5);
+  const worst = worstOf([{ key: 'a', value: 1 }, { key: 'b', value: 5 }, { key: 'c', value: 3 }, { key: 'd', value: NaN }], 2);
+  assert.deepEqual(worst.map((w) => w.key), ['b', 'c']);
+  assert.deepEqual(worstOf([{ key: 'a', value: 1 }, { key: 'b', value: 5 }], 1, false).map((w) => w.key), ['a']);
 });

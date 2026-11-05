@@ -377,10 +377,43 @@ export interface FaceRegions {
   neck: Mask;
   earLeft: Mask;
   earRight: Mask;
+  /**
+   * Upper patch: a band above landmark 10 (the top of the warped mesh) on the wearer's real
+   * forehead, up to where hair starts. Lower patch: a band between the brows and landmark 10,
+   * i.e. on the persona's forehead. Both follow the forehead axis (head roll).
+   */
   foreheadUpper: Mask;
   foreheadLower: Mask;
+  foreheadPatches: { upper: Point[]; lower: Point[] };
   /** Forehead rectangle between the brow line and landmark 10 (texture-slide region). */
   foreheadRect: Rect;
+}
+
+/** Upper band: from this share of the glabella->landmark-10 distance above landmark 10 ... */
+export const FOREHEAD_UPPER_FROM = 0.08;
+/** ... to this share (hair found in between trims it). */
+export const FOREHEAD_UPPER_TO = 0.7;
+/** Lower band: from this share of the glabella->landmark-10 distance above the glabella ... */
+export const FOREHEAD_LOWER_FROM = 0.1;
+/**
+ * ... to this share. It stays in the lower half of the forehead, where the persona is fully
+ * opaque; higher up the forehead fades (harmonize band, cranial falloff) show the wearer's skin.
+ */
+export const FOREHEAD_LOWER_TO = 0.45;
+/** Neck patch centre: this share of face height below the chin (further down lands on the collar). */
+export const NECK_OFFSET = 0.13;
+/** Ear patch centre: this share of face width outward from the oval's widest points (234/454). */
+export const EAR_OFFSET = 0.035;
+/** Ear patch radius as a share of face width (the ear is narrow, so the patch is small). */
+export const EAR_RADIUS = 0.025;
+/** Half-width of both bands as a share of face width. */
+export const FOREHEAD_BAND_HALF_WIDTH = 0.12;
+
+/** Rectangle from `origin`, spanning `from`..`to` px along `up` and ±halfW across it. */
+export function bandPolygon(origin: Point, up: Point, from: number, to: number, halfW: number): Point[] {
+  const right = { x: -up.y, y: up.x };
+  const at = (d: number, w: number) => ({ x: origin.x + up.x * d + right.x * w, y: origin.y + up.y * d + right.y * w });
+  return [at(from, -halfW), at(from, halfW), at(to, halfW), at(to, -halfW)];
 }
 
 export function faceRegions(points: Landmarks, width: number, height: number): FaceRegions {
@@ -405,18 +438,21 @@ export function faceRegions(points: Landmarks, width: number, height: number): F
     return { x: (a.x - b.x) / d, y: (a.y - b.y) / d };
   };
   const chin = lm(points, LMK.CHIN);
-  const neckCenter = { x: chin.x - up.x * size.height * 0.22, y: chin.y - up.y * size.height * 0.22 };
+  const neckCenter = { x: chin.x - up.x * size.height * NECK_OFFSET, y: chin.y - up.y * size.height * NECK_OFFSET };
   const lt = lm(points, LMK.LEFT_TEMPLE);
   const rt = lm(points, LMK.RIGHT_TEMPLE);
   const ol = outward(LMK.LEFT_TEMPLE, LMK.RIGHT_TEMPLE);
   const or = outward(LMK.RIGHT_TEMPLE, LMK.LEFT_TEMPLE);
-  const earOffset = size.width * 0.09;
+  const earOffset = size.width * EAR_OFFSET;
+  const earR = size.width * EAR_RADIUS;
   const top = lm(points, LMK.TOP);
   const glabella = lm(points, LMK.GLABELLA);
   const fore = { x: top.x - glabella.x, y: top.y - glabella.y };
-  const foreheadLowerC = { x: glabella.x + fore.x * 0.6, y: glabella.y + fore.y * 0.6 };
-  const foreheadUpperC = { x: top.x + fore.x * 0.55, y: top.y + fore.y * 0.55 };
-  const fr = size.width * 0.045;
+  const foreLen = Math.hypot(fore.x, fore.y) || 1;
+  const foreUp = { x: fore.x / foreLen, y: fore.y / foreLen };
+  const halfW = size.width * FOREHEAD_BAND_HALF_WIDTH;
+  const upperBand = bandPolygon(top, foreUp, foreLen * FOREHEAD_UPPER_FROM, foreLen * FOREHEAD_UPPER_TO, halfW);
+  const lowerBand = bandPolygon(glabella, foreUp, foreLen * FOREHEAD_LOWER_FROM, foreLen * FOREHEAD_LOWER_TO, halfW);
 
   const lx = lm(points, LMK.RIGHT_TEMPLE_UPPER).x;
   const rx = lm(points, LMK.LEFT_TEMPLE_UPPER).x;
@@ -441,10 +477,11 @@ export function faceRegions(points: Landmarks, width: number, height: number): F
     cheekLeft: diskMask(lm(points, LMK.LEFT_CHEEK), r, width, height),
     cheekRight: diskMask(lm(points, LMK.RIGHT_CHEEK), r, width, height),
     neck: diskMask(neckCenter, r, width, height),
-    earLeft: diskMask({ x: lt.x + ol.x * earOffset, y: lt.y + ol.y * earOffset }, r * 0.7, width, height),
-    earRight: diskMask({ x: rt.x + or.x * earOffset, y: rt.y + or.y * earOffset }, r * 0.7, width, height),
-    foreheadUpper: diskMask(foreheadUpperC, fr, width, height),
-    foreheadLower: diskMask(foreheadLowerC, fr, width, height),
+    earLeft: diskMask({ x: lt.x + ol.x * earOffset, y: lt.y + ol.y * earOffset }, earR, width, height),
+    earRight: diskMask({ x: rt.x + or.x * earOffset, y: rt.y + or.y * earOffset }, earR, width, height),
+    foreheadUpper: rasterizePolygon(upperBand, width, height),
+    foreheadLower: rasterizePolygon(lowerBand, width, height),
+    foreheadPatches: { upper: upperBand, lower: lowerBand },
     foreheadRect,
   };
 }
@@ -458,6 +495,8 @@ export interface SkinToneMatch {
   cheekVsEars: number;
   /** Same cheek-vs-neck ΔE measured on the driver alone: the wearer's own natural difference. */
   driverCheekVsNeck: number;
+  /** Same cheek-vs-ears ΔE measured on the driver alone. */
+  driverCheekVsEars: number;
 }
 
 export function skinToneMatch(output: RgbaImage, driver: RgbaImage, points: Landmarks): SkinToneMatch | null {
@@ -470,11 +509,74 @@ export function skinToneMatch(output: RgbaImage, driver: RgbaImage, points: Land
   if (!cheekOut || !cheekDrv || !neck) return null;
   const ears = [earL, earR].filter((e): e is [number, number, number] => !!e);
   const cheekLab = rgbToLab(cheekOut);
-  const earDeltas = ears.map((e) => ciede2000(cheekLab, rgbToLab(e)));
+  const cheekDrvLab = rgbToLab(cheekDrv);
+  const avg = (v: number[]) => (v.length ? v.reduce((a, b) => a + b, 0) / v.length : NaN);
   return {
     cheekVsNeck: ciede2000(cheekLab, rgbToLab(neck)),
-    cheekVsEars: earDeltas.length ? earDeltas.reduce((a, b) => a + b, 0) / earDeltas.length : NaN,
-    driverCheekVsNeck: ciede2000(rgbToLab(cheekDrv), rgbToLab(neck)),
+    cheekVsEars: avg(ears.map((e) => ciede2000(cheekLab, rgbToLab(e)))),
+    driverCheekVsNeck: ciede2000(cheekDrvLab, rgbToLab(neck)),
+    driverCheekVsEars: avg(ears.map((e) => ciede2000(cheekDrvLab, rgbToLab(e)))),
+  };
+}
+
+// --- Relative targets -----------------------------------------------------------------------------
+//
+// The targets are relative to the wearer, not absolute: the persona should look as sharp as the
+// wearer's own face does against its surroundings, and its skin should differ from the wearer's neck
+// and ears by about as much as the wearer's own cheeks do.
+
+/** Skin tone passes when the output ΔE is within this of the driver's own ΔE. */
+export const SKIN_TONE_TOLERANCE_DE = 3;
+/** Sharpness passes when the output face/ring ratio is within this fraction of the driver's own ratio. */
+export const SHARPNESS_TOLERANCE = 0.15;
+
+export interface RelativeCheck {
+  driver: number | null;
+  output: number | null;
+  /** Skin tone: output − driver (ΔE). Sharpness: (output − driver) / driver. */
+  gap: number | null;
+  tolerance: number;
+  pass: boolean | null;
+}
+
+function finite(v: number | null | undefined): number | null {
+  return typeof v === 'number' && Number.isFinite(v) ? v : null;
+}
+
+/** |output − driver| ≤ SKIN_TONE_TOLERANCE_DE. */
+export function skinToneCheck(output: number | null | undefined, driver: number | null | undefined): RelativeCheck {
+  const o = finite(output);
+  const d = finite(driver);
+  const gap = o !== null && d !== null ? o - d : null;
+  return { driver: d, output: o, gap, tolerance: SKIN_TONE_TOLERANCE_DE, pass: gap === null ? null : Math.abs(gap) <= SKIN_TONE_TOLERANCE_DE };
+}
+
+/** |(output − driver) / driver| ≤ SHARPNESS_TOLERANCE. */
+export function sharpnessCheck(output: number | null | undefined, driver: number | null | undefined): RelativeCheck {
+  const o = finite(output);
+  const d = finite(driver);
+  const gap = o !== null && d !== null && d > 0 ? (o - d) / d : null;
+  return { driver: d, output: o, gap, tolerance: SHARPNESS_TOLERANCE, pass: gap === null ? null : Math.abs(gap) <= SHARPNESS_TOLERANCE };
+}
+
+export interface RelativeTargets {
+  skinToneNeck: RelativeCheck;
+  skinToneEars: RelativeCheck;
+  sharpness: RelativeCheck;
+}
+
+export function relativeTargets(s: {
+  skinToneCheekVsNeck?: number | null;
+  driverCheekVsNeck?: number | null;
+  skinToneCheekVsEars?: number | null;
+  driverCheekVsEars?: number | null;
+  sharpnessRatio?: number | null;
+  driverSharpnessRatio?: number | null;
+}): RelativeTargets {
+  return {
+    skinToneNeck: skinToneCheck(s.skinToneCheekVsNeck, s.driverCheekVsNeck),
+    skinToneEars: skinToneCheck(s.skinToneCheekVsEars, s.driverCheekVsEars),
+    sharpness: sharpnessCheck(s.sharpnessRatio, s.driverSharpnessRatio),
   };
 }
 
@@ -531,19 +633,133 @@ export function mouthFidelity(outputLandmarks: Landmarks | null, driverLandmarks
   return { lipErrorPct: (px / width) * 100, lipErrorPx: px, points: idx.length };
 }
 
+/** Pixels darker than this share of the reference patch's median luminance count as hair, not skin. */
+export const HAIR_LUMINANCE_RATIO = 0.6;
+
+/**
+ * Returns `mask` without the pixels darker than HAIR_LUMINANCE_RATIO x the median luminance of
+ * `reference` (the lower-forehead patch, which is always skin): hair strands and shadowed fringe
+ * drop out of a patch that sits near the hairline instead of pulling its colour toward black.
+ */
+export function excludeDarkPixels(img: RgbaImage, mask: Mask, reference: Mask, ratio = HAIR_LUMINANCE_RATIO): { mask: Mask; excluded: number; threshold: number } {
+  const lum = luminance(img);
+  const ref: number[] = [];
+  for (let i = 0; i < reference.length; i++) if (reference[i]) ref.push(lum[i]);
+  if (!ref.length) return { mask, excluded: 0, threshold: 0 };
+  ref.sort((a, b) => a - b);
+  const threshold = ref[Math.floor(ref.length / 2)] * ratio;
+  const out = new Uint8Array(mask.length);
+  let excluded = 0;
+  for (let i = 0; i < mask.length; i++) {
+    if (!mask[i]) continue;
+    if (lum[i] < threshold) excluded++;
+    else out[i] = 1;
+  }
+  return { mask: out, excluded, threshold };
+}
+
+/** A row of the band counts as hair once this share of its pixels is dark. */
+export const HAIRLINE_ROW_DARK_SHARE = 0.5;
+
+/**
+ * Trims the upper band where the hair starts: rows (1 px steps along `up` from `origin`) are
+ * scanned upward, and the first row whose dark share exceeds HAIRLINE_ROW_DARK_SHARE ends the
+ * band. Returns the trimmed skin mask and the hairline distance (px above `origin`), or null when
+ * no hair row was met inside the band.
+ */
+export function trimAtHairline(
+  band: Mask,
+  skin: Mask,
+  origin: Point,
+  up: Point,
+  width: number,
+  height: number
+): { mask: Mask; hairlineAt: number | null } {
+  const rows = new Map<number, { total: number; dark: number }>();
+  const rowOf = new Int32Array(band.length).fill(-1);
+  for (let y = 0; y < height; y++) {
+    for (let x = 0; x < width; x++) {
+      const i = y * width + x;
+      if (!band[i]) continue;
+      const d = Math.floor((x + 0.5 - origin.x) * up.x + (y + 0.5 - origin.y) * up.y);
+      rowOf[i] = d;
+      const row = rows.get(d) ?? { total: 0, dark: 0 };
+      row.total++;
+      if (!skin[i]) row.dark++;
+      rows.set(d, row);
+    }
+  }
+  let hairlineAt: number | null = null;
+  for (const d of [...rows.keys()].sort((a, b) => a - b)) {
+    const row = rows.get(d)!;
+    if (row.total >= 3 && row.dark / row.total > HAIRLINE_ROW_DARK_SHARE) {
+      hairlineAt = d;
+      break;
+    }
+  }
+  if (hairlineAt === null) return { mask: skin, hairlineAt: null };
+  const out = new Uint8Array(skin.length);
+  for (let i = 0; i < skin.length; i++) if (skin[i] && rowOf[i] < hairlineAt) out[i] = 1;
+  return { mask: out, hairlineAt };
+}
+
+export interface ForeheadStep {
+  /** ΔE between the upper and the lower forehead patch (hair-like pixels excluded). */
+  deltaE: number;
+  /** Patch outlines; the upper one is cut at the detected hairline. */
+  patches: { upper: Point[]; lower: Point[] };
+  /** Distance (px) above landmark 10 at which hair starts, or null when none was met in the band. */
+  hairlineAt: number | null;
+  pixels: { upper: number; lower: number };
+  excluded: { upper: number; lower: number };
+  /** Mean sRGB of each patch after exclusion. */
+  rgb: { upper: [number, number, number]; lower: [number, number, number] };
+}
+
+/** Forehead tone step of a single image: the band a viewer sees between the lower and upper forehead. */
+export function foreheadStep(img: RgbaImage, points: Landmarks): ForeheadStep | null {
+  const r = faceRegions(points, img.width, img.height);
+  const lower = excludeDarkPixels(img, r.foreheadLower, r.foreheadLower);
+  const upperSkin = excludeDarkPixels(img, r.foreheadUpper, r.foreheadLower);
+  const top = lm(points, LMK.TOP);
+  const glabella = lm(points, LMK.GLABELLA);
+  const fore = { x: top.x - glabella.x, y: top.y - glabella.y };
+  const foreLen = Math.hypot(fore.x, fore.y) || 1;
+  const up = { x: fore.x / foreLen, y: fore.y / foreLen };
+  const upper = trimAtHairline(r.foreheadUpper, upperSkin.mask, top, up, img.width, img.height);
+  const upperRgb = meanRgb(img, upper.mask);
+  const lowerRgb = meanRgb(img, lower.mask);
+  if (!upperRgb || !lowerRgb) return null;
+  const upperOutline =
+    upper.hairlineAt === null
+      ? r.foreheadPatches.upper
+      : bandPolygon(top, up, foreLen * FOREHEAD_UPPER_FROM, Math.max(foreLen * FOREHEAD_UPPER_FROM + 1, upper.hairlineAt), r.size.width * FOREHEAD_BAND_HALF_WIDTH);
+  const upperCount = maskCount(upper.mask);
+  return {
+    deltaE: ciede2000(rgbToLab(upperRgb), rgbToLab(lowerRgb)),
+    patches: { upper: upperOutline, lower: r.foreheadPatches.lower },
+    hairlineAt: upper.hairlineAt,
+    pixels: { upper: upperCount, lower: maskCount(lower.mask) },
+    excluded: { upper: maskCount(r.foreheadUpper) - upperCount, lower: lower.excluded },
+    rgb: { upper: upperRgb, lower: lowerRgb },
+  };
+}
+
 export interface ForeheadToneStep {
   output: number;
   driver: number;
   /** output − driver; a real forehead has no band, so this should approach 0. */
   delta: number;
+  patches: { upper: Point[]; lower: Point[] };
+  hairlineAt: number | null;
+  excluded: { output: { upper: number; lower: number }; driver: { upper: number; lower: number } };
 }
 
 export function foreheadToneStep(output: RgbaImage, driver: RgbaImage, points: Landmarks): ForeheadToneStep | null {
-  const r = faceRegions(points, output.width, output.height);
-  const o = deltaE(output, r.foreheadUpper, output, r.foreheadLower);
-  const d = deltaE(driver, r.foreheadUpper, driver, r.foreheadLower);
-  if (o === null || d === null) return null;
-  return { output: o, driver: d, delta: o - d };
+  const o = foreheadStep(output, points);
+  const d = foreheadStep(driver, points);
+  if (!o || !d) return null;
+  return { output: o.deltaE, driver: d.deltaE, delta: o.deltaE - d.deltaE, patches: o.patches, hairlineAt: o.hairlineAt, excluded: { output: o.excluded, driver: d.excluded } };
 }
 
 export interface BurstFrame {
@@ -749,4 +965,32 @@ export function jitter(series: number[]): number {
 export function meanOf(values: number[]): number | null {
   const v = values.filter((x) => Number.isFinite(x));
   return v.length ? v.reduce((a, b) => a + b, 0) / v.length : null;
+}
+
+/** Median of the finite values (average of the two middle values for an even count). */
+export function medianOf(values: number[]): number | null {
+  const v = values.filter((x) => Number.isFinite(x)).sort((a, b) => a - b);
+  if (!v.length) return null;
+  const mid = v.length >> 1;
+  return v.length % 2 ? v[mid] : (v[mid - 1] + v[mid]) / 2;
+}
+
+/** Value at the p-th percentile (0..1, nearest rank) of the finite values. */
+export function percentileOf(values: number[], p: number): number | null {
+  const v = values.filter((x) => Number.isFinite(x)).sort((a, b) => a - b);
+  if (!v.length) return null;
+  const rank = Math.min(v.length - 1, Math.max(0, Math.ceil(p * v.length) - 1));
+  return v[rank];
+}
+
+export interface Ranked<K> {
+  key: K;
+  value: number;
+}
+
+/** The `count` entries with the worst value: the largest when higher is worse, else the smallest. */
+export function worstOf<K>(entries: Array<Ranked<K>>, count: number, higherIsWorse = true): Array<Ranked<K>> {
+  const v = entries.filter((e) => Number.isFinite(e.value));
+  v.sort((a, b) => (higherIsWorse ? b.value - a.value : a.value - b.value));
+  return v.slice(0, count);
 }
