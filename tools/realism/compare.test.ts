@@ -60,7 +60,7 @@ test('compareGrids compares medians and lists personas that regressed', () => {
     aggregate: { personas: 2, metrics: { textureSlidePx: { label: 'texture slide (px/frame)', median: (slideP1 + slideP2) / 2, worst10pct: Math.max(slideP1, slideP2), worst3: [] } } },
   });
   const before = { run: 'b', grid: grid(2, 2) };
-  const after = { run: 'a', grid: grid(0.5, 3) };
+  const after = { run: 'a', grid: grid(0.2, 3) };
   const g = compareGrids(before as never, after as never)!;
   assert.equal(g.metrics[0].verdictMedian, 'better');
   assert.equal(g.metrics[0].verdictWorst10, 'WORSE');

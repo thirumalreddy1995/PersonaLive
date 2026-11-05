@@ -41,31 +41,47 @@ interface Report {
   };
 }
 
-/** The rows of the before → after table; `higherIsWorse` decides the arrow. */
-export const COMPARE_ROWS: Array<{ key: string; label: string; pick: (s: Summary) => number | null; higherIsWorse: boolean; digits?: number }> = [
-  { key: 'textureSlide', label: 'texture slide (px/frame)', pick: (s) => s.textureSlide?.residualPx ?? null, higherIsWorse: true },
-  { key: 'flicker', label: 'flicker Δ (output − driver)', pick: (s) => s.flicker?.delta ?? null, higherIsWorse: true },
-  { key: 'teeth', label: 'synthetic-teeth frames (share)', pick: (s) => (s.framesRenderedWholeClip ? s.syntheticTeethFramesWholeClip / s.framesRenderedWholeClip : null), higherIsWorse: true },
-  { key: 'skinNeckGap', label: 'skin tone gap vs neck (ΔE)', pick: (s) => s.targets.skinToneNeck.gap, higherIsWorse: true },
-  { key: 'skinEarsGap', label: 'skin tone gap vs ears (ΔE)', pick: (s) => s.targets.skinToneEars.gap, higherIsWorse: true },
-  { key: 'sharpnessGap', label: 'sharpness gap (fraction of driver)', pick: (s) => s.targets.sharpness.gap, higherIsWorse: true },
-  { key: 'foreheadDelta', label: 'forehead step Δ (output − driver)', pick: (s) => s.foreheadToneStepDelta, higherIsWorse: true },
-  { key: 'foreheadOut', label: 'forehead step output (ΔE)', pick: (s) => s.foreheadToneStepOutput, higherIsWorse: true },
-  { key: 'seam', label: 'seam ratio', pick: (s) => s.seamRatio, higherIsWorse: true },
-  { key: 'lipErr', label: 'lip error (% face width)', pick: (s) => s.mouthLipErrorPct, higherIsWorse: true },
-  { key: 'fps', label: 'fps', pick: (s) => s.performance?.fps ?? null, higherIsWorse: false, digits: 1 },
-  { key: 'p95', label: 'p95 frame ms', pick: (s) => s.performance?.frameP95Ms ?? null, higherIsWorse: true, digits: 1 },
+/**
+ * The rows of the before → after table. `higherIsWorse` decides the arrow, `abs` judges a signed
+ * gap by its magnitude, and `noise` is the run-to-run spread measured by repeating a capture
+ * (same build, same flags): a change smaller than that is "=", not a regression.
+ */
+export interface CompareRow {
+  key: string;
+  label: string;
+  pick: (s: Summary) => number | null;
+  higherIsWorse: boolean;
+  abs?: boolean;
+  noise: number;
+  digits?: number;
+}
+
+export const COMPARE_ROWS: CompareRow[] = [
+  { key: 'textureSlide', label: 'texture slide (px/frame)', pick: (s) => s.textureSlide?.residualPx ?? null, higherIsWorse: true, noise: 0.25 },
+  { key: 'flicker', label: 'flicker Δ (output − driver)', pick: (s) => s.flicker?.delta ?? null, higherIsWorse: true, noise: 0.6 },
+  { key: 'teeth', label: 'synthetic-teeth frames (share)', pick: (s) => (s.framesRenderedWholeClip ? s.syntheticTeethFramesWholeClip / s.framesRenderedWholeClip : null), higherIsWorse: true, noise: 0.02 },
+  { key: 'skinNeckGap', label: 'skin tone gap vs neck (ΔE)', pick: (s) => s.targets.skinToneNeck.gap, higherIsWorse: true, abs: true, noise: 0.5 },
+  { key: 'skinEarsGap', label: 'skin tone gap vs ears (ΔE)', pick: (s) => s.targets.skinToneEars.gap, higherIsWorse: true, abs: true, noise: 0.5 },
+  { key: 'sharpnessGap', label: 'sharpness gap (fraction of driver)', pick: (s) => s.targets.sharpness.gap, higherIsWorse: true, abs: true, noise: 0.3 },
+  { key: 'foreheadDelta', label: 'forehead step Δ (output − driver)', pick: (s) => s.foreheadToneStepDelta, higherIsWorse: true, abs: true, noise: 0.5 },
+  { key: 'foreheadOut', label: 'forehead step output (ΔE)', pick: (s) => s.foreheadToneStepOutput, higherIsWorse: true, noise: 0.5 },
+  { key: 'seam', label: 'seam ratio', pick: (s) => s.seamRatio, higherIsWorse: true, noise: 0.1 },
+  { key: 'lipErr', label: 'lip error (% face width)', pick: (s) => s.mouthLipErrorPct, higherIsWorse: true, noise: 0.3 },
+  { key: 'fps', label: 'fps', pick: (s) => s.performance?.fps ?? null, higherIsWorse: false, noise: 2, digits: 1 },
+  { key: 'p95', label: 'p95 frame ms', pick: (s) => s.performance?.frameP95Ms ?? null, higherIsWorse: true, noise: 2, digits: 1 },
 ];
 
 function fmt(v: number | null, digits = 2): string {
   return v === null || v === undefined || !Number.isFinite(v) ? '-' : v.toFixed(digits);
 }
 
-/** Direction marker: better, worse or unchanged (within 2% or 0.01). */
-export function verdict(before: number | null, after: number | null, higherIsWorse: boolean): string {
+/** Direction marker: better, worse or unchanged (within `noise`, or 2% of the value when no noise is given). */
+export function verdict(before: number | null, after: number | null, higherIsWorse: boolean, noise = 0, abs = false): string {
   if (before === null || after === null) return '';
-  const diff = after - before;
-  if (Math.abs(diff) <= Math.max(0.01, Math.abs(before) * 0.02)) return '=';
+  const b = abs ? Math.abs(before) : before;
+  const a = abs ? Math.abs(after) : after;
+  const diff = a - b;
+  if (Math.abs(diff) <= Math.max(noise, 0.01, Math.abs(b) * 0.02)) return '=';
   const better = higherIsWorse ? diff < 0 : diff > 0;
   return better ? 'better' : 'WORSE';
 }
@@ -91,11 +107,24 @@ export function compareClips(before: Report, after: Report, clips?: string[]): C
       rows: COMPARE_ROWS.map((r) => {
         const bv = b ? r.pick(b) : null;
         const av = a ? r.pick(a) : null;
-        return { label: r.label, before: bv, after: av, verdict: verdict(bv, av, r.higherIsWorse), digits: r.digits ?? 2 };
+        return { label: r.label, before: bv, after: av, verdict: verdict(bv, av, r.higherIsWorse, r.noise, r.abs), digits: r.digits ?? 2 };
       }),
     };
   });
 }
+
+/** Noise floor per report.grid aggregate key (same values as the matching COMPARE_ROWS). */
+const GRID_NOISE: Record<string, number> = {
+  skinToneNeckGapAbs: 0.5,
+  skinToneEarsGapAbs: 0.5,
+  sharpnessGapAbs: 0.3,
+  seamRatio: 0.1,
+  mouthLipErrorPct: 0.3,
+  syntheticTeethShare: 0.02,
+  foreheadToneStepDelta: 0.5,
+  flickerDelta: 0.6,
+  textureSlidePx: 0.25,
+};
 
 export interface GridComparison {
   metrics: Array<{ key: string; label: string; medianBefore: number | null; medianAfter: number | null; worst10Before: number | null; worst10After: number | null; verdictMedian: string; verdictWorst10: string }>;
@@ -124,8 +153,8 @@ export function compareGrids(before: Report, after: Report): GridComparison | nu
         medianAfter: a.median,
         worst10Before: b.worst10pct,
         worst10After: a.worst10pct,
-        verdictMedian: verdict(b.median, a.median, true),
-        verdictWorst10: verdict(b.worst10pct, a.worst10pct, true),
+        verdictMedian: verdict(b.median, a.median, true, GRID_NOISE[key] ?? 0),
+        verdictWorst10: verdict(b.worst10pct, a.worst10pct, true, GRID_NOISE[key] ?? 0),
       };
     });
   const regressions: GridComparison['regressions'] = [];
@@ -136,7 +165,7 @@ export function compareGrids(before: Report, after: Report): GridComparison | nu
       const bv = personaValue(before.grid, persona, r.pick);
       const av = personaValue(after.grid, persona, r.pick);
       if (bv === null || av === null) continue;
-      if (verdict(bv, av, r.higherIsWorse) === 'WORSE') regressions.push({ persona, metric: r.label, before: bv, after: av });
+      if (verdict(bv, av, r.higherIsWorse, r.noise, r.abs) === 'WORSE') regressions.push({ persona, metric: r.label, before: bv, after: av });
     }
   }
   return { metrics, regressions };
