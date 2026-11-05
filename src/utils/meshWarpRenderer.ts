@@ -48,6 +48,8 @@ export interface RelightOptions {
   faceWidthPx: number;
   /** 0..1 tone match toward the wearer at the face boundary (setting skinToneMatch). */
   toneMatch: number;
+  /** Low-pass sigma as a share of face width (setting relightRadius; RELIGHT_RADIUS_SHARE by default). */
+  radiusShare?: number;
 }
 
 /** The low-pass framebuffers run at 1/RELIGHT_SCALE of the canvas (and of the persona texture). */
@@ -497,8 +499,8 @@ interface RelightResources {
 }
 
 /** Gaussian sigma (in low-pass texels) for a face this wide (in the source's own pixels). */
-export function lowPassSigma(faceWidth: number): number {
-  return Math.min(40, Math.max(1, (RELIGHT_RADIUS_SHARE * faceWidth) / RELIGHT_SCALE));
+export function lowPassSigma(faceWidth: number, share = RELIGHT_RADIUS_SHARE): number {
+  return Math.min(40, Math.max(1, (share * faceWidth) / RELIGHT_SCALE));
 }
 
 /** Tap spacing and per-tap sigma for the 15-tap blur so sigma up to ~17 texels fits ±7 taps. */
@@ -609,6 +611,7 @@ export class MeshWarpRenderer {
   private personaUvWidth = 1;
   /** The persona low-pass must be rebuilt (new persona, UVs, texture or topology). */
   private personaLowDirty = true;
+  private personaLowShare = RELIGHT_RADIUS_SHARE;
   private relightFailed = false;
   private pending: PendingReadback[] = [];
 
@@ -913,17 +916,19 @@ export class MeshWarpRenderer {
     rl.driver = this.ensureTarget(gl, rl.driver, Math.max(1, Math.ceil(W / RELIGHT_SCALE)), Math.max(1, Math.ceil(H / RELIGHT_SCALE)));
     const pw = Math.max(1, Math.ceil(this.personaSize.width / RELIGHT_SCALE));
     const ph = Math.max(1, Math.ceil(this.personaSize.height / RELIGHT_SCALE));
-    const personaStale = this.personaLowDirty || !rl.persona || rl.persona.width !== pw || rl.persona.height !== ph;
+    const share = o.radiusShare ?? RELIGHT_RADIUS_SHARE;
+    const personaStale = this.personaLowDirty || !rl.persona || rl.persona.width !== pw || rl.persona.height !== ph || share !== this.personaLowShare;
     rl.persona = this.ensureTarget(gl, rl.persona, pw, ph);
 
     gl.disable(gl.BLEND);
     if (personaStale) {
       this.paintMesh(gl, r, rl, rl.persona, 1, o);
-      this.blurTarget(gl, rl, rl.persona, lowPassSigma(this.personaUvWidth * this.personaSize.width));
+      this.blurTarget(gl, rl, rl.persona, lowPassSigma(this.personaUvWidth * this.personaSize.width, share));
       this.personaLowDirty = false;
+      this.personaLowShare = share;
     }
     this.paintMesh(gl, r, rl, rl.driver, 0, o);
-    this.blurTarget(gl, rl, rl.driver, lowPassSigma(o.faceWidthPx));
+    this.blurTarget(gl, rl, rl.driver, lowPassSigma(o.faceWidthPx, share));
 
     gl.bindFramebuffer(gl.FRAMEBUFFER, null);
     gl.viewport(0, 0, W, H);

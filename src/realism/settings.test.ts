@@ -17,7 +17,7 @@ test('parseSettingsFromSearch reads the rs parameter', () => {
 });
 
 test('parseSettingsString reads the rigid-pose tuning settings', () => {
-  const { settings, errors } = parseSettingsString('rigidPoseMinCutoff=5,rigidPoseBeta=2,rigidShapeOffset=0');
+  const { settings, errors } = parseSettingsString('rigidPoseMinCutoff=5,rigidPoseBeta=2,rigidShapeOffset=0,skinToneMatch=0.5,relightRadius=0.06');
   assert.deepEqual(errors, []);
-  assert.deepEqual(settings, { rigidPoseMinCutoff: 5, rigidPoseBeta: 2, rigidShapeOffset: false });
+  assert.deepEqual(settings, { rigidPoseMinCutoff: 5, rigidPoseBeta: 2, rigidShapeOffset: false, skinToneMatch: 0.5, relightRadius: 0.06 });
 });

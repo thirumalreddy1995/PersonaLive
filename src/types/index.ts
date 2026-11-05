@@ -96,6 +96,8 @@ export interface TransformationSettings {
   rigidShapeOffset: boolean;
   /** R3 relighting tone match, 0..1: 0 keeps the persona's complexion everywhere, 1 matches the wearer's at the face boundary. */
   skinToneMatch: number;
+  /** R3 relighting low-pass radius as a share of face width (plan: 0.06–0.10). */
+  relightRadius: number;
   lightingAdaptation: boolean;
   preserveFacialHair: boolean;
   showLandmarkOverlay: boolean;

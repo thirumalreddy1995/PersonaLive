@@ -108,6 +108,7 @@ export default function App() {
     rigidPoseBeta: 0.05,
     rigidShapeOffset: true,
     skinToneMatch: 1,
+    relightRadius: 0.08,
     lightingAdaptation: true,
     preserveFacialHair: true,
     showLandmarkOverlay: false,

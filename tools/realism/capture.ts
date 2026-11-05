@@ -321,6 +321,9 @@ async function captureClip(page: Page, args: Args, o: CaptureOptions): Promise<C
   const burstStart = args.burst.start ?? duration * 0.45;
   console.log(`  ${o.clipLabel}: ${duration.toFixed(2)} s, capturing at ${times.map((t) => t.toFixed(2)).join(', ')} s; burst from ${burstStart.toFixed(2)} s × ${args.burst.count}`);
 
+  // The camera-match trace on the hook spans the persona's whole life; this clip's part starts here.
+  const traceStart = (await hookState(page))?.cameraMatchTrace?.length ?? 0;
+
   // Replay from the start with everything scheduled, so the temporal filters see the clip as live.
   await page.evaluate(async ({ times, burstStart, burstCount }) => {
     const hook = window.__personaLiveRealism!;
@@ -453,7 +456,8 @@ async function captureClip(page: Page, args: Args, o: CaptureOptions): Promise<C
     seamStepOutput: M.meanOf(frames.map((f) => f.seamStep?.deltaE ?? NaN)),
     seamStepDriver: M.meanOf(frames.map((f) => f.driverSeamStep?.deltaE ?? NaN)),
   };
-  const trace = finalState.cameraMatchTrace ?? [];
+  const whole = finalState.cameraMatchTrace ?? [];
+  const trace = whole.length >= traceStart ? whole.slice(traceStart) : whole;
   const traceStats = M.traceStats(trace);
   const summary: ClipSummary = {
     frames: frames.length,

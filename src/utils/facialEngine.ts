@@ -927,6 +927,7 @@ export class RealtimeFacialEngine {
             mirror: layout.mirror,
             faceWidthPx: k.faceWidth,
             toneMatch: clamp(s.skinToneMatch, 0, 1),
+            radiusShare: clamp(s.relightRadius, 0.02, 0.2),
           }
         : undefined,
       motionBlurPx: flags.motionBlur ? [this.headVelocity.x * MOTION_BLUR_EXPOSURE, -this.headVelocity.y * MOTION_BLUR_EXPOSURE] : undefined,
