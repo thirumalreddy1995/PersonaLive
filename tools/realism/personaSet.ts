@@ -12,12 +12,13 @@ export type PersonaCategory = 'men' | 'women';
 export interface PersonaAttributes {
   gender: 'man' | 'woman' | 'unknown';
   ethnicity: string;
-  /** Decade label such as "20s", "40s", "60s", or "unknown". */
+  /** Decade label such as "20s", "40s", "60s"; "minor" below 18, "70+" above 69, or "unknown". */
   age: string;
   skinTone: 'light' | 'medium' | 'dark' | 'unknown';
   facialHair: 'beard' | 'moustache' | 'clean-shaven' | 'unknown';
   glasses: boolean;
-  hairline: 'receding' | 'fringe' | 'normal' | 'unknown';
+  /** "bald" covers shaved and bald heads: the forehead has no hairline at all. */
+  hairline: 'receding' | 'bald' | 'fringe' | 'normal' | 'unknown';
 }
 
 export interface PersonaManifestEntry {
@@ -94,7 +95,7 @@ function fromManifest(manifest: PersonaManifest, dir: string, ids: string[] | nu
 // --- Prompt attribute parsing (SFHQ-T2I prompts are free text) ----------------------------------------
 
 const ETHNICITIES: Array<[RegExp, string]> = [
-  [/\b(south asian|indian|pakistani|bangladeshi|sri lankan|nepali|desi)\b/i, 'South Asian'],
+  [/\b(south asian|indian|pakistani|bangladeshi|sri lankan|nepali|nepalese|bengali|punjabi|tamil|gujarati|sindhi|desi)\b/i, 'South Asian'],
   [/\b(east asian|chinese|japanese|korean|vietnamese|taiwanese)\b/i, 'East Asian'],
   [/\b(southeast asian|thai|filipino|filipina|indonesian|malaysian)\b/i, 'Southeast Asian'],
   [/\b(middle eastern|arab|persian|iranian|turkish|lebanese|egyptian)\b/i, 'Middle Eastern'],
@@ -107,9 +108,9 @@ const ETHNICITIES: Array<[RegExp, string]> = [
 
 export function parsePromptAttributes(prompt: string): PersonaAttributes {
   const p = prompt.toLowerCase();
-  const gender: PersonaAttributes['gender'] = /\b(woman|female|lady|girl|she|her|grandmother|mother)\b/.test(p)
+  const gender: PersonaAttributes['gender'] = /\b(woman|female|lady|girl|she|her|hers|grandmother|mother|sister|daughter|aunt|wife)\b/.test(p)
     ? 'woman'
-    : /\b(man|male|gentleman|guy|boy|he|his|grandfather|father)\b/.test(p)
+    : /\b(man|male|gentleman|guy|boy|he|his|him|grandfather|father|brother|son|uncle|husband)\b/.test(p)
       ? 'man'
       : 'unknown';
   let ethnicity = 'unknown';
@@ -120,13 +121,14 @@ export function parsePromptAttributes(prompt: string): PersonaAttributes {
     }
   }
   const age = parseAge(p);
-  const skinTone: PersonaAttributes['skinTone'] = /\b(dark|deep|ebony|rich brown|very dark)[- ]?(skin|complexion)/.test(p) || ethnicity === 'Black'
-    ? 'dark'
-    : /\b(light|fair|pale|porcelain|very light)[- ]?(skin|complexion)/.test(p) || ['White', 'East Asian'].includes(ethnicity)
-      ? 'light'
-      : /\b(medium|olive|tan|tanned|brown|wheatish|golden)[- ]?(skin|complexion)/.test(p) || ['South Asian', 'Middle Eastern', 'Hispanic / Latino', 'Southeast Asian', 'Mixed'].includes(ethnicity)
-        ? 'medium'
-        : 'unknown';
+  const skinTone: PersonaAttributes['skinTone'] =
+    /\b(dark|deep|ebony|rich brown|very dark|dark brown|deep brown)[- ]?(skin|complexion|skinned)/.test(p) || /\bebony\b/.test(p) || ethnicity === 'Black'
+      ? 'dark'
+      : /\b(light|fair|pale|porcelain|very light|alabaster|ivory)[- ]?(skin|complexion|skinned|like skin)/.test(p) || /\b(porcelain|pale|alabaster)\b/.test(p) || ['White', 'East Asian'].includes(ethnicity)
+        ? 'light'
+        : /\b(medium|olive|tan|tanned|brown|wheatish|golden|caramel|bronze|honey)[- ]?(skin|complexion|skinned)/.test(p) || /\b(olive|tanned|caramel|wheatish)\b/.test(p) || ['South Asian', 'Middle Eastern', 'Hispanic / Latino', 'Southeast Asian', 'Mixed', 'Indigenous'].includes(ethnicity)
+          ? 'medium'
+          : 'unknown';
   const facialHair: PersonaAttributes['facialHair'] = /\b(clean[- ]shaven|no beard|shaved face|smooth face)\b/.test(p)
     ? 'clean-shaven'
     : /\b(beard|bearded|goatee|stubble)\b/.test(p)
@@ -137,21 +139,29 @@ export function parsePromptAttributes(prompt: string): PersonaAttributes {
           ? 'clean-shaven'
           : 'unknown';
   const glasses = /\b(glasses|spectacles|eyeglasses)\b/.test(p) && !/\b(no glasses|without glasses|sunglasses)\b/.test(p);
-  const hairline: PersonaAttributes['hairline'] = /\b(receding hairline|receding hair|balding|bald|widow'?s peak|high forehead)\b/.test(p)
+  const hairline: PersonaAttributes['hairline'] = /\b(receding hairline|receding hair|balding|widow'?s peak|high forehead|thinning hair)\b/.test(p)
     ? 'receding'
-    : /\b(fringe|bangs|hair (falling |hanging )?over (the |his |her )?forehead)\b/.test(p)
-      ? 'fringe'
-      : /\b(hair|hairstyle|haircut)\b/.test(p)
-        ? 'normal'
-        : 'unknown';
+    : /\b(bald|shaved head|buzz ?cut)\b/.test(p)
+      ? 'bald'
+      : /\b(fringe|bangs|hair (falling |hanging )?over (the |his |her )?forehead)\b/.test(p)
+        ? 'fringe'
+        : /\b(hair|hairstyle|haircut)\b/.test(p)
+          ? 'normal'
+          : 'unknown';
   return { gender, ethnicity, age, skinTone, facialHair, glasses, hairline };
 }
 
 function parseAge(p: string): string {
   const decade = p.match(/\b(?:in (?:his|her|their) |aged? )?(20|30|40|50|60|70)s\b/);
   if (decade) return `${decade[1]}s`;
-  const years = p.match(/\b(\d{2})[- ]year[s]?[- ]old\b/);
-  if (years) return `${Math.floor(Number(years[1]) / 10) * 10}s`;
+  const years = p.match(/\b(\d{1,3})[- ]year[s]?[- ]old\b/);
+  if (years) {
+    const n = Number(years[1]);
+    if (n < 18) return 'minor';
+    if (n < 20) return '20s';
+    if (n >= 70) return '70+';
+    return `${Math.floor(n / 10) * 10}s`;
+  }
   if (/\b(elderly|senior|old man|old woman|grandfather|grandmother|retired)\b/.test(p)) return '60s';
   if (/\b(middle[- ]aged)\b/.test(p)) return '40s';
   if (/\b(young adult|young man|young woman|college|student)\b/.test(p)) return '20s';
@@ -197,7 +207,7 @@ export function coverage(entries: Array<{ attributes: PersonaAttributes; degrade
   for (const decade of ['20s', '30s', '40s', '50s', '60s']) if (!ages[decade]) missing.push(`age ${decade}`);
   for (const fh of ['beard', 'moustache', 'clean-shaven']) if (!facialHair[fh]) missing.push(fh);
   if (!glasses) missing.push('glasses');
-  if (!hairlines.receding) missing.push('receding hairline');
+  if (!hairlines.receding && !hairlines.bald) missing.push('receding hairline');
   if (!hairlines.fringe) missing.push('fringe over the forehead');
   return { total: clean.length, southAsian, skinTones, genders, ages, facialHair, glasses, hairlines, missing };
 }
@@ -215,7 +225,7 @@ export const REQUIREMENTS: Array<{ label: string; count: number; test: (a: Perso
   { label: 'moustache', count: 2, test: (a) => a.facialHair === 'moustache' },
   { label: 'clean-shaven', count: 3, test: (a) => a.facialHair === 'clean-shaven' },
   { label: 'glasses', count: 3, test: (a) => a.glasses },
-  { label: 'receding hairline', count: 2, test: (a) => a.hairline === 'receding' },
+  { label: 'receding hairline', count: 2, test: (a) => a.hairline === 'receding' || a.hairline === 'bald' },
   { label: 'fringe', count: 2, test: (a) => a.hairline === 'fringe' },
 ];
 
@@ -228,7 +238,7 @@ export function selectPersonas<T extends { attributes: PersonaAttributes }>(cand
   const chosen: T[] = [];
   const taken = new Set<T>();
   const need = REQUIREMENTS.map((r) => r.count);
-  const eligible = candidates.filter((c) => c.attributes.age !== 'minor');
+  const eligible = candidates.filter((c) => c.attributes.age !== 'minor' && c.attributes.age !== '70+');
   for (;;) {
     let best: T | null = null;
     let bestGain = 0;
@@ -296,4 +306,35 @@ export function parseCsv(text: string): Record<string, string>[] {
   if (!rows.length) return [];
   const header = rows[0].map((h) => h.trim());
   return rows.slice(1).map((r) => Object.fromEntries(header.map((h, i) => [h, r[i] ?? ''])));
+}
+
+// --- Prompt suitability -------------------------------------------------------------------------------
+
+const REJECT_PROMPT: RegExp[] = [
+  // not frontal
+  /\b(profile|side view|over (his|her|their) (left |right )?shoulder|looking (away|down|up|sideways|off|back)|from behind|sidelong|glance|glancing|tilt(ed)? shot|aerial|low angle|high angle|from above|from below|three[- ]quarter|3\/4|dutch angle|bird'?s[- ]eye|worm'?s[- ]eye|back view|rear view|turned|head tilted)\b/i,
+  // not neutral or mouth open
+  /\b(laugh\w*|grin\w*|smil\w*|scream\w*|shout\w*|yell(ing|s|ed)?|sing(ing|s)?|gasp\w*|shock\w*|surpris\w*|stunned|open mouth|mouth open|mouth agape|yawn\w*|wink\w*|cry\w*|crying|tears|tongue|pout\w*|frown\w*|snarl\w*|angry|enraged|furious|disgust\w*|terrified|scared|panicked|excited|enthusiastic|joyful|funny|zany|mischievous|flirt\w*|seductive|kiss\w*|biting|chewing|eating|drinking|smok\w*|talking|speaking|whisper\w*)\b/i,
+  // occlusion and headwear
+  /\b(sunglasses|goggles|mask\w*|helmet|veil\w*|hood\w*|hat|cap|beanie|turban|hijab|headscarf|head scarf|bandana|headband|crown|tiara|eye ?patch|hand(s)? (on|over|covering|touching|near) (his|her|their|the) (face|cheek|chin|mouth|eyes?|forehead|head)|holding|phone|microphone|cigarette|pipe|umbrella|scarf|balaclava|niqab|burqa|visor|earmuffs|headphones)\b/i,
+  // framing and rendering that hides the face or its colour
+  /\b(wide shot|full[- ]body|long shot|panoramic|extreme close[- ]?up|close[- ]?up of (the |his |her )?(eyes?|lips|mouth|nose|ear|hands?)|macro|silhouette\w*|back[- ]?lit|black and white|monochrome|grayscale|greyscale|sepia|b&w|noir|infrared|night vision|thermal|x-ray|negative|double exposure|underwater|neon|blacklight|strobe|rainbow light|split lighting|rim light(ing)? only)\b/i,
+  // more than one person
+  /\b(two|three|couple|group|family|crowd|twins|people|friends|siblings|parents|duo|trio|together with)\b/i,
+];
+
+const NEUTRAL_PROMPT = /\b(neutral|stoic|serious|calm|composed|impassive|deadpan|blank stare|hollow stare|expressionless|straight[- ]faced?|solemn|relaxed|thoughtful|pensive|resigned|contemplative|placid|reserved)\b/i;
+const PORTRAIT_PROMPT = /\b(close[- ]?up|portrait|headshot|head shot|face shot|close shot|medium shot|head and shoulders|facial|face)\b/i;
+
+/** Why a prompt is unsuitable for a frontal, neutral, unoccluded adult reference; null when it is suitable. */
+export function promptRejectReason(prompt: string, attributes: PersonaAttributes): string | null {
+  for (const re of REJECT_PROMPT) {
+    const m = prompt.match(re);
+    if (m) return m[0].toLowerCase();
+  }
+  if (!NEUTRAL_PROMPT.test(prompt)) return 'no neutral expression';
+  if (!PORTRAIT_PROMPT.test(prompt)) return 'not a portrait framing';
+  if (attributes.age === 'minor' || attributes.age === '70+' || attributes.age === 'unknown') return `age ${attributes.age}`;
+  if (attributes.gender === 'unknown') return 'gender unknown';
+  return null;
 }

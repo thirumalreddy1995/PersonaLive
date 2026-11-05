@@ -1,6 +1,6 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { PersonaAttributes, coverage, parseCsv, parsePromptAttributes, selectPersonas } from './personaSet.ts';
+import { PersonaAttributes, coverage, parseCsv, parsePromptAttributes, promptRejectReason, selectPersonas } from './personaSet.ts';
 
 test('parsePromptAttributes reads gender, ethnicity, age, skin tone, facial hair, glasses and hairline', () => {
   const a = parsePromptAttributes('A photo of a South Asian man in his 40s with a thick beard and glasses, receding hairline, neutral expression');
@@ -23,6 +23,30 @@ test('parsePromptAttributes reads gender, ethnicity, age, skin tone, facial hair
   assert.equal(d.facialHair, 'clean-shaven');
   assert.equal(d.skinTone, 'dark');
   assert.equal(parsePromptAttributes('a smiling child').age, 'minor');
+  // SFHQ-T2I phrasing: "47 year old", "bald", "tan", "sister".
+  const e = parsePromptAttributes('A close up portrait of a 47 year old Lebanese sister with a stoic expression, bald, tan, looking at the camera');
+  assert.equal(e.age, '40s');
+  assert.equal(e.gender, 'woman');
+  assert.equal(e.hairline, 'bald');
+  assert.equal(e.ethnicity, 'Middle Eastern');
+  assert.equal(parsePromptAttributes('a 12 year old boy').age, 'minor');
+  assert.equal(parsePromptAttributes('a 74 year old man').age, '70+');
+});
+
+test('promptRejectReason keeps only frontal, neutral, unoccluded adult portraits', () => {
+  const ok = 'A close up portrait of a 34 year old South Asian man with a neutral expression and short black hair, looking at the camera, soft light';
+  assert.equal(promptRejectReason(ok, parsePromptAttributes(ok)), null);
+  const cases: Array<[string, string]> = [
+    ['A portrait of a 34 year old man with a neutral expression looking over his right shoulder', 'over his right shoulder'],
+    ['A portrait of a 34 year old man with a joyful expression', 'joyful'],
+    ['A portrait of a 34 year old man with a neutral expression wearing sunglasses', 'sunglasses'],
+    ['A wide shot of a 34 year old man with a neutral expression', 'wide shot'],
+    ['A portrait of a 12 year old boy with a neutral expression', 'age minor'],
+    ['A portrait of a 34 year old person with a neutral expression', 'gender unknown'],
+    ['A portrait of a 34 year old man with a thoughtful expression in black and white', 'black and white'],
+    ['A portrait of a 34 year old man', 'no neutral expression'],
+  ];
+  for (const [prompt, reason] of cases) assert.equal(promptRejectReason(prompt, parsePromptAttributes(prompt)), reason, prompt);
 });
 
 function attrs(over: Partial<PersonaAttributes>): PersonaAttributes {

@@ -25,7 +25,7 @@ import fs from 'node:fs';
 import path from 'node:path';
 import { decodeImageFile, writePng } from './png.ts';
 import { degradeImage, WHATSAPP_LIKE } from './degrade.ts';
-import { PERSONAS_DIR, PersonaAttributes, PersonaManifest, PersonaManifestEntry, coverage, parseCsv, parsePromptAttributes, selectPersonas } from './personaSet.ts';
+import { PERSONAS_DIR, PersonaAttributes, PersonaManifest, PersonaManifestEntry, coverage, parseCsv, parsePromptAttributes, promptRejectReason, selectPersonas } from './personaSet.ts';
 import { ROOT } from './session.ts';
 
 interface Args {
@@ -88,7 +88,9 @@ function findColumn(columns: string[], candidates: RegExp[]): string | null {
 
 interface Candidate {
   imageId: string;
-  file: string;
+  /** Local file, or null in plan mode (CSV only, images not downloaded yet). */
+  file: string | null;
+  originalFile: string;
   model: string;
   prompt: string;
   attributes: PersonaAttributes;
@@ -124,21 +126,28 @@ function loadCandidates(source: string, models: string[]): Candidate[] {
   const modelCol = findColumn(columns, [/^model(_name)?$/i, /model/i]);
   if (!promptCol || !fileCol) throw new Error(`Could not find the prompt/file columns in ${csvFile}; columns: ${columns.join(', ')}`);
   const images = indexImages(source);
-  const wanted = new Set(models.map((m) => m.toLowerCase()));
+  const planMode = images.size === 0;
+  const wanted = new Set(models.map((m) => m.toLowerCase().replace(/[^a-z0-9]/g, '')));
   const out: Candidate[] = [];
+  const rejected = new Map<string, number>();
   for (const row of rows) {
     const model = modelCol ? row[modelCol] : 'unknown';
-    if (modelCol && !wanted.has(model.toLowerCase())) continue;
+    if (modelCol && !wanted.has(model.toLowerCase().replace(/[^a-z0-9]/g, ''))) continue;
     const ref = row[fileCol];
-    const file = images.get(ref) ?? images.get(path.basename(ref)) ?? images.get(path.basename(ref, path.extname(ref)));
-    if (!file) continue;
+    const file = planMode ? null : (images.get(ref) ?? images.get(path.basename(ref)) ?? images.get(path.basename(ref, path.extname(ref))) ?? null);
+    if (!planMode && !file) continue;
     const prompt = row[promptCol];
-    // Frontal, neutral, one adult face: reject prompts that ask for anything else.
-    if (/\b(profile|side view|looking away|from behind|smiling|laughing|grin|screaming|angry|crying|wink|sunglasses|mask|helmet|two people|couple|group|child|kid|baby|toddler)\b/i.test(prompt)) continue;
     const attributes = parsePromptAttributes(prompt);
-    if (attributes.age === 'minor' || attributes.gender === 'unknown') continue;
-    out.push({ imageId: path.basename(file, path.extname(file)), file, model, prompt, attributes });
+    // Frontal, neutral, unoccluded, one adult face: reject prompts that ask for anything else.
+    const reason = promptRejectReason(prompt, attributes);
+    if (reason) {
+      rejected.set(reason, (rejected.get(reason) ?? 0) + 1);
+      continue;
+    }
+    out.push({ imageId: path.basename(ref, path.extname(ref)), file, originalFile: path.basename(ref), model, prompt, attributes });
   }
+  const top = [...rejected.entries()].sort((a, b) => b[1] - a[1]).slice(0, 8);
+  console.log(`${planMode ? 'plan mode (no images in the source folder): ' : ''}${out.length} suitable prompts; top reject reasons: ${top.map(([r, n]) => `${r} ×${n}`).join(', ')}`);
   return out;
 }
 
@@ -160,9 +169,9 @@ async function main() {
     const id = `p${String(i + 1).padStart(2, '0')}`;
     return {
       id,
-      file: `${id}${path.extname(c.file).toLowerCase()}`,
+      file: `${id}${path.extname(c.originalFile).toLowerCase()}`,
       category: c.attributes.gender === 'woman' ? 'women' : 'men',
-      source: { dataset: 'SFHQ-T2I', imageId: c.imageId, model: c.model, originalFile: path.basename(c.file) },
+      source: { dataset: 'SFHQ-T2I', imageId: c.imageId, model: c.model, originalFile: c.originalFile, kagglePath: `images/images/${c.originalFile}` },
       prompt: c.prompt,
       attributes: c.attributes,
       degradedOf: null,
@@ -170,10 +179,20 @@ async function main() {
   });
   printCoverage(entries);
   for (const e of entries) console.log(`  ${e.id} ${e.category} ${JSON.stringify(e.attributes)} ← ${e.source.originalFile}`);
+  if (chosen.some((c) => c.file === null)) {
+    // Plan mode: list what to fetch (Kaggle single-file downloads), then run again with the images present.
+    const selection = { source: path.relative(ROOT, args.source) || args.source, createdAt: new Date().toISOString(), files: chosen.map((c) => `images/images/${c.originalFile}`) };
+    fs.mkdirSync(args.out, { recursive: true });
+    fs.writeFileSync(path.join(args.out, 'selection.json'), JSON.stringify(selection, null, 2) + '\n');
+    console.log(`\nselection written to ${path.relative(ROOT, path.join(args.out, 'selection.json'))}; fetch each file with`);
+    console.log(`  kaggle datasets download -d selfishgene/sfhq-t2i-synthetic-faces-from-text-2-image-models -f <path> -p ${path.relative(ROOT, args.source) || args.source}`);
+    console.log('then run this command again.');
+    return;
+  }
   if (args.dryRun) return;
 
   fs.mkdirSync(args.out, { recursive: true });
-  for (const e of entries) fs.copyFileSync(chosen[entries.indexOf(e)].file, path.join(args.out, e.file));
+  for (const e of entries) fs.copyFileSync(chosen[entries.indexOf(e)].file!, path.join(args.out, e.file));
 
   // Degraded copies of the first `degrade` entries that cover different attributes.
   const degraded: PersonaManifestEntry[] = [];
