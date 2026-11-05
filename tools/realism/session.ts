@@ -105,9 +105,10 @@ export async function waitForHookState(
 }
 
 /** Opens the built app with the realism surface on, signs into the demo and shows the AI output. */
-export async function driveAppShell(page: Page, url: string, flagString: string) {
+export async function driveAppShell(page: Page, url: string, flagString: string, settingsString = '') {
   const query = new URLSearchParams({ realism: '1' });
   if (flagString) query.set('rf', flagString);
+  if (settingsString) query.set('rs', settingsString);
   await page.goto(`${url}?${query.toString()}`, { waitUntil: 'load' });
   await page.getByRole('button', { name: /demo administrator|Sign In as Admin/i }).click({ timeout: 30000 });
   await page.getByRole('button', { name: 'AI Output Only' }).click({ timeout: 30000 });

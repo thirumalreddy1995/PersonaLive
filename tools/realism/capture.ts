@@ -21,7 +21,8 @@
  *   --personas <all | ids | dir>        persona test set: all manifest entries, a comma list of ids, or a folder of images
  *   --category <men|women>              category for personas given as a folder without a manifest (default men)
  *   --frames                            write the frame PNGs in grid mode too
- *   --flags <string>          realism flag overrides, e.g. "oralCavity=0,syntheticSuite=off"
+ *   --flags <string>          realism flag overrides, e.g. "oralCavity=0,syntheticSuite=off" or the preset "r0"
+ *   --settings <string>       transformation settings overrides, e.g. "temporalSmoothing=20,blendStrength=100"
  *   --run <name>              output folder name (default: <date>-<flags>)
  *   --times <s,s,...>         capture timestamps in seconds (default: 8 evenly spaced; 4 in grid mode)
  *   --burst <start:count>     consecutive-frame burst for flicker/texture slide (default: 45% of clip, 16 frames)
@@ -36,6 +37,7 @@ import fs from 'node:fs';
 import path from 'node:path';
 import { Browser, Page } from 'playwright';
 import { defaultRealismFlags, describeRealismFlags, parseRealismFlagString } from '../../src/realism/flags.ts';
+import { parseSettingsString } from '../../src/realism/settings.ts';
 import type { RealismDebugState, SerializedBurst, SerializedCapture } from '../../src/realism/debug.ts';
 import * as M from './metrics.ts';
 import { SheetRow, blank, blit, compositeOnChecker, contactSheet, crop, decodeImageFile, decodePngDataUrl, drawText, imageDataUrl, scaleImage, writeDataUrlPng, writePng } from './png.ts';
@@ -51,6 +53,7 @@ interface Args {
   category: 'men' | 'women';
   frames: boolean;
   flags: string;
+  settings: string;
   run: string | null;
   times: number[] | null;
   burst: { start: number | null; count: number };
@@ -68,6 +71,7 @@ function parseArgs(argv: string[]): Args {
     category: 'men',
     frames: false,
     flags: '',
+    settings: '',
     run: null,
     times: null,
     burst: { start: null, count: 16 },
@@ -102,6 +106,9 @@ function parseArgs(argv: string[]): Args {
         break;
       case '--flags':
         args.flags = next();
+        break;
+      case '--settings':
+        args.settings = next();
         break;
       case '--run':
         args.run = next();
@@ -537,6 +544,8 @@ async function main() {
   if (parsed.errors.length) throw new Error(`Bad --flags: ${parsed.errors.join('; ')}`);
   const flagValues = { ...defaultRealismFlags(), ...parsed.flags };
   const flagString = describeRealismFlags(flagValues);
+  const parsedSettings = parseSettingsString(args.settings);
+  if (parsedSettings.errors.length) throw new Error(`Bad --settings: ${parsedSettings.errors.join('; ')}`);
   const runName = args.run ?? `${new Date().toISOString().slice(0, 10)}-${flagString === 'defaults' ? 'defaults' : flagString.replace(/[^a-z0-9]+/gi, '_')}`;
   const outDir = path.join(REVIEW_DIR, 'out', runName);
   fs.mkdirSync(outDir, { recursive: true });
@@ -554,10 +563,11 @@ async function main() {
     const page = await context.newPage();
     const pageErrors: string[] = [];
     page.on('pageerror', (e) => pageErrors.push(String(e).slice(0, 200)));
-    await driveAppShell(page, url, flagString === 'defaults' ? '' : flagString);
+    await driveAppShell(page, url, flagString === 'defaults' ? '' : flagString, args.settings);
     if (args.persona) await page.getByText(args.persona, { exact: false }).first().click({ timeout: 10000 });
     const state = (await hookState(page))!;
-    const app = { url, browser: args.browser, canvas: [state.canvasWidth, state.canvasHeight], persona: args.persona ?? 'default' };
+    const liveSettings = await page.evaluate(() => window.__personaLiveRealism!.settings.get());
+    const app = { url, browser: args.browser, canvas: [state.canvasWidth, state.canvasHeight], persona: args.persona ?? 'default', settingsOverrides: parsedSettings.settings, settings: liveSettings };
 
     if (!personas) {
       // --- Default persona: full frame dump per clip ----------------------------------------------

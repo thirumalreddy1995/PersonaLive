@@ -1,4 +1,4 @@
-import React, { useState, useCallback, useEffect } from 'react';
+import React, { useState, useCallback, useEffect, useRef } from 'react';
 import {
   AuthorizedPersona,
   EngineStatus,
@@ -139,6 +139,8 @@ export default function App() {
 
   // Dev-only realism tooling (vite dev, or ?realism on a build); see docs/REALISM_PLAN.md.
   const realismDebug = isRealismDebugEnabled();
+  const settingsRef = useRef(settings);
+  settingsRef.current = settings;
   useEffect(() => {
     if (!realismDebug) return;
     installRealismWindowHook({
@@ -148,6 +150,8 @@ export default function App() {
         setSubjectCategory(category);
         localStorage.setItem('pl_subject_category', category);
       },
+      getSettings: () => settingsRef.current,
+      updateSettings: (patch) => setSettings((prev) => ({ ...prev, ...patch })),
     });
   }, [realismDebug]);
 

@@ -15,7 +15,8 @@ import {
   realismFlags,
 } from './flags.ts';
 import type { ProfileSummary } from './profiler.ts';
-import type { AuthorizedPersona, HeadPose, PersonaCategory } from '../types/index.ts';
+import { parseSettingsFromSearch } from './settings.ts';
+import type { AuthorizedPersona, HeadPose, PersonaCategory, TransformationSettings } from '../types/index.ts';
 
 export interface RealismDebugState {
   source: string;
@@ -100,11 +101,13 @@ export interface RealismEngineDebugApi {
   detectStill(image: HTMLImageElement | HTMLCanvasElement): Promise<Float32Array | null>;
 }
 
-/** What the app lets the debug surface do with its persona state. */
+/** What the app lets the debug surface do with its persona and settings state. */
 export interface RealismAppHooks {
   addPersona(persona: AuthorizedPersona): void;
   activatePersona(persona: AuthorizedPersona): void;
   setSubjectCategory(category: PersonaCategory): void;
+  getSettings(): TransformationSettings;
+  updateSettings(patch: Partial<TransformationSettings>): void;
 }
 
 let enabledMemo: boolean | null = null;
@@ -203,6 +206,8 @@ export interface RealismWindowHook {
   detectImage(dataUrl: string): Promise<{ width: number; height: number; landmarks: number[] } | null>;
   /** Adds a persona from an image and makes it active (test personas for the review grid). */
   loadPersona(spec: LoadPersonaSpec): Promise<string>;
+  /** Transformation settings of the app (the inspector's sliders and switches). */
+  settings: { get(): TransformationSettings | null; set(patch: Partial<TransformationSettings>): boolean };
 }
 
 declare global {
@@ -232,7 +237,12 @@ let appHooks: RealismAppHooks | null = null;
  */
 export function installRealismWindowHook(app?: RealismAppHooks): RealismWindowHook | null {
   if (typeof window === 'undefined' || !isRealismDebugEnabled()) return null;
-  if (app) appHooks = app;
+  if (app) {
+    appHooks = app;
+    // `?rs=` settings overrides apply once the app can take them.
+    const overrides = parseSettingsFromSearch(location.search);
+    if (Object.keys(overrides).length) app.updateSettings(overrides);
+  }
   if (window.__personaLiveRealism) return window.__personaLiveRealism;
 
   const overrides = parseRealismFlagsFromSearch(location.search);
@@ -363,6 +373,14 @@ export function installRealismWindowHook(app?: RealismAppHooks): RealismWindowHo
       appHooks.addPersona(persona);
       appHooks.activatePersona(persona);
       return id;
+    },
+    settings: {
+      get: () => appHooks?.getSettings() ?? null,
+      set: (patch) => {
+        if (!appHooks) return false;
+        appHooks.updateSettings(patch);
+        return true;
+      },
     },
   };
   window.__personaLiveRealism = hook;
