@@ -93,11 +93,20 @@ const CYAN: [number, number, number] = [34, 211, 238];
 const ORANGE: [number, number, number] = [251, 146, 60];
 const GREEN: [number, number, number] = [74, 222, 128];
 const MAGENTA: [number, number, number] = [232, 121, 249];
+const WHITE: [number, number, number] = [255, 255, 255];
 
 function annotate(img: M.RgbaImage, pts: Float32Array, step: M.ForeheadStep, scale = 1): M.RgbaImage {
   const out = scale === 1 ? { width: img.width, height: img.height, data: new Uint8ClampedArray(img.data) } : scaleImage(img, scale);
   const r = M.faceRegions(pts, img.width, img.height);
   drawPolyline(out, r.oval.map((p) => ({ x: p.x * scale, y: p.y * scale })), GREEN, true, 1);
+  // R3 seam-step bands on the jaw and cheeks: inner band magenta, outer band white.
+  const seam = M.seamStep(img, pts);
+  if (seam) {
+    for (const s of seam.segments) {
+      drawPolyline(out, s.inner.map((p) => ({ x: p.x * scale, y: p.y * scale })), MAGENTA, true, 1);
+      drawPolyline(out, s.outer.map((p) => ({ x: p.x * scale, y: p.y * scale })), WHITE, true, 1);
+    }
+  }
   const g = M.lm(pts, LMK.GLABELLA);
   const t = M.lm(pts, LMK.TOP);
   drawDot(out, g.x * scale, g.y * scale, MAGENTA, 3);
@@ -152,7 +161,11 @@ async function main() {
       // The same two patches without the hair exclusion, for comparison.
       const rawStep = M.deltaE(img, regions.foreheadUpper, img, regions.foreheadLower);
       const sharpness = M.sharpnessMatch(img, pts);
+      const sharpnessInterior = M.sharpnessMatchInterior(img, pts);
       const seam = M.seamScore(img, pts);
+      const seamStep = M.seamStep(img, pts);
+      // Lip fullness: upper plus lower vermilion height over face height (R3 item 1 persona pick).
+      const lipFullness = (M.dist(M.lm(pts, 0), M.lm(pts, 13)) + M.dist(M.lm(pts, 17), M.lm(pts, 14))) / M.faceSize(pts).height;
       if (!step) {
         results.push({ file: path.relative(ROOT, file), faceDetected: true, foreheadStep: null });
         continue;
@@ -160,10 +173,12 @@ async function main() {
 
       const full = annotate(img, pts, step);
       drawText(full, `UPPER (CYAN) VS LOWER (ORANGE) DE ${step.deltaE.toFixed(1)}  RAW ${rawStep === null ? '-' : rawStep.toFixed(1)}`, 8, 8, 2, CYAN);
+      drawText(full, `SEAM STEP DE ${seamStep ? seamStep.deltaE.toFixed(1) : '-'} WORST ${seamStep ? seamStep.worst.toFixed(1) : '-'} (MAGENTA IN / WHITE OUT)`, 8, 26, 2, MAGENTA);
       writePng(path.join(outDir, `${name}-patches.png`), full);
       const box = M.clampRect(M.expandRect(regions.ovalBox, 1.5, 1.6), img.width, img.height);
       const zoom = annotate(crop(img, box), shift(pts, -box.x, -box.y), shiftStep(step, -box.x, -box.y), 3);
       drawText(zoom, `DE ${step.deltaE.toFixed(1)} RAW ${rawStep === null ? '-' : rawStep.toFixed(1)}`, 6, 6, 2, CYAN);
+      drawText(zoom, `SEAM STEP DE ${seamStep ? seamStep.deltaE.toFixed(1) : '-'} WORST ${seamStep ? seamStep.worst.toFixed(1) : '-'}`, 6, 24, 2, MAGENTA);
       writePng(path.join(outDir, `${name}-face.png`), zoom);
 
       const faceWidth = regions.size.width;
@@ -173,14 +188,17 @@ async function main() {
         faceWidthPx: faceWidth,
         foreheadStep: { deltaE: step.deltaE, raw: rawStep, hairlineAt: step.hairlineAt, excluded: step.excluded, pixels: step.pixels, rgb: step.rgb, patches: step.patches },
         sharpnessRatio: sharpness.ratio,
+        sharpnessInteriorRatio: sharpnessInterior.ratio,
+        lipFullness,
         seamRatio: seam.ratio,
+        seamStep: seamStep ? { deltaE: seamStep.deltaE, worst: seamStep.worst, segments: seamStep.segments.map((s) => s.deltaE) } : null,
         outputs: { patches: path.relative(ROOT, path.join(outDir, `${name}-patches.png`)), face: path.relative(ROOT, path.join(outDir, `${name}-face.png`)) },
       };
       results.push(row);
       console.log(
         `${name}: face ${faceWidth.toFixed(0)} px wide, forehead ΔE ${step.deltaE.toFixed(2)} (raw ${rawStep?.toFixed(2)}), hairline ${step.hairlineAt === null ? 'not met' : `${step.hairlineAt} px above lm10`}, ` +
           `excluded upper ${step.excluded.upper}/${step.pixels.upper + step.excluded.upper} lower ${step.excluded.lower}/${step.pixels.lower + step.excluded.lower}, ` +
-          `sharpness ${sharpness.ratio.toFixed(2)}, seam ${seam.ratio.toFixed(2)}`
+          `sharpness ${sharpness.ratio.toFixed(2)} (skin ${sharpnessInterior.ratio.toFixed(2)}), seam ratio ${seam.ratio.toFixed(2)}, seam step ΔE ${seamStep ? seamStep.deltaE.toFixed(2) : '-'} worst ${seamStep ? seamStep.worst.toFixed(2) : '-'}, lip fullness ${lipFullness.toFixed(3)}`
       );
     }
     const report = {

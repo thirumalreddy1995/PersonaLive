@@ -26,6 +26,9 @@ interface Targets {
   /** Present from R2 on (driver-side controls). */
   slide?: Check;
   seam?: Check;
+  /** Present from R3 on. */
+  sharpnessInterior?: Check;
+  seamStep?: Check;
 }
 
 interface Summary {
@@ -40,6 +43,9 @@ interface Summary {
   flicker: { delta: number | null } | null;
   textureSlide: { residualPx: number | null } | null;
   performance: { fps: number; frameP95Ms: number };
+  /** Present from R3 on. */
+  shading?: { slope: number | null; correlation: number | null; sideGap: number } | null;
+  cameraMatchTrace?: { min: number; max: number; std: number; meanStep: number; updates: number } | null;
 }
 
 interface Report {
@@ -73,9 +79,15 @@ export const COMPARE_ROWS: CompareRow[] = [
   { key: 'teeth', label: 'synthetic-teeth frames (share)', pick: (s) => (s.framesRenderedWholeClip ? s.syntheticTeethFramesWholeClip / s.framesRenderedWholeClip : null), higherIsWorse: true, noise: 0.02 },
   { key: 'skinNeckGap', label: 'skin tone gap vs neck (ΔE)', pick: (s) => s.targets.skinToneNeck.gap, higherIsWorse: true, abs: true, noise: 0.5 },
   { key: 'skinEarsGap', label: 'skin tone gap vs ears (ΔE)', pick: (s) => s.targets.skinToneEars.gap, higherIsWorse: true, abs: true, noise: 0.5 },
-  { key: 'sharpnessGap', label: 'sharpness gap (fraction of driver)', pick: (s) => s.targets.sharpness.gap, higherIsWorse: true, abs: true, noise: 0.3 },
+  { key: 'sharpnessInteriorGap', label: 'sharpness gap, interior skin', pick: (s) => s.targets.sharpnessInterior?.gap ?? null, higherIsWorse: true, abs: true, noise: 0.3 },
+  { key: 'sharpnessGap', label: 'sharpness gap, face/ring', pick: (s) => s.targets.sharpness.gap, higherIsWorse: true, abs: true, noise: 0.3 },
   { key: 'foreheadDelta', label: 'forehead step Δ (output − driver)', pick: (s) => s.foreheadToneStepDelta, higherIsWorse: true, abs: true, noise: 0.5 },
   { key: 'foreheadOut', label: 'forehead step output (ΔE)', pick: (s) => s.foreheadToneStepOutput, higherIsWorse: true, noise: 0.5 },
+  { key: 'seamStepOut', label: 'seam step output (ΔE)', pick: (s) => s.targets.seamStep?.output ?? null, higherIsWorse: true, noise: 0.5 },
+  { key: 'seamStepGap', label: 'seam step gap (output − driver, ΔE)', pick: (s) => s.targets.seamStep?.gap ?? null, higherIsWorse: true, noise: 0.5 },
+  { key: 'shadingSlope', label: 'shading slope (1 = follows the lamp)', pick: (s) => s.shading?.slope ?? null, higherIsWorse: false, noise: 0.1 },
+  { key: 'sideShadingGap', label: 'side shading gap (L)', pick: (s) => s.shading?.sideGap ?? null, higherIsWorse: true, noise: 1 },
+  { key: 'blurBiasSwing', label: 'blur bias swing (max − min)', pick: (s) => (s.cameraMatchTrace ? s.cameraMatchTrace.max - s.cameraMatchTrace.min : null), higherIsWorse: true, noise: 0.3 },
   { key: 'seam', label: 'seam ratio', pick: (s) => s.seamRatio, higherIsWorse: true, noise: 0.1 },
   { key: 'seamGap', label: 'seam gap (output − driver)', pick: (s) => s.targets.seam?.gap ?? null, higherIsWorse: true, noise: 0.1 },
   { key: 'lipErr', label: 'lip error (% face width)', pick: (s) => s.mouthLipErrorPct, higherIsWorse: true, noise: 0.3 },
@@ -130,6 +142,10 @@ const GRID_NOISE: Record<string, number> = {
   skinToneNeckGapAbs: 0.5,
   skinToneEarsGapAbs: 0.5,
   sharpnessGapAbs: 0.3,
+  sharpnessInteriorGapAbs: 0.3,
+  seamStepOut: 0.5,
+  seamStepGap: 0.5,
+  sideShadingGap: 1,
   seamRatio: 0.1,
   mouthLipErrorPct: 0.3,
   syntheticTeethShare: 0.02,
@@ -172,7 +188,7 @@ export function compareGrids(before: Report, after: Report): GridComparison | nu
       };
     });
   const regressions: GridComparison['regressions'] = [];
-  const rows = COMPARE_ROWS.filter((r) => !['fps', 'p95', 'foreheadOut'].includes(r.key));
+  const rows = COMPARE_ROWS.filter((r) => !['fps', 'p95', 'foreheadOut', 'shadingSlope', 'blurBiasSwing'].includes(r.key));
   for (const persona of Object.keys(after.grid.personas)) {
     if (!before.grid.personas[persona]) continue;
     for (const r of rows) {

@@ -197,6 +197,13 @@ interface FrameReport {
   seam: M.SeamScore;
   /** The same boundary/inside ratio on the driver frame: the wearer's own face edge. */
   driverSeam: M.SeamScore;
+  /** Interior-skin sharpness (R3 acceptance metric): eyes, brows and mouth cut out of the face mask. */
+  sharpnessInterior: M.SharpnessMatch;
+  driverSharpnessInterior: M.SharpnessMatch;
+  /** ΔE step across the jaw-and-cheek boundary bands (R3), on the output and on the driver. */
+  seamStep: { deltaE: number; worst: number } | null;
+  driverSeamStep: { deltaE: number; worst: number } | null;
+  shading: M.ShadingSample | null;
   mouth: M.MouthFidelity | null;
   foreheadToneStep: M.ForeheadToneStep | null;
   files: { output: string; driver: string; overlay: string | null } | null;
@@ -214,6 +221,12 @@ export interface ClipSummary {
   targets: M.RelativeTargets;
   seamRatio: number | null;
   driverSeamRatio: number | null;
+  sharpnessInteriorRatio: number | null;
+  driverSharpnessInteriorRatio: number | null;
+  seamStepOutput: number | null;
+  seamStepDriver: number | null;
+  /** Cheek-lightness tracking over the captured frames (clip D: the lamp; clip B: the shadowed side). */
+  shading: M.ShadingFollow | null;
   mouthLipErrorPct: number | null;
   outputFacesDetected: number;
   syntheticTeethCapturedFrames: number;
@@ -231,6 +244,10 @@ export interface ClipSummary {
   performance: RealismDebugState['profile'] & { window: string; software: boolean };
   renderer: RealismDebugState['renderer'];
   cameraMatch: RealismDebugState['cameraMatch'];
+  /** The camera-match blur bias after every loop update over the whole clip (R3 item 3). */
+  cameraMatchTrace: (M.TraceStats & { series: number[] }) | null;
+  /** Learned resting mouth aperture at the end of the clip (flag restMouth). */
+  restMar: number | null;
 }
 
 interface ClipReport {
@@ -372,6 +389,11 @@ async function captureClip(page: Page, args: Args, o: CaptureOptions): Promise<C
       driverSharpness: M.sharpnessMatch(driver, lms),
       seam: M.seamScore(output, lms),
       driverSeam: M.seamScore(driver, lms),
+      sharpnessInterior: M.sharpnessMatchInterior(output, lms),
+      driverSharpnessInterior: M.sharpnessMatchInterior(driver, lms),
+      seamStep: stepOf(M.seamStep(output, lms)),
+      driverSeamStep: stepOf(M.seamStep(driver, lms)),
+      shading: M.shadingSample(output, driver, lms),
       mouth: M.mouthFidelity(outputLms, lms),
       foreheadToneStep: M.foreheadToneStep(output, driver, lms),
       files,
@@ -426,7 +448,13 @@ async function captureClip(page: Page, args: Args, o: CaptureOptions): Promise<C
     driverSeamRatio: M.meanOf(frames.map((f) => f.driverSeam.ratio)),
     textureSlidePx: textureSlide?.residualPx ?? null,
     driverTextureSlidePx: driverTextureSlide?.residualPx ?? null,
+    sharpnessInteriorRatio: M.meanOf(frames.map((f) => f.sharpnessInterior.ratio)),
+    driverSharpnessInteriorRatio: M.meanOf(frames.map((f) => f.driverSharpnessInterior.ratio)),
+    seamStepOutput: M.meanOf(frames.map((f) => f.seamStep?.deltaE ?? NaN)),
+    seamStepDriver: M.meanOf(frames.map((f) => f.driverSeamStep?.deltaE ?? NaN)),
   };
+  const trace = finalState.cameraMatchTrace ?? [];
+  const traceStats = M.traceStats(trace);
   const summary: ClipSummary = {
     frames: frames.length,
     skinToneCheekVsNeck: base.skinToneCheekVsNeck,
@@ -438,6 +466,11 @@ async function captureClip(page: Page, args: Args, o: CaptureOptions): Promise<C
     targets: M.relativeTargets(base),
     seamRatio: base.seamRatio,
     driverSeamRatio: base.driverSeamRatio,
+    sharpnessInteriorRatio: base.sharpnessInteriorRatio,
+    driverSharpnessInteriorRatio: base.driverSharpnessInteriorRatio,
+    seamStepOutput: base.seamStepOutput,
+    seamStepDriver: base.seamStepDriver,
+    shading: M.shadingFollow(frames.map((f) => f.shading).filter((s): s is M.ShadingSample => !!s)),
     mouthLipErrorPct: M.meanOf(frames.map((f) => f.mouth?.lipErrorPct ?? NaN)),
     outputFacesDetected: frames.filter((f) => f.outputFaceDetected).length,
     syntheticTeethCapturedFrames: frames.filter((f) => f.syntheticTeeth).length,
@@ -454,6 +487,8 @@ async function captureClip(page: Page, args: Args, o: CaptureOptions): Promise<C
     performance: { ...finalState.profile, window: 'last 300 frames of the replay', software: args.software },
     renderer: finalState.renderer,
     cameraMatch: finalState.cameraMatch,
+    cameraMatchTrace: traceStats ? { ...traceStats, series: trace } : null,
+    restMar: finalState.restMar ?? null,
   };
 
   return {
@@ -476,15 +511,23 @@ function fmt(v: number | null | undefined): string {
   return v === null || v === undefined || !Number.isFinite(v) ? '-' : v.toFixed(2);
 }
 
+function stepOf(s: M.SeamStep | null): { deltaE: number; worst: number } | null {
+  return s ? { deltaE: s.deltaE, worst: s.worst } : null;
+}
+
 function printSummary(label: string, s: ClipSummary) {
   const t = s.targets;
   const check = (c: M.RelativeCheck) => `driver ${fmt(c.driver)} output ${fmt(c.output)} gap ${fmt(c.gap)} ${c.pass === null ? '' : c.pass ? 'PASS' : 'FAIL'}`;
   console.log(`  ${label}: ${s.frames} frames`);
   console.log(`    skin tone vs neck: ${check(t.skinToneNeck)} (±${t.skinToneNeck.tolerance} ΔE)`);
   console.log(`    skin tone vs ears: ${check(t.skinToneEars)} (±${t.skinToneEars.tolerance} ΔE)`);
-  console.log(`    sharpness ratio:   ${check(t.sharpness)} (±${Math.round(t.sharpness.tolerance * 100)}%)`);
+  if (t.sharpnessInterior) console.log(`    sharpness (skin):  ${check(t.sharpnessInterior)} (±${Math.round(t.sharpnessInterior.tolerance * 100)}%, acceptance)`);
+  console.log(`    sharpness ratio:   ${check(t.sharpness)} (±${Math.round(t.sharpness.tolerance * 100)}%, face/ring diagnostic)`);
   console.log(`    texture slide:     ${check(t.slide)} (gap ≤ ${t.slide.tolerance} px/frame)`);
+  if (t.seamStep) console.log(`    seam step (ΔE):    ${check(t.seamStep)} (gap ≤ ${t.seamStep.tolerance} ΔE)`);
   console.log(`    seam ratio:        ${check(t.seam)}`);
+  if (s.shading) console.log(`    shading:           slope ${fmt(s.shading.slope)} r ${fmt(s.shading.correlation)} side gap ${fmt(s.shading.sideGap)} L`);
+  if (s.cameraMatchTrace) console.log(`    blur bias trace:   ${s.cameraMatchTrace.updates} updates, ${fmt(s.cameraMatchTrace.min)}..${fmt(s.cameraMatchTrace.max)}, std ${fmt(s.cameraMatchTrace.std)}, mean step ${fmt(s.cameraMatchTrace.meanStep)}`);
   console.log(
     `    seam ${fmt(s.seamRatio)}  lip err ${fmt(s.mouthLipErrorPct)}%  teeth ${s.syntheticTeethFramesWholeClip}/${s.framesRenderedWholeClip}  ` +
       `forehead step out ${fmt(s.foreheadToneStepOutput)} drv ${fmt(s.foreheadToneStepDriver)} Δ ${fmt(s.foreheadToneStepDelta)}  ` +
@@ -498,7 +541,11 @@ function printSummary(label: string, s: ClipSummary) {
 export const GRID_METRICS: Array<{ key: string; label: string; pick: (s: ClipSummary) => number | null }> = [
   { key: 'skinToneNeckGapAbs', label: '|skin tone gap vs neck| (ΔE)', pick: (s) => abs(s.targets.skinToneNeck.gap) },
   { key: 'skinToneEarsGapAbs', label: '|skin tone gap vs ears| (ΔE)', pick: (s) => abs(s.targets.skinToneEars.gap) },
-  { key: 'sharpnessGapAbs', label: '|sharpness gap| (fraction)', pick: (s) => abs(s.targets.sharpness.gap) },
+  { key: 'sharpnessInteriorGapAbs', label: '|sharpness gap, interior skin| (fraction)', pick: (s) => abs(s.targets.sharpnessInterior?.gap ?? null) },
+  { key: 'sharpnessGapAbs', label: '|sharpness gap, face/ring| (fraction)', pick: (s) => abs(s.targets.sharpness.gap) },
+  { key: 'seamStepOut', label: 'seam step output (ΔE)', pick: (s) => s.targets.seamStep?.output ?? null },
+  { key: 'seamStepGap', label: 'seam step gap (output − driver, ΔE)', pick: (s) => s.targets.seamStep?.gap ?? null },
+  { key: 'sideShadingGap', label: 'side shading gap (L)', pick: (s) => s.shading?.sideGap ?? null },
   { key: 'seamRatio', label: 'seam ratio', pick: (s) => s.seamRatio },
   { key: 'seamGap', label: 'seam gap (output − driver)', pick: (s) => s.targets.seam?.gap ?? null },
   { key: 'mouthLipErrorPct', label: 'lip error (% face width)', pick: (s) => s.mouthLipErrorPct },

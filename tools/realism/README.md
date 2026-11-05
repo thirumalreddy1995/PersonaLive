@@ -36,14 +36,30 @@ checkerboard), and one `report.json` for the whole run with the metrics of every
 
 Targets are relative to the wearer: `summary.targets` holds, for skin tone (cheek vs neck, cheek
 vs ears) and sharpness, the driver's own value, the output value, the gap and whether it passes
-(±3 ΔE, ±15%).
+(±3 ΔE, ±15%). Since R3 the sharpness acceptance is `targets.sharpnessInterior` (the Laplacian
+ratio over the skin interior: the 90% oval minus the eyes, brows and mouth, where the camera match
+works); `targets.sharpness` (the whole face over the ring) stays as a diagnostic. `targets.seamStep`
+is the ΔE between a narrow band just inside and one just outside the persona boundary at the jaw
+and cheeks, minus the wearer's own step at the same place (gap ≤ 1 ΔE passes); the old
+boundary/inside gradient ratio stays as `seamRatio`. `summary.shading` tracks the persona's cheek
+lightness against the wearer's across the captured frames (slope ≈ 1 when the shading follows the
+lamp on clip D; `sideGap` is the left-minus-right cheek difference against the wearer's, for the
+shadowed side on clip B). `summary.cameraMatchTrace` holds the camera-match blur bias after every
+loop update (`series`) with its min, max, std and mean step, and `summary.restMar` the learned
+resting mouth aperture when `restMouth` is on.
 
 `--flags r0` and `--flags r1` are presets that reproduce the end-of-R0 / end-of-R1 behaviour whatever
 the current defaults are (see `R0_FLAG_STRING` / `R1_FLAG_STRING` in `src/realism/flags.ts`); later
-tokens override them, e.g. `--flags r1,rigidForehead=1`. R2 flags: `closedLipMask`, `rigidForehead`,
-`webgl2` (engine-restart), `personaCrop` (persona-reload, size from `--settings personaTextureSize=1024`),
-`cameraMatch` (needs `webgl2`). `--regions` writes `t<sec>-regions.png` with the metric patches drawn on
-driver and output next to the measured values.
+tokens override them, e.g. `--flags r1,rigidForehead=1`; `--flags r2` reproduces the end-of-R2
+defaults. R2 flags: `closedLipMask`, `rigidForehead`, `webgl2` (engine-restart), `personaCrop`
+(persona-reload, size from `--settings personaTextureSize=1024`), `cameraMatch` (needs `webgl2`).
+R3 flags: `relight` (frequency-separation relighting from the real frame; the tone match toward
+the wearer at the face boundary is `--settings skinToneMatch=0..1`), `restMouth` (lip-fade
+thresholds relative to the learned resting aperture), `softHoles` (pass-through fades widened to
+the camera-match blur radius), `steadyCameraMatch` (slow EMA, dead band, hold during fast motion)
+and `motionBlur` (directional blur along the head velocity). `--regions` writes `t<sec>-regions.png`
+with the metric patches and the seam-step bands (magenta inside, white outside) drawn on driver
+and output next to the measured values.
 
 `--settings temporalSmoothing=20,blendStrength=100` overrides the inspector settings for the run (the
 same keys as `TransformationSettings`; `?rs=` on the page URL does the same in a browser). The rigid
@@ -98,9 +114,11 @@ npm run realism:still -- --image realism-review/before --run before-check
 
 Runs the landmarker on screenshots and measures what needs no driver frame: the forehead tone
 step (band above landmark 10 on the wearer's real forehead, trimmed at the hairline, versus a band
-between the brows and landmark 10), the sharpness ratio and the seam score. It writes the image
-with the patches, the face oval and landmarks 9/10 drawn on it, a 3x face zoom, and `stills.json`
-(tracked by git, the images are not).
+between the brows and landmark 10), the sharpness ratios (face/ring and interior skin), the seam
+score, the R3 seam step with its bands, and the lip fullness (upper plus lower vermilion height over
+face height, used to pick fuller-lip personas). It writes the image with the patches, the face
+oval, the seam bands and landmarks 9/10 drawn on it, a 3x face zoom, and `stills.json` (tracked by
+git, the images are not).
 
 ## How it works
 

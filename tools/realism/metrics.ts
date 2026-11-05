@@ -5,7 +5,7 @@
  * in Node for the capture tool and in the unit tests. Trends between runs matter more than the
  * absolute values.
  */
-import { FACE_OVAL_RING, INNER_LIP_RING, LMK, OUTER_LIP_RING } from './landmarks.ts';
+import { FACE_OVAL_RING, INNER_LIP_RING, LEFT_BROW_RING, LEFT_EYE_RING, LMK, OUTER_LIP_RING, RIGHT_BROW_RING, RIGHT_EYE_RING } from './landmarks.ts';
 
 export interface RgbaImage {
   width: number;
@@ -581,9 +581,15 @@ export function seamCheck(output: number | null | undefined, driver: number | nu
 export interface RelativeTargets {
   skinToneNeck: RelativeCheck;
   skinToneEars: RelativeCheck;
+  /** Face/ring sharpness ratio (diagnostic since R3; the eyes, brows and mouth sit inside its mask). */
   sharpness: RelativeCheck;
+  /** Interior-skin sharpness ratio: the camera-match acceptance metric since R3. */
+  sharpnessInterior?: RelativeCheck;
   slide: RelativeCheck;
+  /** Boundary/inside gradient ratio (diagnostic since R3). */
   seam: RelativeCheck;
+  /** ΔE step across the jaw-and-cheek boundary bands, minus the wearer's own (R3). */
+  seamStep?: RelativeCheck;
 }
 
 export function relativeTargets(s: {
@@ -597,14 +603,23 @@ export function relativeTargets(s: {
   driverTextureSlidePx?: number | null;
   seamRatio?: number | null;
   driverSeamRatio?: number | null;
+  sharpnessInteriorRatio?: number | null;
+  driverSharpnessInteriorRatio?: number | null;
+  seamStepOutput?: number | null;
+  seamStepDriver?: number | null;
 }): RelativeTargets {
-  return {
+  const t: RelativeTargets = {
     skinToneNeck: skinToneCheck(s.skinToneCheekVsNeck, s.driverCheekVsNeck),
     skinToneEars: skinToneCheck(s.skinToneCheekVsEars, s.driverCheekVsEars),
     sharpness: sharpnessCheck(s.sharpnessRatio, s.driverSharpnessRatio),
     slide: slideCheck(s.textureSlidePx, s.driverTextureSlidePx),
     seam: seamCheck(s.seamRatio, s.driverSeamRatio),
   };
+  if (s.sharpnessInteriorRatio !== undefined || s.driverSharpnessInteriorRatio !== undefined) {
+    t.sharpnessInterior = sharpnessCheck(s.sharpnessInteriorRatio, s.driverSharpnessInteriorRatio);
+  }
+  if (s.seamStepOutput !== undefined || s.seamStepDriver !== undefined) t.seamStep = seamStepCheck(s.seamStepOutput, s.seamStepDriver);
+  return t;
 }
 
 export function orMask(a: Mask, b: Mask): Mask {
@@ -1043,4 +1058,170 @@ export function worstOf<K>(entries: Array<Ranked<K>>, count: number, higherIsWor
   const v = entries.filter((e) => Number.isFinite(e.value));
   v.sort((a, b) => (higherIsWorse ? b.value - a.value : a.value - b.value));
   return v.slice(0, count);
+}
+
+// --- R3: interior-skin sharpness, ΔE seam step, shading ----------------------------------------------
+
+/** Interior-skin mask: the face oval shrunk to this share ... */
+export const INTERIOR_OVAL_SCALE = 0.9;
+/** ... minus each eye contour scaled by this (lids, lashes and the pass-through ring), */
+export const INTERIOR_EYE_SCALE = 2.0;
+/** minus each brow contour scaled by this, */
+export const INTERIOR_BROW_SCALE = 1.4;
+/** and minus the outer lip contour scaled by this (lips, the lip fade and the closed-lip mask). */
+export const INTERIOR_LIP_SCALE = 1.5;
+
+/**
+ * Skin-only face interior: the 90% oval without the eyes, brows and mouth. The face/ring sharpness
+ * metric counts the pass-through edges and the brows as "sharpness"; on turned heads those sit
+ * sharper than matched skin, so the camera-match acceptance (R3) is measured here instead.
+ */
+export function interiorSkinMask(points: Landmarks, width: number, height: number): Mask {
+  const oval = polygonFromRing(points, FACE_OVAL_RING);
+  let mask = rasterizePolygon(scalePolygon(oval, INTERIOR_OVAL_SCALE, polygonCentroid(oval)), width, height);
+  const cut = (ring: ReadonlyArray<number>, scale: number) => {
+    mask = maskSubtract(mask, rasterizePolygon(scalePolygon(polygonFromRing(points, ring), scale), width, height));
+  };
+  cut(LEFT_EYE_RING, INTERIOR_EYE_SCALE);
+  cut(RIGHT_EYE_RING, INTERIOR_EYE_SCALE);
+  cut(LEFT_BROW_RING, INTERIOR_BROW_SCALE);
+  cut(RIGHT_BROW_RING, INTERIOR_BROW_SCALE);
+  cut(OUTER_LIP_RING, INTERIOR_LIP_SCALE);
+  return mask;
+}
+
+/** Laplacian variance over the interior skin divided by the same in the ring outside the face. */
+export function sharpnessMatchInterior(img: RgbaImage, points: Landmarks, lum = luminance(img)): SharpnessMatch {
+  const r = faceRegions(points, img.width, img.height);
+  const inside = laplacianVariance(lum, img.width, img.height, interiorSkinMask(points, img.width, img.height));
+  const outside = laplacianVariance(lum, img.width, img.height, r.outsideRing);
+  return { ratio: outside > 0 ? inside / outside : NaN, inside, outside };
+}
+
+/** Seam bands as scales of the face oval about its centroid: a narrow band just inside ... */
+export const SEAM_BAND_INNER: readonly [number, number] = [0.9, 0.96];
+/** ... and one just outside the persona boundary. */
+export const SEAM_BAND_OUTER: readonly [number, number] = [1.04, 1.1];
+/** A seam-step gap (output minus the wearer's own step) up to this many ΔE passes. */
+export const SEAM_STEP_TOLERANCE_DE = 1;
+
+export interface SeamSegment {
+  inner: Point[];
+  outer: Point[];
+  deltaE: number | null;
+}
+
+export interface SeamStep {
+  /** Mean ΔE between the inner and outer band over the jaw-and-cheek segments. */
+  deltaE: number;
+  /** The largest segment ΔE. */
+  worst: number;
+  segments: SeamSegment[];
+}
+
+/**
+ * ΔE step across the persona boundary at the jaw and cheeks (R3): for every oval edge on the lower
+ * half of the face (below the oval centroid along the face's up axis, so the forehead arc and the
+ * temples stay out) the mean colour of a narrow band just inside is compared with the mean colour
+ * of a narrow band just outside. Run on the driver frame too, the wearer's own step at the same
+ * place (jaw shadow, collar, hair) is subtracted by the caller.
+ */
+export function seamStep(img: RgbaImage, points: Landmarks): SeamStep | null {
+  const oval = polygonFromRing(points, FACE_OVAL_RING);
+  const c = polygonCentroid(oval);
+  const up = faceSize(points).up;
+  const at = (p: Point, s: number): Point => ({ x: c.x + (p.x - c.x) * s, y: c.y + (p.y - c.y) * s });
+  const segments: SeamSegment[] = [];
+  for (let k = 0; k < oval.length; k++) {
+    const a = oval[k];
+    const b = oval[(k + 1) % oval.length];
+    const mid = { x: (a.x + b.x) / 2 - c.x, y: (a.y + b.y) / 2 - c.y };
+    if (mid.x * up.x + mid.y * up.y >= 0) continue;
+    const inner = [at(a, SEAM_BAND_INNER[0]), at(b, SEAM_BAND_INNER[0]), at(b, SEAM_BAND_INNER[1]), at(a, SEAM_BAND_INNER[1])];
+    const outer = [at(a, SEAM_BAND_OUTER[0]), at(b, SEAM_BAND_OUTER[0]), at(b, SEAM_BAND_OUTER[1]), at(a, SEAM_BAND_OUTER[1])];
+    const de = deltaE(img, rasterizePolygon(inner, img.width, img.height), img, rasterizePolygon(outer, img.width, img.height));
+    segments.push({ inner, outer, deltaE: de });
+  }
+  const values = segments.map((s) => s.deltaE).filter((v): v is number => v !== null && Number.isFinite(v));
+  if (!values.length) return null;
+  return { deltaE: values.reduce((p, v) => p + v, 0) / values.length, worst: Math.max(...values), segments };
+}
+
+/** Seam step passes when the output step exceeds the wearer's own by at most SEAM_STEP_TOLERANCE_DE. */
+export function seamStepCheck(output: number | null | undefined, driver: number | null | undefined): RelativeCheck {
+  const o = output ?? null;
+  const d = driver ?? null;
+  const gap = o !== null && d !== null ? o - d : null;
+  return { driver: d, output: o, gap, tolerance: SEAM_STEP_TOLERANCE_DE, pass: gap === null ? null : gap <= SEAM_STEP_TOLERANCE_DE };
+}
+
+export interface ShadingSample {
+  /** Lab L of the persona cheeks (output) and of the wearer's cheeks (driver), both cheeks averaged. */
+  outL: number;
+  drvL: number;
+  /** Lab L difference left minus right cheek: which side is in shadow and by how much. */
+  outSide: number;
+  drvSide: number;
+}
+
+/** Cheek lightness on the output and on the driver, for the shading-follow metrics (R3). */
+export function shadingSample(output: RgbaImage, driver: RgbaImage, points: Landmarks): ShadingSample | null {
+  const r = faceRegions(points, output.width, output.height);
+  const L = (img: RgbaImage, mask: Mask) => {
+    const rgb = meanRgb(img, mask);
+    return rgb ? rgbToLab(rgb)[0] : null;
+  };
+  const ol = L(output, r.cheekLeft);
+  const or = L(output, r.cheekRight);
+  const dl = L(driver, r.cheekLeft);
+  const dr = L(driver, r.cheekRight);
+  if (ol === null || or === null || dl === null || dr === null) return null;
+  return { outL: (ol + or) / 2, drvL: (dl + dr) / 2, outSide: ol - or, drvSide: dl - dr };
+}
+
+export interface ShadingFollow {
+  /** Least-squares slope of output cheek L against driver cheek L over the clip (1 = follows the lamp). */
+  slope: number | null;
+  correlation: number | null;
+  /** Mean |output side difference − driver side difference| in L (clip B: the shadowed side). */
+  sideGap: number;
+  samples: number;
+}
+
+/** How the persona's cheek lightness tracks the wearer's across the captured frames. */
+export function shadingFollow(samples: ShadingSample[]): ShadingFollow | null {
+  if (!samples.length) return null;
+  const n = samples.length;
+  const mx = samples.reduce((p, s) => p + s.drvL, 0) / n;
+  const my = samples.reduce((p, s) => p + s.outL, 0) / n;
+  let sxx = 0, syy = 0, sxy = 0;
+  for (const s of samples) {
+    sxx += (s.drvL - mx) ** 2;
+    syy += (s.outL - my) ** 2;
+    sxy += (s.drvL - mx) * (s.outL - my);
+  }
+  const sideGap = samples.reduce((p, s) => p + Math.abs(s.outSide - s.drvSide), 0) / n;
+  if (n < 3 || sxx < 1e-6) return { slope: null, correlation: null, sideGap, samples: n };
+  return { slope: sxy / sxx, correlation: syy > 1e-6 ? sxy / Math.sqrt(sxx * syy) : null, sideGap, samples: n };
+}
+
+export interface TraceStats {
+  updates: number;
+  min: number;
+  max: number;
+  /** Standard deviation of the series. */
+  std: number;
+  /** Mean absolute change between consecutive values: how much the control keeps moving. */
+  meanStep: number;
+}
+
+/** Summary of a control trace (e.g. the camera-match blur bias per update). */
+export function traceStats(series: number[]): TraceStats | null {
+  if (!series.length) return null;
+  const n = series.length;
+  const mean = series.reduce((p, v) => p + v, 0) / n;
+  const std = Math.sqrt(series.reduce((p, v) => p + (v - mean) ** 2, 0) / n);
+  let steps = 0;
+  for (let i = 1; i < n; i++) steps += Math.abs(series[i] - series[i - 1]);
+  return { updates: n, min: Math.min(...series), max: Math.max(...series), std, meanStep: n > 1 ? steps / (n - 1) : 0 };
 }

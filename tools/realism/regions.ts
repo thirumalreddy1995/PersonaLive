@@ -13,6 +13,8 @@ const OVAL: [number, number, number] = [74, 222, 128];
 const CYAN: [number, number, number] = [34, 211, 238];
 const ORANGE: [number, number, number] = [251, 146, 60];
 const AMBER: [number, number, number] = [251, 191, 36];
+const MAGENTA: [number, number, number] = [232, 121, 249];
+const WHITE: [number, number, number] = [255, 255, 255];
 
 function tint(img: M.RgbaImage, mask: Uint8Array, rgb: [number, number, number]) {
   for (let i = 0; i < mask.length; i++) {
@@ -37,6 +39,14 @@ export function annotateRegions(img: M.RgbaImage, pts: M.Landmarks, label: strin
   tint(copy, r.earLeft, BLUE);
   tint(copy, r.earRight, BLUE);
   drawPolyline(copy, r.oval, OVAL, true, 1);
+  // R3 seam bands (jaw and cheeks): inner band magenta, outer band white.
+  const seam = M.seamStep(img, pts);
+  if (seam) {
+    for (const s of seam.segments) {
+      drawPolyline(copy, s.inner, MAGENTA, true, 1);
+      drawPolyline(copy, s.outer, WHITE, true, 1);
+    }
+  }
   if (step) {
     drawPolyline(copy, step.patches.upper, CYAN, true, 2);
     drawPolyline(copy, step.patches.lower, ORANGE, true, 2);
@@ -45,6 +55,7 @@ export function annotateRegions(img: M.RgbaImage, pts: M.Landmarks, label: strin
   const zoom = scaleImage(crop(copy, box), 2);
   const lines = [
     step ? `${label}  FOREHEAD DE ${step.deltaE.toFixed(1)}  HAIRLINE ${step.hairlineAt ?? '-'}  UP ${rgbText(step.rgb.upper)}  LOW ${rgbText(step.rgb.lower)}` : label,
+    seam ? `SEAM STEP DE ${seam.deltaE.toFixed(1)} WORST ${seam.worst.toFixed(1)} (MAGENTA IN / WHITE OUT)` : 'SEAM STEP -',
     ...extra,
   ];
   lines.forEach((t, i) => drawText(zoom, t, 6, 6 + i * 18, 2, i === 0 ? CYAN : AMBER));

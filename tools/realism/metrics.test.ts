@@ -1,6 +1,6 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { FACE_OVAL_RING, INNER_LIP_RING, LANDMARK_COUNT, LMK, OUTER_LIP_RING } from './landmarks.ts';
+import { FACE_OVAL_RING, INNER_LIP_RING, LANDMARK_COUNT, LEFT_BROW_RING, LEFT_EYE_RING, LMK, OUTER_LIP_RING, RIGHT_BROW_RING, RIGHT_EYE_RING } from './landmarks.ts';
 import {
   RgbaImage,
   blockMatchFlow,
@@ -35,6 +35,13 @@ import {
   worstOf,
   detectionAgrees,
   faceSize,
+  interiorSkinMask,
+  sharpnessMatchInterior,
+  seamStep,
+  seamStepCheck,
+  shadingSample,
+  shadingFollow,
+  traceStats,
 } from './metrics.ts';
 
 // --- Fixtures -------------------------------------------------------------------------------------
@@ -74,6 +81,21 @@ function syntheticFace(shiftX = 0, shiftY = 0): Float32Array {
     const a = (2 * Math.PI * k) / OUTER_LIP_RING.length;
     set(idx, CX + 24 * Math.cos(a), CY + 55 + 10 * Math.sin(a));
   });
+  // Eyes and brows: small ellipses either side of the nose and arcs above them.
+  const eye = (ring: number[], cx: number) =>
+    ring.forEach((idx, k) => {
+      const a = (2 * Math.PI * k) / ring.length;
+      set(idx, cx + 14 * Math.cos(a), CY - 25 + 6 * Math.sin(a));
+    });
+  eye(LEFT_EYE_RING, CX + 30);
+  eye(RIGHT_EYE_RING, CX - 30);
+  const brow = (ring: number[], cx: number) =>
+    ring.forEach((idx, k) => {
+      const a = (2 * Math.PI * k) / ring.length;
+      set(idx, cx + 18 * Math.cos(a), CY - 45 + 4 * Math.sin(a));
+    });
+  brow(LEFT_BROW_RING, CX + 30);
+  brow(RIGHT_BROW_RING, CX - 30);
   INNER_LIP_RING.forEach((idx, k) => {
     const a = (2 * Math.PI * k) / INNER_LIP_RING.length;
     set(idx, CX + 16 * Math.cos(a), CY + 55 + 4 * Math.sin(a));
@@ -439,4 +461,88 @@ test('detectionAgrees accepts a re-detection on the same face and rejects one th
   const off = face.map((v, i) => (i % 2 === 0 ? v + w * 0.3 : v));
   assert.equal(detectionAgrees(off, face), false);
   assert.equal(detectionAgrees(off, face, 0.5), true);
+});
+
+test('interiorSkinMask keeps the cheeks and drops the eyes, brows and mouth', () => {
+  const pts = syntheticFace();
+  const m = interiorSkinMask(pts, W, H);
+  const at = (x: number, y: number) => m[Math.round(y) * W + Math.round(x)];
+  assert.equal(at(CX - 40, CY + 20), 1, 'right cheek');
+  assert.equal(at(CX + 40, CY + 20), 1, 'left cheek');
+  assert.equal(at(CX + 30, CY - 25), 0, 'left eye');
+  assert.equal(at(CX - 30, CY - 45), 0, 'right brow');
+  assert.equal(at(CX, CY + 55), 0, 'mouth');
+  assert.equal(at(CX, CY - RY * 0.95), 0, 'outside the 90% oval');
+  const inside = faceRegions(pts, W, H).inside;
+  assert.ok(maskCount(m) < maskCount(inside) && maskCount(m) > maskCount(inside) * 0.5);
+});
+
+test('sharpnessMatchInterior ignores sharp eyes and lips that the face/ring ratio counts', () => {
+  const pts = syntheticFace();
+  const soft = texture(5, 4);
+  const sharp = texture(6, 40);
+  const interior = interiorSkinMask(pts, W, H);
+  const inside = faceRegions(pts, W, H).inside;
+  // Sharp texture only in the eyes, brows and mouth (inside the oval but outside the interior mask).
+  const img = image((x, y) => grey(inside[y * W + x] && !interior[y * W + x] ? sharp(x, y) : soft(x, y)));
+  const faceRing = sharpnessMatch(img, pts);
+  const skin = sharpnessMatchInterior(img, pts);
+  assert.ok(faceRing.ratio > 1.3, `face/ring ${faceRing.ratio}`);
+  assert.ok(skin.ratio > 0.7 && skin.ratio < 1.3, `interior ${skin.ratio}`);
+  assert.ok(faceRing.ratio > skin.ratio * 1.25, `face/ring ${faceRing.ratio} vs interior ${skin.ratio}`);
+});
+
+test('seamStep measures a tone step on the jaw and cheeks and ignores one on the forehead', () => {
+  const pts = syntheticFace();
+  const skin: [number, number, number] = [190, 150, 125];
+  const plain = image(() => skin);
+  const oval = rasterizePolygon(faceRegions(pts, W, H).oval, W, H);
+  const stepped = image((x, y) => (oval[y * W + x] ? [205, 150, 110] : skin));
+  const foreheadOnly = image((x, y) => (oval[y * W + x] && y < CY - 20 ? [205, 150, 110] : skin));
+  const a = seamStep(plain, pts)!;
+  const b = seamStep(stepped, pts)!;
+  const f = seamStep(foreheadOnly, pts)!;
+  assert.ok(a.deltaE < 0.01, `plain ${a.deltaE}`);
+  assert.ok(b.deltaE > 5, `stepped ${b.deltaE}`);
+  assert.ok(f.deltaE < 0.01, `forehead-only ${f.deltaE}`);
+  assert.ok(b.segments.length >= 12 && b.segments.length < FACE_OVAL_RING.length);
+  for (const s of b.segments) for (const p of [...s.inner, ...s.outer]) assert.ok(p.y > CY - 5, 'bands sit on the lower face');
+  const c = seamStepCheck(b.deltaE, a.deltaE);
+  assert.equal(c.pass, false);
+  assert.equal(seamStepCheck(2, 1.5).pass, true);
+});
+
+test('shadingSample and shadingFollow report cheek lightness tracking and the side gap', () => {
+  const pts = syntheticFace();
+  const r = faceRegions(pts, W, H);
+  const lit = (l: number, side: number): RgbaImage =>
+    image((x, y) => {
+      if (r.cheekLeft[y * W + x]) return grey(l + side);
+      if (r.cheekRight[y * W + x]) return grey(l - side);
+      return grey(l);
+    });
+  const samples = [
+    shadingSample(lit(200, 0), lit(200, 0), pts)!,
+    shadingSample(lit(120, 0), lit(120, 0), pts)!,
+    shadingSample(lit(160, 0), lit(160, 0), pts)!,
+  ];
+  const follow = shadingFollow(samples)!;
+  assert.ok(Math.abs(follow.slope! - 1) < 0.05, `slope ${follow.slope}`);
+  assert.ok(follow.correlation! > 0.99);
+  assert.ok(follow.sideGap < 0.01);
+  const flat = shadingFollow([shadingSample(lit(160, 0), lit(200, 0), pts)!, shadingSample(lit(160, 0), lit(120, 0), pts)!, shadingSample(lit(160, 0), lit(160, 0), pts)!])!;
+  assert.ok(Math.abs(flat.slope!) < 0.05, `flat slope ${flat.slope}`);
+  const side = shadingSample(lit(160, 0), lit(160, 30), pts)!;
+  assert.ok(Math.abs(side.drvSide) > 10 && Math.abs(side.outSide) < 0.01);
+  assert.ok(shadingFollow([side])!.sideGap > 10);
+});
+
+test('traceStats summarises a control trace', () => {
+  const t = traceStats([1, 3, 1, 3])!;
+  assert.equal(t.updates, 4);
+  assert.equal(t.min, 1);
+  assert.equal(t.max, 3);
+  assert.equal(t.meanStep, 2);
+  assert.ok(Math.abs(t.std - 1) < 1e-9);
+  assert.equal(traceStats([]), null);
 });

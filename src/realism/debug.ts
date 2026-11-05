@@ -41,6 +41,10 @@ export interface RealismDebugState {
     outputNoise: number | null;
     updates: number;
   } | null;
+  /** Blur (LOD) bias after every camera-match update since the persona was prepared (last 1024). */
+  cameraMatchTrace: number[];
+  /** Learned resting mouth aperture (flag restMouth), or null until the first frontal window completes. */
+  restMar: number | null;
   renderer: 'webgl2' | 'webgl' | 'canvas2d';
   pose: HeadPose;
   isSpeaking: boolean;

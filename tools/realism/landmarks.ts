@@ -31,3 +31,11 @@ export const LMK = {
 } as const;
 
 export const LANDMARK_COUNT = 478;
+
+/** Eye contours (the mesh holes), for cutting the eyes out of skin masks. */
+export const LEFT_EYE_RING = [263, 249, 390, 373, 374, 380, 381, 382, 362, 398, 384, 385, 386, 387, 388, 466];
+export const RIGHT_EYE_RING = [33, 7, 163, 144, 145, 153, 154, 155, 133, 173, 157, 158, 159, 160, 161, 246];
+
+/** Eyebrow contours: the ten points around each brow. */
+export const LEFT_BROW_RING = [300, 293, 334, 296, 336, 285, 295, 282, 283, 276];
+export const RIGHT_BROW_RING = [70, 63, 105, 66, 107, 55, 65, 52, 53, 46];
