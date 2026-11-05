@@ -144,10 +144,10 @@ export function compareGrids(before: Report, after: Report): GridComparison | nu
 
 function main() {
   const argv = process.argv.slice(2);
-  const runs = argv.filter((a) => !a.startsWith('--'));
   const md = argv.includes('--md');
   const clipsArg = argv.indexOf('--clips');
   const clips = clipsArg >= 0 ? argv[clipsArg + 1].split(',') : undefined;
+  const runs = argv.filter((a, i) => !a.startsWith('--') && i !== clipsArg + 1);
   if (runs.length !== 2) throw new Error('usage: realism:compare <before-run> <after-run> [--clips A,E] [--md]');
   const before = loadReport(runs[0]);
   const after = loadReport(runs[1]);
