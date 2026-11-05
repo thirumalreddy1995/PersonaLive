@@ -39,6 +39,7 @@ import { FacialLightingZones, MeshWarpRenderer } from './meshWarpRenderer.ts';
 import { OralCavityRenderer, extractOralApertureMetrics } from './oralCavityRenderer.ts';
 import { MultiReferenceBank } from './multiReferenceBank.ts';
 import { CranialBoundaryBlender } from './cranialBoundaryBlender.ts';
+import { WATERMARK_TEXT, watermarkMetrics } from './watermark.ts';
 
 export type MetricsCallback = (metrics: FacialMetrics, pose: HeadPose, fps: number, latency: number) => void;
 export type StatusCallback = (status: EngineStatus) => void;
@@ -544,7 +545,8 @@ export class RealtimeFacialEngine {
       this.drawHeadPoseTripod(ctx, 40, H - 40, pose);
     }
 
-    if (settings.watermarkMandatory) this.drawMandatoryWatermark(ctx, W, H);
+    // Guardrail: the watermark is unconditional and always the last thing drawn.
+    this.drawMandatoryWatermark(ctx, W, H);
 
     // --- 5. Telemetry ---------------------------------------------------------------------------
     const avgLatency = this.latencyHistory.length
@@ -1086,40 +1088,42 @@ export class RealtimeFacialEngine {
     ctx.restore();
   }
 
-  /** Mandatory persistent AI-synthesized watermark for ethical, non-deceptive use. */
+  /**
+   * Mandatory AI-transformed watermark. Drawn on every output frame in every view mode, after
+   * everything else, and sized from the frame height so it survives a video-call downscale to 360p.
+   */
   private drawMandatoryWatermark(ctx: CanvasRenderingContext2D, w: number, h: number) {
+    const m = watermarkMetrics(w, h);
     ctx.save();
-    const margin = 16;
-    const badgeW = 200;
-    const badgeH = 28;
-    const x = w - badgeW - margin;
-    const y = h - badgeH - margin;
+    ctx.globalAlpha = 1;
+    ctx.globalCompositeOperation = 'source-over';
+    ctx.filter = 'none';
+    ctx.setTransform(1, 0, 0, 1, 0, 0);
 
-    ctx.fillStyle = 'rgba(15, 23, 42, 0.88)';
+    ctx.font = m.font;
+    ctx.textAlign = 'left';
+    ctx.textBaseline = 'middle';
+    const textW = ctx.measureText(WATERMARK_TEXT).width;
+    const badgeW = m.padX * 2 + m.dot * 2 + m.gap + textW;
+    const x = w - badgeW - m.margin;
+    const y = h - m.badgeH - m.margin;
+    const cy = y + m.badgeH / 2;
+
+    ctx.fillStyle = 'rgba(15, 23, 42, 0.9)';
     ctx.strokeStyle = '#0284c7';
-    ctx.lineWidth = 1.5;
+    ctx.lineWidth = Math.max(1.5, m.fontPx * 0.1);
     ctx.beginPath();
-    ctx.roundRect(x, y, badgeW, badgeH, 6);
+    ctx.roundRect(x, y, badgeW, m.badgeH, m.fontPx * 0.4);
     ctx.fill();
     ctx.stroke();
 
     ctx.fillStyle = '#38bdf8';
-    ctx.shadowColor = '#38bdf8';
-    ctx.shadowBlur = 6;
     ctx.beginPath();
-    ctx.arc(x + 14, y + 14, 4, 0, Math.PI * 2);
+    ctx.arc(x + m.padX + m.dot, cy, m.dot, 0, Math.PI * 2);
     ctx.fill();
-    ctx.shadowBlur = 0;
 
-    ctx.fillStyle = '#e2e8f0';
-    ctx.font = 'bold 10px Inter, system-ui, sans-serif';
-    ctx.textAlign = 'left';
-    ctx.textBaseline = 'middle';
-    ctx.fillText('AI-TRANSFORMED PERSONA', x + 26, y + 14);
-
-    ctx.fillStyle = '#0284c7';
-    ctx.font = '8px monospace';
-    ctx.fillText('C2PA', x + badgeW - 30, y + 14);
+    ctx.fillStyle = '#f8fafc';
+    ctx.fillText(WATERMARK_TEXT, x + m.padX + m.dot * 2 + m.gap, cy);
     ctx.restore();
   }
 

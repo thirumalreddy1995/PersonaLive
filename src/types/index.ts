@@ -89,7 +89,6 @@ export interface TransformationSettings {
   outputResolution: '1080p' | '720p' | '540p';
   viewMode: 'split' | 'side-by-side' | 'transformed-only' | 'pip';
   virtualCameraActive: boolean;
-  watermarkMandatory: boolean;
 }
 
 export interface UserAccount {

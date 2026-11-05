@@ -87,7 +87,6 @@ export default function App() {
     outputResolution: '720p',
     viewMode: 'split',
     virtualCameraActive: true,
-    watermarkMandatory: true,
   });
 
   const [pose, setPose] = useState<HeadPose>({ yaw: 0, pitch: 0, roll: 0 });

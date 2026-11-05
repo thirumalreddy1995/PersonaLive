@@ -299,7 +299,7 @@ export const UserGuideModal: React.FC<UserGuideModalProps> = ({
               <div className="p-3.5 bg-amber-950/40 border border-amber-800/80 rounded-xl text-amber-300 flex items-start gap-3">
                 <ShieldCheck className="w-4 h-4 text-amber-400 shrink-0 mt-0.5" />
                 <p className="leading-relaxed">
-                  <strong>Mandatory Ethical Safeguard:</strong> The output stream carries the immutable <strong>[● AI-TRANSFORMED PERSONA C2PA]</strong> badge. Bypassing, cropping, or injecting into identity verification or biometric KYC systems is strictly prohibited.
+                  <strong>Mandatory Ethical Safeguard:</strong> The output stream carries the immutable <strong>[● AI-TRANSFORMED PERSONA]</strong> badge. Bypassing, cropping, or injecting into identity verification or biometric KYC systems is strictly prohibited.
                 </p>
               </div>
             </div>
