@@ -11,9 +11,10 @@
  * and mouth interior (teeth, tongue) show through naturally. Persona eyes can optionally be
  * painted back in with triangle fans.
  *
- * Falls back to a Canvas 2D per-triangle affine warp when WebGL is unavailable or cannot be
- * initialised, and survives WebGL context loss (GPU reset, tab backgrounding) by rebuilding its
- * GPU resources when the context is restored.
+ * WebGL2 (GLSL ES 3.00, highp, mipmapped and anisotropic persona texture, asynchronous pixel
+ * readback for the camera-match loop) is preferred when the `webgl2` realism flag is on; WebGL1
+ * is the fallback, then a Canvas 2D per-triangle affine warp. The renderer survives WebGL
+ * context loss (GPU reset, tab backgrounding) by rebuilding its GPU resources on restore.
  */
 import { closedLipMaskForZone, type FaceTopology } from './faceMesh.ts';
 
@@ -23,6 +24,17 @@ export interface FacialLightingZones {
   rightCheek: [number, number, number];
   nose: [number, number, number];
   chin: [number, number, number];
+}
+
+export interface CameraMatchOptions {
+  /** Mip level-of-detail bias (≥ 0 blurs the persona by sampling coarser mip levels). */
+  lodBias: number;
+  /** Unsharp-mask amount (≥ 0 sharpens the persona with a texel-sized kernel). */
+  sharpen: number;
+  /** Per-frame luminance noise sigma in 0..1 units (0 = none). */
+  noiseSigma: number;
+  /** Frame counter that changes the noise pattern every frame. */
+  frame: number;
 }
 
 export interface WarpFrameOptions {
@@ -46,11 +58,23 @@ export interface WarpFrameOptions {
   closedLipMask?: number;
   /** Shader "beautification" stages; all on reproduces the pre-R1 look. */
   shader?: { unsharp: boolean; subsurface: boolean; sebum: boolean };
+  /** Camera-matched sharpness and noise (R2 §4); omitted = off. */
+  cameraMatch?: CameraMatchOptions;
+}
+
+/** Face-region pixel statistics from an asynchronous readback. */
+export interface FaceStats {
+  /** Variance of the 4-neighbour Laplacian of luma (0..255 scale) over the sampled region. */
+  laplacianVariance: number;
+  /** Median absolute deviation of a 3×3 high-pass of luma: sensor-noise sigma estimate. */
+  noiseMad: number;
+  /** Pixels that went into the estimate. */
+  samples: number;
 }
 
 type PersonaSource = HTMLImageElement | HTMLCanvasElement;
 
-const VERTEX_SHADER = `
+const VERTEX_SHADER_ES1 = `
 attribute vec2 aPosition;
 attribute vec2 aUv;
 attribute float aFeather;
@@ -103,8 +127,8 @@ void main() {
                wChin * uGainChin) / totalW;
 }`;
 
-const FRAGMENT_SHADER = `
-precision mediump float;
+const FRAGMENT_SHADER_ES1 = `
+precision highp float;
 uniform sampler2D uTexture;
 uniform float uOpacity;
 uniform float uUnsharp;
@@ -113,6 +137,11 @@ uniform float uSebum;
 uniform float uLipFade;
 uniform float uEyeFade;
 uniform float uClosedLipMask;
+uniform vec2 uTexelSize;
+uniform float uLodBias;
+uniform float uSharpen;
+uniform float uNoiseSigma;
+uniform float uFrame;
 
 varying vec2 vUv;
 varying float vFeather;
@@ -122,19 +151,28 @@ varying float vLip;
 varying float vLipZone;
 varying float vEyeFade;
 
+// Per-pixel, per-frame hash in [0, 1).
+float hash12(vec2 p) {
+  vec3 p3 = fract(vec3(p.xyx) * 0.1031);
+  p3 += dot(p3, p3.yzx + 33.33);
+  return fract((p3.x + p3.y) * p3.z);
+}
+
 void main() {
-  vec4 c = texture2D(uTexture, vUv);
+  // Camera match: a mip LOD bias blurs the persona toward the camera's softness (R2 §4).
+  vec4 c = texture2D(uTexture, vUv, uLodBias);
   if (c.a < 0.02) discard;
 
-  // 1. Fixed-offset unsharp mask (realism flag shaderUnsharp; R2 replaces it with a resolution-aware one)
-  vec2 d = vec2(0.0011, 0.0011);
-  vec4 t0 = texture2D(uTexture, vUv + vec2(-d.x, 0.0));
-  vec4 t1 = texture2D(uTexture, vUv + vec2( d.x, 0.0));
-  vec4 t2 = texture2D(uTexture, vUv + vec2(0.0, -d.y));
-  vec4 t3 = texture2D(uTexture, vUv + vec2(0.0,  d.y));
+  // 1. Unsharp mask with a texel-sized kernel: the fixed-offset R0 version (flag shaderUnsharp)
+  //    and the camera-match sharpen amount share it.
+  vec2 d = uTexelSize;
+  vec4 t0 = texture2D(uTexture, vUv + vec2(-d.x, 0.0), uLodBias);
+  vec4 t1 = texture2D(uTexture, vUv + vec2( d.x, 0.0), uLodBias);
+  vec4 t2 = texture2D(uTexture, vUv + vec2(0.0, -d.y), uLodBias);
+  vec4 t3 = texture2D(uTexture, vUv + vec2(0.0,  d.y), uLodBias);
   vec3 blurred = (t0.rgb + t1.rgb + t2.rgb + t3.rgb) * 0.25;
   vec3 highPass = c.rgb - blurred;
-  vec3 microSkin = c.rgb + highPass * 0.35 * uUnsharp;
+  vec3 microSkin = c.rgb + highPass * (0.35 * uUnsharp + uSharpen);
 
   // 2. Multi-zone directional lighting adaptation
   vec3 lit = clamp(microSkin, 0.0, 1.0) * vLighting;
@@ -150,19 +188,23 @@ void main() {
   vec3 specSheen = vec3(0.09, 0.11, 0.13) * specLum * pow(lum, 1.8) * uSebum;
   vec3 naturalSkin = clamp(sssSkin + specSheen, 0.0, 1.0);
 
-  // 5. Quintic smootherstep feathering curve for outer facial boundary
+  // 5. Camera-matched sensor noise: temporally varying luminance noise with a small chroma part.
+  if (uNoiseSigma > 0.0) {
+    vec2 seed = gl_FragCoord.xy + vec2(uFrame * 7.31, uFrame * 3.17);
+    float n = hash12(seed) - 0.5;
+    float nc = hash12(seed + vec2(19.7, 41.3)) - 0.5;
+    naturalSkin = clamp(naturalSkin + n * uNoiseSigma * 2.0 + vec3(nc, -nc * 0.5, nc * 0.25) * uNoiseSigma * 0.6, 0.0, 1.0);
+  }
+
+  // 6. Quintic smootherstep feathering curve for outer facial boundary
   float t = clamp(vFeather, 0.0, 1.0);
   float f = t * t * t * (t * (t * 6.0 - 15.0) + 10.0);
 
-  // 6. Cranial hairline feathering: smoothly dissolves the upper forehead boundary
+  // 7. Cranial hairline feathering: smoothly dissolves the upper forehead boundary
   // into the driver's hairline and temple shadow, eliminating horizontal seam cuts
   float cranialFalloff = smoothstep(0.0, 0.15, vNormPos.y);
 
-  // 7. Keep my real mouth / eye pass-through: fade the persona on the lip band as the mouth opens
-  // and in a ring around the eye holes, so the wearer's own lips, lids and lashes show.
-  // Closed-lip mask: just outside the wearer's outer lip contour (zone 1..2, feathered to zone 3)
-  // the persona is removed while the mouth is closed, so fuller persona lips end at the wearer's
-  // vermilion border instead of drawing a painted outline.
+  // 8. Keep my real mouth / eye pass-through / closed-lip mask.
   float closedMask = smoothstep(1.0, 1.3, vLipZone) * (1.0 - smoothstep(2.0, 3.0, vLipZone)) * uClosedLipMask * (1.0 - uLipFade);
   float lipHole = max(clamp(vLip * uLipFade, 0.0, 1.0), closedMask);
   float holes = (1.0 - lipHole) * (1.0 - clamp(vEyeFade * uEyeFade, 0.0, 1.0));
@@ -171,6 +213,29 @@ void main() {
 
   gl_FragColor = vec4(naturalSkin * a, a);
 }`;
+
+/** Simple textured quad, used to downsample a source into a small framebuffer for readback. */
+const COPY_VERTEX_ES1 = `
+attribute vec2 aPosition;
+varying vec2 vUv;
+uniform vec4 uSrcRect;
+void main() {
+  vUv = uSrcRect.xy + (aPosition * 0.5 + 0.5) * uSrcRect.zw;
+  gl_Position = vec4(aPosition, 0.0, 1.0);
+}`;
+const COPY_FRAGMENT_ES1 = `
+precision highp float;
+uniform sampler2D uTexture;
+varying vec2 vUv;
+void main() { gl_FragColor = texture2D(uTexture, vUv); }`;
+
+/** Converts GLSL ES 1.00 shader source to GLSL ES 3.00 for WebGL2. */
+export function toGlslEs3(source: string, stage: 'vertex' | 'fragment'): string {
+  let s = source.replace(/\btexture2D\(/g, 'texture(').replace(/\battribute\b/g, 'in');
+  s = s.replace(/\bvarying\b/g, stage === 'vertex' ? 'out' : 'in');
+  if (stage === 'fragment') s = s.replace(/\bgl_FragColor\b/g, 'fragColor').replace(/precision highp float;/, 'precision highp float;\nout vec4 fragColor;');
+  return `#version 300 es\n${s}`;
+}
 
 interface GLResources {
   program: WebGLProgram;
@@ -205,7 +270,32 @@ interface GLResources {
     uLipFade: WebGLUniformLocation | null;
     uEyeFade: WebGLUniformLocation | null;
     uClosedLipMask: WebGLUniformLocation | null;
+    uTexelSize: WebGLUniformLocation | null;
+    uLodBias: WebGLUniformLocation | null;
+    uSharpen: WebGLUniformLocation | null;
+    uNoiseSigma: WebGLUniformLocation | null;
+    uFrame: WebGLUniformLocation | null;
   };
+  /** WebGL2 only: downsample + asynchronous readback resources. */
+  readback: {
+    program: WebGLProgram;
+    aPosition: number;
+    uTexture: WebGLUniformLocation | null;
+    uSrcRect: WebGLUniformLocation | null;
+    quad: WebGLBuffer;
+    sourceTexture: WebGLTexture;
+    framebuffer: WebGLFramebuffer;
+    target: WebGLTexture;
+  } | null;
+}
+
+/** Side of the square framebuffer the face crop is downsampled into before readback. */
+export const READBACK_SIZE = 96;
+
+interface PendingReadback {
+  buffer: WebGLBuffer;
+  sync: WebGLSync;
+  resolve: (stats: FaceStats | null) => void;
 }
 
 function sourceSize(image: PersonaSource): { width: number; height: number } {
@@ -214,30 +304,83 @@ function sourceSize(image: PersonaSource): { width: number; height: number } {
     : { width: image.width, height: image.height };
 }
 
+function isPowerOfTwo(n: number): boolean {
+  return n > 0 && (n & (n - 1)) === 0;
+}
+
+/**
+ * Laplacian variance and high-pass MAD of an RGBA buffer (0..255 luma), skipping transparent
+ * pixels. Pure, shared by the GPU readback path and the tests.
+ */
+export function faceStatsFromPixels(data: ArrayLike<number>, width: number, height: number, minAlpha = 8): FaceStats {
+  const luma = new Float32Array(width * height);
+  const valid = new Uint8Array(width * height);
+  for (let i = 0; i < width * height; i++) {
+    const o = i * 4;
+    if (data[o + 3] < minAlpha) continue;
+    valid[i] = 1;
+    luma[i] = 0.2126 * data[o] + 0.7152 * data[o + 1] + 0.0722 * data[o + 2];
+  }
+  let n = 0, mean = 0, m2 = 0;
+  const hp: number[] = [];
+  for (let y = 1; y < height - 1; y++) {
+    for (let x = 1; x < width - 1; x++) {
+      const i = y * width + x;
+      if (!valid[i] || !valid[i - 1] || !valid[i + 1] || !valid[i - width] || !valid[i + width]) continue;
+      const lap = 4 * luma[i] - luma[i - 1] - luma[i + 1] - luma[i - width] - luma[i + width];
+      n++;
+      const delta = lap - mean;
+      mean += delta / n;
+      m2 += delta * (lap - mean);
+      // 3×3 mean high-pass for the noise estimate.
+      let s = 0;
+      for (let dy = -1; dy <= 1; dy++) for (let dx = -1; dx <= 1; dx++) s += luma[i + dy * width + dx];
+      hp.push(Math.abs(luma[i] - s / 9));
+    }
+  }
+  hp.sort((a, b) => a - b);
+  const median = hp.length ? hp[hp.length >> 1] : 0;
+  return { laplacianVariance: n > 1 ? m2 / n : 0, noiseMad: median * 1.4826, samples: n };
+}
+
 export class MeshWarpRenderer {
   private _canvas: HTMLCanvasElement;
-  private gl: WebGLRenderingContext | null = null;
+  private gl: WebGLRenderingContext | WebGL2RenderingContext | null = null;
+  private gl2: WebGL2RenderingContext | null = null;
   private ctx2d: CanvasRenderingContext2D | null = null;
   private resources: GLResources | null = null;
   private contextLost = false;
+  private anisotropy: { ext: EXT_texture_filter_anisotropic; max: number } | null = null;
 
   private topology: FaceTopology | null = null;
   private eyeFadeWeights: Float32Array | null = null;
   private personaImage: PersonaSource | null = null;
   private personaUv: Float32Array | null = null;
   private personaSize = { width: 1, height: 1 };
+  private pending: PendingReadback[] = [];
 
-  constructor(width: number, height: number) {
+  /**
+   * @param preferWebGL2 try WebGL2 first (realism flag `webgl2`); WebGL1 otherwise, then Canvas 2D
+   */
+  constructor(width: number, height: number, preferWebGL2 = false) {
     this._canvas = document.createElement('canvas');
     this._canvas.width = width;
     this._canvas.height = height;
 
-    const gl =
-      (this._canvas.getContext('webgl', { alpha: true, premultipliedAlpha: true, antialias: true, preserveDrawingBuffer: false }) as WebGLRenderingContext | null) ||
-      (this._canvas.getContext('experimental-webgl') as WebGLRenderingContext | null);
+    const attrs = { alpha: true, premultipliedAlpha: true, antialias: true, preserveDrawingBuffer: false };
+    let gl: WebGLRenderingContext | WebGL2RenderingContext | null = null;
+    if (preferWebGL2) gl = this._canvas.getContext('webgl2', attrs) as WebGL2RenderingContext | null;
+    if (!gl) {
+      gl =
+        (this._canvas.getContext('webgl', attrs) as WebGLRenderingContext | null) ||
+        (this._canvas.getContext('experimental-webgl') as WebGLRenderingContext | null);
+    }
 
     if (gl) {
       try {
+        this.gl2 = typeof WebGL2RenderingContext !== 'undefined' && gl instanceof WebGL2RenderingContext ? gl : null;
+        const ext = gl.getExtension('EXT_texture_filter_anisotropic');
+        if (ext) this.anisotropy = { ext, max: Math.min(8, gl.getParameter(ext.MAX_TEXTURE_MAX_ANISOTROPY_EXT) as number) };
         this.resources = this.createResources(gl);
         this.gl = gl;
         this._canvas.addEventListener('webglcontextlost', this.handleContextLost);
@@ -247,6 +390,8 @@ export class MeshWarpRenderer {
         // Shader/program creation failed (driver quirk, blocked GPU). A canvas that already has a
         // WebGL context cannot hand out a 2D one, so start over with a fresh canvas.
         console.warn('WebGL mesh warp unavailable, falling back to Canvas 2D warp.', err);
+        this.gl2 = null;
+        this.anisotropy = null;
         this._canvas = document.createElement('canvas');
         this._canvas.width = width;
         this._canvas.height = height;
@@ -264,6 +409,15 @@ export class MeshWarpRenderer {
     return this.gl !== null;
   }
 
+  get usesWebGL2(): boolean {
+    return this.gl2 !== null;
+  }
+
+  /** Persona texture size in pixels (for texel-size-aware kernels and LOD maths). */
+  get textureSize(): { width: number; height: number } {
+    return this.personaSize;
+  }
+
   resize(width: number, height: number) {
     if (this._canvas.width === width && this._canvas.height === height) return;
     this._canvas.width = width;
@@ -275,7 +429,8 @@ export class MeshWarpRenderer {
   // WebGL resource lifecycle
   // ---------------------------------------------------------------------------------------------
 
-  private createResources(gl: WebGLRenderingContext): GLResources {
+  private compileProgram(gl: WebGLRenderingContext, vertex: string, fragment: string): WebGLProgram {
+    const es3 = this.gl2 !== null;
     const compile = (type: number, source: string): WebGLShader => {
       const shader = gl.createShader(type);
       if (!shader) throw new Error('Could not create WebGL shader');
@@ -290,15 +445,19 @@ export class MeshWarpRenderer {
     };
     const program = gl.createProgram();
     if (!program) throw new Error('Could not create WebGL program');
-    gl.attachShader(program, compile(gl.VERTEX_SHADER, VERTEX_SHADER));
-    gl.attachShader(program, compile(gl.FRAGMENT_SHADER, FRAGMENT_SHADER));
+    gl.attachShader(program, compile(gl.VERTEX_SHADER, es3 ? toGlslEs3(vertex, 'vertex') : vertex));
+    gl.attachShader(program, compile(gl.FRAGMENT_SHADER, es3 ? toGlslEs3(fragment, 'fragment') : fragment));
     gl.linkProgram(program);
     if (!gl.getProgramParameter(program, gl.LINK_STATUS)) {
       const log = gl.getProgramInfoLog(program) || 'Program link failed';
       gl.deleteProgram(program);
       throw new Error(log);
     }
+    return program;
+  }
 
+  private createResources(gl: WebGLRenderingContext | WebGL2RenderingContext): GLResources {
+    const program = this.compileProgram(gl, VERTEX_SHADER_ES1, FRAGMENT_SHADER_ES1);
     const buffer = (): WebGLBuffer => {
       const b = gl.createBuffer();
       if (!b) throw new Error('Could not create WebGL buffer');
@@ -312,6 +471,38 @@ export class MeshWarpRenderer {
     gl.disable(gl.DEPTH_TEST);
     gl.disable(gl.CULL_FACE);
     gl.viewport(0, 0, this._canvas.width, this._canvas.height);
+
+    const u = (name: string) => gl.getUniformLocation(program, name);
+    let readback: GLResources['readback'] = null;
+    if (this.gl2) {
+      const gl2 = this.gl2;
+      const copy = this.compileProgram(gl2, COPY_VERTEX_ES1, COPY_FRAGMENT_ES1);
+      const quad = buffer();
+      gl2.bindBuffer(gl2.ARRAY_BUFFER, quad);
+      gl2.bufferData(gl2.ARRAY_BUFFER, new Float32Array([-1, -1, 1, -1, -1, 1, 1, 1]), gl2.STATIC_DRAW);
+      const sourceTexture = gl2.createTexture()!;
+      const target = gl2.createTexture()!;
+      gl2.bindTexture(gl2.TEXTURE_2D, target);
+      gl2.texImage2D(gl2.TEXTURE_2D, 0, gl2.RGBA, READBACK_SIZE, READBACK_SIZE, 0, gl2.RGBA, gl2.UNSIGNED_BYTE, null);
+      gl2.texParameteri(gl2.TEXTURE_2D, gl2.TEXTURE_MIN_FILTER, gl2.LINEAR);
+      gl2.texParameteri(gl2.TEXTURE_2D, gl2.TEXTURE_MAG_FILTER, gl2.LINEAR);
+      gl2.texParameteri(gl2.TEXTURE_2D, gl2.TEXTURE_WRAP_S, gl2.CLAMP_TO_EDGE);
+      gl2.texParameteri(gl2.TEXTURE_2D, gl2.TEXTURE_WRAP_T, gl2.CLAMP_TO_EDGE);
+      const framebuffer = gl2.createFramebuffer()!;
+      gl2.bindFramebuffer(gl2.FRAMEBUFFER, framebuffer);
+      gl2.framebufferTexture2D(gl2.FRAMEBUFFER, gl2.COLOR_ATTACHMENT0, gl2.TEXTURE_2D, target, 0);
+      gl2.bindFramebuffer(gl2.FRAMEBUFFER, null);
+      readback = {
+        program: copy,
+        aPosition: gl2.getAttribLocation(copy, 'aPosition'),
+        uTexture: gl2.getUniformLocation(copy, 'uTexture'),
+        uSrcRect: gl2.getUniformLocation(copy, 'uSrcRect'),
+        quad,
+        sourceTexture,
+        framebuffer,
+        target,
+      };
+    }
 
     return {
       program,
@@ -331,26 +522,32 @@ export class MeshWarpRenderer {
         aLip: gl.getAttribLocation(program, 'aLip'),
         aLipZone: gl.getAttribLocation(program, 'aLipZone'),
         aEyeFade: gl.getAttribLocation(program, 'aEyeFade'),
-        uResolution: gl.getUniformLocation(program, 'uResolution'),
-        uTexture: gl.getUniformLocation(program, 'uTexture'),
-        uFaceBounds: gl.getUniformLocation(program, 'uFaceBounds'),
-        uGainForehead: gl.getUniformLocation(program, 'uGainForehead'),
-        uGainLeftCheek: gl.getUniformLocation(program, 'uGainLeftCheek'),
-        uGainRightCheek: gl.getUniformLocation(program, 'uGainRightCheek'),
-        uGainNose: gl.getUniformLocation(program, 'uGainNose'),
-        uGainChin: gl.getUniformLocation(program, 'uGainChin'),
-        uOpacity: gl.getUniformLocation(program, 'uOpacity'),
-        uUnsharp: gl.getUniformLocation(program, 'uUnsharp'),
-        uSubsurface: gl.getUniformLocation(program, 'uSubsurface'),
-        uSebum: gl.getUniformLocation(program, 'uSebum'),
-        uLipFade: gl.getUniformLocation(program, 'uLipFade'),
-        uEyeFade: gl.getUniformLocation(program, 'uEyeFade'),
-        uClosedLipMask: gl.getUniformLocation(program, 'uClosedLipMask'),
+        uResolution: u('uResolution'),
+        uTexture: u('uTexture'),
+        uFaceBounds: u('uFaceBounds'),
+        uGainForehead: u('uGainForehead'),
+        uGainLeftCheek: u('uGainLeftCheek'),
+        uGainRightCheek: u('uGainRightCheek'),
+        uGainNose: u('uGainNose'),
+        uGainChin: u('uGainChin'),
+        uOpacity: u('uOpacity'),
+        uUnsharp: u('uUnsharp'),
+        uSubsurface: u('uSubsurface'),
+        uSebum: u('uSebum'),
+        uLipFade: u('uLipFade'),
+        uEyeFade: u('uEyeFade'),
+        uClosedLipMask: u('uClosedLipMask'),
+        uTexelSize: u('uTexelSize'),
+        uLodBias: u('uLodBias'),
+        uSharpen: u('uSharpen'),
+        uNoiseSigma: u('uNoiseSigma'),
+        uFrame: u('uFrame'),
       },
+      readback,
     };
   }
 
-  private deleteResources(gl: WebGLRenderingContext, r: GLResources) {
+  private deleteResources(gl: WebGLRenderingContext | WebGL2RenderingContext, r: GLResources) {
     gl.deleteBuffer(r.positionBuffer);
     gl.deleteBuffer(r.uvBuffer);
     gl.deleteBuffer(r.featherBuffer);
@@ -361,6 +558,18 @@ export class MeshWarpRenderer {
     gl.deleteBuffer(r.eyeIndexBuffer);
     gl.deleteTexture(r.texture);
     gl.deleteProgram(r.program);
+    if (r.readback) {
+      gl.deleteProgram(r.readback.program);
+      gl.deleteBuffer(r.readback.quad);
+      gl.deleteTexture(r.readback.sourceTexture);
+      gl.deleteTexture(r.readback.target);
+      gl.deleteFramebuffer(r.readback.framebuffer);
+    }
+    for (const p of this.pending) {
+      gl.deleteBuffer(p.buffer);
+      p.resolve(null);
+    }
+    this.pending = [];
   }
 
   /** True when GPU resources are usable this frame. */
@@ -373,6 +582,8 @@ export class MeshWarpRenderer {
     event.preventDefault();
     this.contextLost = true;
     this.resources = null;
+    for (const p of this.pending) p.resolve(null);
+    this.pending = [];
     console.warn('WebGL context lost; persona overlay paused until the context is restored.');
   };
 
@@ -414,15 +625,28 @@ export class MeshWarpRenderer {
     gl.bufferData(gl.ARRAY_BUFFER, weights, gl.STATIC_DRAW);
   }
 
+  /**
+   * Uploads the persona with mipmaps (WebGL2, or power-of-two sizes on WebGL1) and anisotropic
+   * filtering, so minified skin texture is sampled instead of aliased and the camera-match LOD
+   * bias has levels to blur into.
+   */
   private uploadTexture(gl: WebGLRenderingContext, r: GLResources, image: PersonaSource) {
+    const { width, height } = sourceSize(image);
     gl.bindTexture(gl.TEXTURE_2D, r.texture);
     gl.pixelStorei(gl.UNPACK_FLIP_Y_WEBGL, false);
     gl.pixelStorei(gl.UNPACK_PREMULTIPLY_ALPHA_WEBGL, false);
     gl.texImage2D(gl.TEXTURE_2D, 0, gl.RGBA, gl.RGBA, gl.UNSIGNED_BYTE, image);
     gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_WRAP_S, gl.CLAMP_TO_EDGE);
     gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_WRAP_T, gl.CLAMP_TO_EDGE);
-    gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MIN_FILTER, gl.LINEAR);
     gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MAG_FILTER, gl.LINEAR);
+    const mipmaps = this.gl2 !== null || (isPowerOfTwo(width) && isPowerOfTwo(height));
+    if (mipmaps) {
+      gl.generateMipmap(gl.TEXTURE_2D);
+      gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MIN_FILTER, gl.LINEAR_MIPMAP_LINEAR);
+      if (this.anisotropy) gl.texParameterf(gl.TEXTURE_2D, this.anisotropy.ext.TEXTURE_MAX_ANISOTROPY_EXT, this.anisotropy.max);
+    } else {
+      gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MIN_FILTER, gl.LINEAR);
+    }
   }
 
   private uploadUvs(gl: WebGLRenderingContext, r: GLResources, uv: Float32Array, usage: number) {
@@ -446,8 +670,8 @@ export class MeshWarpRenderer {
   }
 
   /**
-   * @param image persona portrait
-   * @param uv flat normalized [u, v, ...] landmark positions inside the portrait (y down, 0..1)
+   * @param image persona portrait (or its preprocessed crop)
+   * @param uv flat normalized [u, v, ...] landmark positions inside the image (y down, 0..1)
    */
   setPersona(image: PersonaSource, uv: Float32Array) {
     this.personaImage = image;
@@ -496,9 +720,11 @@ export class MeshWarpRenderer {
     }
   }
 
-  private renderGL(gl: WebGLRenderingContext, r: GLResources, opts: WarpFrameOptions) {
+  private renderGL(gl: WebGLRenderingContext | WebGL2RenderingContext, r: GLResources, opts: WarpFrameOptions) {
     const topo = this.topology!;
     const loc = r.locations;
+    gl.bindFramebuffer(gl.FRAMEBUFFER, null);
+    gl.viewport(0, 0, this._canvas.width, this._canvas.height);
     gl.clearColor(0, 0, 0, 0);
     gl.clear(gl.COLOR_BUFFER_BIT);
     gl.useProgram(r.program);
@@ -558,6 +784,14 @@ export class MeshWarpRenderer {
     gl.uniform1f(loc.uLipFade, opts.lipFade ?? 0);
     gl.uniform1f(loc.uEyeFade, opts.eyeFade ?? 0);
     gl.uniform1f(loc.uClosedLipMask, opts.closedLipMask ?? 0);
+    // The R0 unsharp mask used a fixed 0.0011 offset; a texel-sized kernel is resolution-aware.
+    const texel: [number, number] = shader.unsharp && !opts.cameraMatch ? [0.0011, 0.0011] : [1 / this.personaSize.width, 1 / this.personaSize.height];
+    gl.uniform2f(loc.uTexelSize, texel[0], texel[1]);
+    const cm = opts.cameraMatch;
+    gl.uniform1f(loc.uLodBias, cm ? Math.max(0, cm.lodBias) : 0);
+    gl.uniform1f(loc.uSharpen, cm ? Math.max(0, cm.sharpen) : 0);
+    gl.uniform1f(loc.uNoiseSigma, cm ? Math.max(0, cm.noiseSigma) : 0);
+    gl.uniform1f(loc.uFrame, cm ? cm.frame % 4096 : 0);
 
     gl.bindBuffer(gl.ELEMENT_ARRAY_BUFFER, r.indexBuffer);
     gl.drawElements(gl.TRIANGLES, topo.triangles.length, gl.UNSIGNED_SHORT, 0);
@@ -566,6 +800,112 @@ export class MeshWarpRenderer {
       gl.bindBuffer(gl.ELEMENT_ARRAY_BUFFER, r.eyeIndexBuffer);
       gl.drawElements(gl.TRIANGLES, topo.eyeTriangles.length, gl.UNSIGNED_SHORT, 0);
     }
+  }
+
+  // ---------------------------------------------------------------------------------------------
+  // Asynchronous readback (WebGL2): face-region statistics without stalling the GPU
+  // ---------------------------------------------------------------------------------------------
+
+  /** True when readFaceStats / readSourceFaceStats can be used (WebGL2 context, not lost). */
+  get supportsReadback(): boolean {
+    return this.gl2 !== null && this.resources?.readback != null && !this.contextLost;
+  }
+
+  /**
+   * Downsamples the given region of the current warp output into a small framebuffer and starts
+   * an asynchronous readback. Resolves with the statistics a few frames later (or null if the
+   * context was lost). Call right after render() while the drawing buffer still holds the frame.
+   */
+  readFaceStats(region: [number, number, number, number]): Promise<FaceStats | null> {
+    const gl = this.gl2;
+    const r = this.resources?.readback;
+    if (!gl || !r || this.contextLost) return Promise.resolve(null);
+    // Copy the face region of the drawing buffer into the source texture, then downsample it.
+    gl.bindFramebuffer(gl.FRAMEBUFFER, null);
+    gl.bindTexture(gl.TEXTURE_2D, r.sourceTexture);
+    const x = Math.max(0, Math.floor(region[0]));
+    const y = Math.max(0, Math.floor(this._canvas.height - region[1] - region[3]));
+    const w = Math.max(1, Math.min(this._canvas.width - x, Math.ceil(region[2])));
+    const h = Math.max(1, Math.min(this._canvas.height - y, Math.ceil(region[3])));
+    gl.copyTexImage2D(gl.TEXTURE_2D, 0, gl.RGBA, x, y, w, h, 0);
+    gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MIN_FILTER, gl.LINEAR);
+    gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MAG_FILTER, gl.LINEAR);
+    gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_WRAP_S, gl.CLAMP_TO_EDGE);
+    gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_WRAP_T, gl.CLAMP_TO_EDGE);
+    return this.downsampleAndRead(gl, r, [0, 0, 1, 1]);
+  }
+
+  /**
+   * Uploads a video or canvas frame as a texture, downsamples the given normalized region of it
+   * and starts an asynchronous readback (the driver face crop for the camera-match estimate).
+   */
+  readSourceFaceStats(source: TexImageSource, region: [number, number, number, number]): Promise<FaceStats | null> {
+    const gl = this.gl2;
+    const r = this.resources?.readback;
+    if (!gl || !r || this.contextLost) return Promise.resolve(null);
+    gl.bindTexture(gl.TEXTURE_2D, r.sourceTexture);
+    gl.pixelStorei(gl.UNPACK_FLIP_Y_WEBGL, false);
+    gl.texImage2D(gl.TEXTURE_2D, 0, gl.RGBA, gl.RGBA, gl.UNSIGNED_BYTE, source);
+    gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MIN_FILTER, gl.LINEAR);
+    gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MAG_FILTER, gl.LINEAR);
+    gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_WRAP_S, gl.CLAMP_TO_EDGE);
+    gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_WRAP_T, gl.CLAMP_TO_EDGE);
+    return this.downsampleAndRead(gl, r, region);
+  }
+
+  private downsampleAndRead(gl: WebGL2RenderingContext, r: NonNullable<GLResources['readback']>, rect: [number, number, number, number]): Promise<FaceStats | null> {
+    gl.bindFramebuffer(gl.FRAMEBUFFER, r.framebuffer);
+    gl.viewport(0, 0, READBACK_SIZE, READBACK_SIZE);
+    gl.disable(gl.BLEND);
+    gl.useProgram(r.program);
+    gl.bindBuffer(gl.ARRAY_BUFFER, r.quad);
+    gl.enableVertexAttribArray(r.aPosition);
+    gl.vertexAttribPointer(r.aPosition, 2, gl.FLOAT, false, 0, 0);
+    gl.activeTexture(gl.TEXTURE0);
+    gl.bindTexture(gl.TEXTURE_2D, r.sourceTexture);
+    gl.uniform1i(r.uTexture, 0);
+    gl.uniform4f(r.uSrcRect, rect[0], rect[1], rect[2], rect[3]);
+    gl.drawArrays(gl.TRIANGLE_STRIP, 0, 4);
+
+    const buffer = gl.createBuffer()!;
+    gl.bindBuffer(gl.PIXEL_PACK_BUFFER, buffer);
+    gl.bufferData(gl.PIXEL_PACK_BUFFER, READBACK_SIZE * READBACK_SIZE * 4, gl.STREAM_READ);
+    gl.readPixels(0, 0, READBACK_SIZE, READBACK_SIZE, gl.RGBA, gl.UNSIGNED_BYTE, 0);
+    gl.bindBuffer(gl.PIXEL_PACK_BUFFER, null);
+    const sync = gl.fenceSync(gl.SYNC_GPU_COMMANDS_COMPLETE, 0)!;
+    gl.flush();
+
+    gl.bindFramebuffer(gl.FRAMEBUFFER, null);
+    gl.viewport(0, 0, this._canvas.width, this._canvas.height);
+    gl.enable(gl.BLEND);
+    return new Promise((resolve) => this.pending.push({ buffer, sync, resolve }));
+  }
+
+  /** Polls pending readbacks (call once per frame); resolved ones hand their statistics over. */
+  pollReadbacks() {
+    const gl = this.gl2;
+    if (!gl || !this.pending.length || this.contextLost) return;
+    const still: PendingReadback[] = [];
+    for (const p of this.pending) {
+      const status = gl.clientWaitSync(p.sync, 0, 0);
+      if (status === gl.TIMEOUT_EXPIRED) {
+        still.push(p);
+        continue;
+      }
+      gl.deleteSync(p.sync);
+      if (status === gl.WAIT_FAILED) {
+        gl.deleteBuffer(p.buffer);
+        p.resolve(null);
+        continue;
+      }
+      const data = new Uint8Array(READBACK_SIZE * READBACK_SIZE * 4);
+      gl.bindBuffer(gl.PIXEL_PACK_BUFFER, p.buffer);
+      gl.getBufferSubData(gl.PIXEL_PACK_BUFFER, 0, data);
+      gl.bindBuffer(gl.PIXEL_PACK_BUFFER, null);
+      gl.deleteBuffer(p.buffer);
+      p.resolve(faceStatsFromPixels(data, READBACK_SIZE, READBACK_SIZE));
+    }
+    this.pending = still;
   }
 
   /** CPU fallback: affine-map every triangle individually. */
@@ -637,6 +977,7 @@ export class MeshWarpRenderer {
       gl.getExtension('WEBGL_lose_context')?.loseContext();
       this.resources = null;
       this.gl = null;
+      this.gl2 = null;
     }
     this.ctx2d = null;
     this.clearPersona();

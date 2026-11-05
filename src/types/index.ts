@@ -67,7 +67,7 @@ export interface EngineStatus {
   modelProgress: number; // 0..1
   modelMessage: string;
   backend: 'GPU' | 'CPU' | '-';
-  renderer: 'webgl' | 'canvas2d';
+  renderer: 'webgl2' | 'webgl' | 'canvas2d';
   source: 'none' | 'webcam' | 'demo' | 'file';
   faceDetected: boolean;
   persona: 'none' | 'preparing' | 'ready' | 'no-face' | 'error';
@@ -86,6 +86,8 @@ export interface TransformationSettings {
   keepRealMouth: boolean;
   /** Eye pass-through ring in tessellation rings (0 = none, 1 = just past the lash line, up to 2). */
   eyePassThroughRadius: number;
+  /** Longest edge of the persona texture after the face crop (R2 §2). */
+  personaTextureSize: 512 | 1024 | 2048;
   lightingAdaptation: boolean;
   preserveFacialHair: boolean;
   showLandmarkOverlay: boolean;

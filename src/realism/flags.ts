@@ -16,9 +16,9 @@ export interface RealismFlagDef {
   description: string;
   defaultValue: boolean;
   /** Where in the pipeline the flag acts. */
-  group: 'mesh' | 'overlay' | 'post' | 'bank' | 'shader' | 'mouth-eyes';
-  /** Set when toggling needs the persona to be re-prepared rather than taking effect next frame. */
-  appliesOn?: 'persona-reload';
+  group: 'mesh' | 'overlay' | 'post' | 'bank' | 'shader' | 'mouth-eyes' | 'texture';
+  /** Set when toggling needs the persona to be re-prepared, or the engine re-created, rather than taking effect next frame. */
+  appliesOn?: 'persona-reload' | 'engine-restart';
 }
 
 export type RealismFlagKey =
@@ -36,7 +36,10 @@ export type RealismFlagKey =
   | 'realMouth'
   | 'eyePassThrough'
   | 'closedLipMask'
-  | 'rigidForehead';
+  | 'rigidForehead'
+  | 'webgl2'
+  | 'personaCrop'
+  | 'cameraMatch';
 
 export const REALISM_FLAG_DEFS: ReadonlyArray<RealismFlagDef> = [
   {
@@ -127,6 +130,29 @@ export const REALISM_FLAG_DEFS: ReadonlyArray<RealismFlagDef> = [
     group: 'shader',
   },
   {
+    key: 'webgl2',
+    label: 'WebGL2 renderer',
+    description: 'Prefer a WebGL2 context (GLSL ES 3.00, highp, mipmaps for any texture size, asynchronous readback). Takes effect when the engine is created (R2 §1).',
+    defaultValue: false,
+    group: 'texture',
+    appliesOn: 'engine-restart',
+  },
+  {
+    key: 'personaCrop',
+    label: 'Persona crop + mipmaps',
+    description: 'Crop the reference to the face oval × 1.6, resize to the texture-size setting, recompute UVs and upload with mipmaps and anisotropic filtering (R2 §2).',
+    defaultValue: false,
+    group: 'texture',
+    appliesOn: 'persona-reload',
+  },
+  {
+    key: 'cameraMatch',
+    label: 'Camera-matched sharpness and noise',
+    description: 'Every 15 frames compare the wearer\'s and the persona\'s face-region sharpness and noise (asynchronous readback, WebGL2 only) and blur/sharpen the persona plus add matching noise (R2 §4).',
+    defaultValue: false,
+    group: 'texture',
+  },
+  {
     key: 'realMouth',
     label: 'Keep my real mouth (lip fade)',
     description: 'Fades the persona lip band as the mouth opens so the wearer\'s real lips show instead of stretched persona lips (R1 §2). Also needs the user setting.',
@@ -154,11 +180,11 @@ export const REALISM_FLAG_DEFS: ReadonlyArray<RealismFlagDef> = [
  * the current defaults are. Update this only when a phase report changes defaults.
  */
 export const R0_FLAG_STRING =
-  'speechAnatomy=1,perspectiveForeshortening=1,eyelidKinematics=1,foreheadHarmonize=1,hairlineSoften=1,oralCavity=1,catchlights=1,syntheticSuite=1,shaderUnsharp=1,shaderSubsurface=1,shaderSebum=1,realMouth=0,eyePassThrough=0,closedLipMask=0,rigidForehead=0';
+  'speechAnatomy=1,perspectiveForeshortening=1,eyelidKinematics=1,foreheadHarmonize=1,hairlineSoften=1,oralCavity=1,catchlights=1,syntheticSuite=1,shaderUnsharp=1,shaderSubsurface=1,shaderSebum=1,realMouth=0,eyePassThrough=0,closedLipMask=0,rigidForehead=0,webgl2=0,personaCrop=0,cameraMatch=0';
 
 /** The R1 defaults, as a flag string: `--flags r1` reproduces the end-of-R1 behaviour. */
 export const R1_FLAG_STRING =
-  'speechAnatomy=0,perspectiveForeshortening=0,eyelidKinematics=0,foreheadHarmonize=1,hairlineSoften=1,oralCavity=0,catchlights=0,syntheticSuite=0,shaderUnsharp=0,shaderSubsurface=0,shaderSebum=0,realMouth=1,eyePassThrough=1,closedLipMask=0,rigidForehead=0';
+  'speechAnatomy=0,perspectiveForeshortening=0,eyelidKinematics=0,foreheadHarmonize=1,hairlineSoften=1,oralCavity=0,catchlights=0,syntheticSuite=0,shaderUnsharp=0,shaderSubsurface=0,shaderSebum=0,realMouth=1,eyePassThrough=1,closedLipMask=0,rigidForehead=0,webgl2=0,personaCrop=0,cameraMatch=0';
 
 /** Named flag presets accepted by parseRealismFlagString (case-insensitive). */
 export const REALISM_FLAG_PRESETS: Record<string, string> = { r0: R0_FLAG_STRING, r1: R1_FLAG_STRING };

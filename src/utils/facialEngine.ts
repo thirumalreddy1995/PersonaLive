@@ -13,6 +13,8 @@
 import { AuthorizedPersona, EngineStatus, FacialMetrics, HeadPose, TransformationSettings } from '../types/index.ts';
 import { OneEuroFilter } from './faceMath.ts';
 import { RigidPoseStabilizer, poseAngles } from './rigidPose.ts';
+import { cropUvs, planCrop } from './personaCrop.ts';
+import { CameraMatchState, initialCameraMatch, stepCameraMatch } from './cameraMatch.ts';
 import {
   applyEyelidKinematics,
   eyeFadeWeights,
@@ -176,6 +178,9 @@ export class RealtimeFacialEngine {
   private readonly rigid = new RigidPoseStabilizer();
   /** Raw (unsmoothed) tracked landmarks in canvas pixels, fed to the stabiliser. */
   private readonly rawPx = new Float32Array(LANDMARK_COUNT * 2);
+  /** Camera-match loop (realism flag cameraMatch). */
+  private cameraMatch: CameraMatchState = initialCameraMatch();
+  private cameraMatchPending = false;
   /** Lip-band fade applied on the last frame (debug panel). */
   private lastLipFade = 0;
   private overlayDrawnThisFrame = false;
@@ -198,10 +203,10 @@ export class RealtimeFacialEngine {
     canvas.height = h;
 
     this.topology = buildFaceTopology(FACE_TESSELLATION, FACE_OVAL, 468);
-    this.warp = new MeshWarpRenderer(w, h);
+    this.warp = new MeshWarpRenderer(w, h, realismFlags.get().webgl2);
     this.warp.setTopology(this.topology);
     this.warp.setEyeFade(eyeFadeWeights(this.topology, settings.eyePassThroughRadius));
-    this.status.renderer = this.warp.usesWebGL ? 'webgl' : 'canvas2d';
+    this.status.renderer = this.warp.usesWebGL2 ? 'webgl2' : this.warp.usesWebGL ? 'webgl' : 'canvas2d';
 
     this.demoCanvas = document.createElement('canvas');
     this.demoCanvas.width = 1280;
@@ -227,7 +232,8 @@ export class RealtimeFacialEngine {
 
     // Flags that change how the persona is prepared take effect by re-preparing it.
     this.flagsUnsubscribe = realismFlags.subscribe((_flags, changed) => {
-      if (changed.includes('syntheticSuite') && this.personaImage) void this.preparePersona();
+      if ((changed.includes('syntheticSuite') || changed.includes('personaCrop')) && this.personaImage) void this.preparePersona();
+      if (changed.includes('cameraMatch')) this.cameraMatch = initialCameraMatch();
     });
     if (isRealismDebugEnabled()) {
       this.profiler.measure = true;
@@ -347,6 +353,9 @@ export class RealtimeFacialEngine {
     if (prev.eyePassThroughRadius !== settings.eyePassThroughRadius) {
       this.warp.setEyeFade(eyeFadeWeights(this.topology, settings.eyePassThroughRadius));
     }
+    if (prev.personaTextureSize !== settings.personaTextureSize && this.personaImage && realismFlags.get().personaCrop) {
+      void this.preparePersona();
+    }
   }
 
   public setSplitPosition(position: number) {
@@ -404,9 +413,25 @@ export class RealtimeFacialEngine {
         return;
       }
       const face = faces[0];
-      this.warp.setPersona(img, face.landmarks);
-      this.currentKeyframeSource = img;
+      // R2 §2: crop to the face oval × 1.6, cap the long edge, recompute UVs (flag personaCrop).
+      let texture: HTMLImageElement | HTMLCanvasElement = img;
+      let uv = face.landmarks;
+      if (realismFlags.get().personaCrop) {
+        const plan = planCrop(face.landmarks, img.naturalWidth, img.naturalHeight, this.settings.personaTextureSize);
+        const crop = document.createElement('canvas');
+        crop.width = plan.width;
+        crop.height = plan.height;
+        const cctx = crop.getContext('2d')!;
+        cctx.imageSmoothingEnabled = true;
+        cctx.imageSmoothingQuality = 'high';
+        cctx.drawImage(img, plan.sx, plan.sy, plan.sw, plan.sh, 0, 0, plan.width, plan.height);
+        texture = crop;
+        uv = cropUvs(face.landmarks, img.naturalWidth, img.naturalHeight, plan);
+      }
+      this.warp.setPersona(texture, uv);
+      this.currentKeyframeSource = texture;
       this.currentKeyframeId = null;
+      this.cameraMatch = initialCameraMatch();
       this.personaMean = this.sampleMeanColor(img, face.landmarks, img.naturalWidth, img.naturalHeight, false);
 
       // Synthesize calibrated multi-angle, multi-expression identity suite for Person A.
@@ -828,6 +853,8 @@ export class RealtimeFacialEngine {
     const closedLipMask = flags.closedLipMask && s.keepRealMouth ? 1 : 0;
     this.lastLipFade = lipFade;
 
+    const cameraMatchOn = flags.cameraMatch && this.warp.supportsReadback;
+    this.warp.pollReadbacks();
     this.warp.render({
       positions: this.warpPositions,
       opacity: Math.pow(strength, 0.55),
@@ -839,7 +866,37 @@ export class RealtimeFacialEngine {
       eyeFade,
       closedLipMask,
       shader: { unsharp: flags.shaderUnsharp, subsurface: flags.shaderSubsurface, sebum: flags.shaderSebum },
+      cameraMatch: cameraMatchOn
+        ? { lodBias: this.cameraMatch.lodBias, sharpen: this.cameraMatch.sharpen, noiseSigma: this.cameraMatch.noiseSigma, frame: this.frameIndex }
+        : undefined,
     });
+
+    // R2 §4: every 15 frames read the wearer's and the persona's face-region statistics back
+    // asynchronously and step the control loop when both have arrived.
+    if (cameraMatchOn && !this.cameraMatchPending && this.frameIndex % 15 === 0) {
+      this.cameraMatchPending = true;
+      const faceRect: [number, number, number, number] = [bounds.minX, bounds.minY, bounds.width, bounds.height];
+      // The same face box in normalized source coordinates (un-mirrored).
+      let sx0 = (bounds.minX - layout.offsetX) / layout.drawWidth;
+      let sx1 = (bounds.minX + bounds.width - layout.offsetX) / layout.drawWidth;
+      if (layout.mirror) {
+        const m0 = 1 - sx1;
+        const m1 = 1 - sx0;
+        sx0 = m0;
+        sx1 = m1;
+      }
+      const sy0 = (bounds.minY - layout.offsetY) / layout.drawHeight;
+      const sy1 = (bounds.minY + bounds.height - layout.offsetY) / layout.drawHeight;
+      const srcRect: [number, number, number, number] = [clamp(sx0, 0, 1), clamp(sy0, 0, 1), clamp(sx1 - sx0, 0.01, 1), clamp(sy1 - sy0, 0.01, 1)];
+      const token = this.personaPrepareToken;
+      const output = this.warp.readFaceStats(faceRect);
+      const driver = this.warp.readSourceFaceStats(source as TexImageSource, srcRect);
+      void Promise.all([driver, output]).then(([d, o]) => {
+        this.cameraMatchPending = false;
+        if (this.disposed || token !== this.personaPrepareToken || !d || !o) return;
+        this.cameraMatch = stepCameraMatch(this.cameraMatch, d, o);
+      });
+    }
   }
 
   /**
@@ -1325,6 +1382,8 @@ export class RealtimeFacialEngine {
           mar: this.lastMar,
           lipFade: this.lastLipFade,
           rigidPose: this.rigid.lastPose ? poseAngles(this.rigid.lastPose.q) : null,
+          cameraMatch: realismFlags.get().cameraMatch ? { ...this.cameraMatch } : null,
+          renderer: this.status.renderer,
           pose: { ...this.lastPose },
           isSpeaking: this.lastMetrics?.isSpeaking ?? false,
           isSmiling: this.lastMetrics?.isSmiling ?? false,

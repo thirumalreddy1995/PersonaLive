@@ -27,6 +27,9 @@ const ENUM_KEYS: Partial<Record<SettingKey, ReadonlyArray<string>>> = {
   outputResolution: ['1080p', '720p', '540p'],
   viewMode: ['split', 'side-by-side', 'transformed-only', 'pip'],
 };
+const NUMERIC_ENUM_KEYS: Partial<Record<SettingKey, ReadonlyArray<number>>> = {
+  personaTextureSize: [512, 1024, 2048],
+};
 
 const TRUE_WORDS = new Set(['1', 'true', 'on', 'yes']);
 const FALSE_WORDS = new Set(['0', 'false', 'off', 'no']);
@@ -57,6 +60,10 @@ export function parseSettingsString(input: string): { settings: Partial<Transfor
     } else if (ENUM_KEYS[key]) {
       if (ENUM_KEYS[key]!.includes(value)) settings[key] = value;
       else errors.push(`setting "${key}" must be one of ${ENUM_KEYS[key]!.join(', ')}`);
+    } else if (NUMERIC_ENUM_KEYS[key]) {
+      const n = Number(value);
+      if (NUMERIC_ENUM_KEYS[key]!.includes(n)) settings[key] = n;
+      else errors.push(`setting "${key}" must be one of ${NUMERIC_ENUM_KEYS[key]!.join(', ')}`);
     } else {
       errors.push(`unknown setting "${key}"`);
     }

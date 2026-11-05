@@ -229,6 +229,8 @@ export interface ClipSummary {
   hairlineAlignment: null;
   hairlineAlignmentNote: string;
   performance: RealismDebugState['profile'] & { window: string; software: boolean };
+  renderer: RealismDebugState['renderer'];
+  cameraMatch: RealismDebugState['cameraMatch'];
 }
 
 interface ClipReport {
@@ -448,6 +450,8 @@ async function captureClip(page: Page, args: Args, o: CaptureOptions): Promise<C
     hairlineAlignment: null,
     hairlineAlignmentNote: 'needs the R4 hair mask; personaTopEdge() is ready for it',
     performance: { ...finalState.profile, window: 'last 300 frames of the replay', software: args.software },
+    renderer: finalState.renderer,
+    cameraMatch: finalState.cameraMatch,
   };
 
   return {

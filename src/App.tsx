@@ -103,6 +103,7 @@ export default function App() {
     eyeGazeSync: true,
     keepRealMouth: true,
     eyePassThroughRadius: 1,
+    personaTextureSize: 1024,
     lightingAdaptation: true,
     preserveFacialHair: true,
     showLandmarkOverlay: false,

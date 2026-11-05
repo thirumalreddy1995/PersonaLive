@@ -28,6 +28,7 @@ const GROUP_LABELS: Record<string, string> = {
   bank: 'Reference bank',
   shader: 'Shader beautification',
   'mouth-eyes': 'Real mouth and eyes',
+  texture: 'Texture fidelity',
 };
 
 function useFlags() {
@@ -128,7 +129,7 @@ export const RealismDebugPanel: React.FC = () => {
         <div className="px-3 pb-3 space-y-3">
           {/* Flags */}
           <div className="space-y-2">
-            {(['mesh', 'overlay', 'post', 'bank', 'shader', 'mouth-eyes'] as const).map((group) => (
+            {(['mesh', 'overlay', 'post', 'bank', 'shader', 'mouth-eyes', 'texture'] as const).map((group) => (
               <div key={group}>
                 <div className="uppercase tracking-wider text-[9px] text-slate-500 mb-1">{GROUP_LABELS[group]}</div>
                 {REALISM_FLAG_DEFS.filter((d) => d.group === group).map((def) => (

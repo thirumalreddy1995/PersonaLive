@@ -296,6 +296,22 @@ export const InspectorPanel: React.FC<InspectorPanelProps> = ({
             />
           </label>
 
+          <label className="flex items-center justify-between p-2 rounded-lg bg-slate-900/60">
+            <span className="text-slate-200">
+              Persona texture size
+              <span className="block text-[10px] text-slate-500 font-normal">Face crop resolution uploaded to the GPU</span>
+            </span>
+            <select
+              value={settings.personaTextureSize}
+              onChange={(e) => onUpdateSettings({ personaTextureSize: Number(e.target.value) as 512 | 1024 | 2048 })}
+              className="bg-slate-950 border border-slate-800 rounded px-2 py-1 text-xs text-slate-200"
+            >
+              <option value={512}>512 px</option>
+              <option value={1024}>1024 px</option>
+              <option value={2048}>2048 px</option>
+            </select>
+          </label>
+
           <label className="flex items-center justify-between cursor-pointer p-2 rounded-lg bg-slate-900/60 hover:bg-slate-900 transition-colors">
             <span className="flex items-center gap-2 text-slate-200">
               <Sun className="w-3.5 h-3.5 text-amber-400" />

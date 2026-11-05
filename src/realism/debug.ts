@@ -30,6 +30,18 @@ export interface RealismDebugState {
   lipFade: number;
   /** Smoothed head pose from the facial transformation matrix when rigidForehead ran (degrees). */
   rigidPose: { yaw: number; pitch: number; roll: number } | null;
+  /** Camera-match loop state when cameraMatch ran (null otherwise). */
+  cameraMatch: {
+    lodBias: number;
+    sharpen: number;
+    noiseSigma: number;
+    driverLaplacian: number | null;
+    outputLaplacian: number | null;
+    driverNoise: number | null;
+    outputNoise: number | null;
+    updates: number;
+  } | null;
+  renderer: 'webgl2' | 'webgl' | 'canvas2d';
   pose: HeadPose;
   isSpeaking: boolean;
   isSmiling: boolean;
@@ -113,6 +125,16 @@ export interface RealismAppHooks {
 }
 
 let enabledMemo: boolean | null = null;
+
+/**
+ * `?rf=` overrides are applied as soon as this module loads (the engine imports it), so flags that
+ * act at construction time (webgl2) see them before the first engine is created.
+ */
+export function applyUrlFlagOverrides() {
+  if (typeof location === 'undefined' || !isRealismDebugEnabled()) return;
+  const overrides = parseRealismFlagsFromSearch(location.search);
+  if (Object.keys(overrides).length) realismFlags.set(overrides);
+}
 
 export function isRealismDebugEnabled(): boolean {
   if (enabledMemo !== null) return enabledMemo;
@@ -388,3 +410,5 @@ export function installRealismWindowHook(app?: RealismAppHooks): RealismWindowHo
   window.__personaLiveRealism = hook;
   return hook;
 }
+
+applyUrlFlagOverrides();
