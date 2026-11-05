@@ -559,10 +559,31 @@ export function sharpnessCheck(output: number | null | undefined, driver: number
   return { driver: d, output: o, gap, tolerance: SHARPNESS_TOLERANCE, pass: gap === null ? null : Math.abs(gap) <= SHARPNESS_TOLERANCE };
 }
 
+/** Texture slide passes when the output's residual exceeds the driver's own by at most this (px/frame). */
+export const SLIDE_TOLERANCE_PX = 0.5;
+
+/** output − driver residual (px/frame); the driver's own forehead sets the floor of the measurement. */
+export function slideCheck(output: number | null | undefined, driver: number | null | undefined): RelativeCheck {
+  const o = finite(output);
+  const d = finite(driver);
+  const gap = o !== null && d !== null ? o - d : null;
+  return { driver: d, output: o, gap, tolerance: SLIDE_TOLERANCE_PX, pass: gap === null ? null : gap <= SLIDE_TOLERANCE_PX };
+}
+
+/** output − driver boundary/inside gradient ratio on the same band; reported, no pass threshold yet. */
+export function seamCheck(output: number | null | undefined, driver: number | null | undefined): RelativeCheck {
+  const o = finite(output);
+  const d = finite(driver);
+  const gap = o !== null && d !== null ? o - d : null;
+  return { driver: d, output: o, gap, tolerance: NaN, pass: null };
+}
+
 export interface RelativeTargets {
   skinToneNeck: RelativeCheck;
   skinToneEars: RelativeCheck;
   sharpness: RelativeCheck;
+  slide: RelativeCheck;
+  seam: RelativeCheck;
 }
 
 export function relativeTargets(s: {
@@ -572,11 +593,17 @@ export function relativeTargets(s: {
   driverCheekVsEars?: number | null;
   sharpnessRatio?: number | null;
   driverSharpnessRatio?: number | null;
+  textureSlidePx?: number | null;
+  driverTextureSlidePx?: number | null;
+  seamRatio?: number | null;
+  driverSeamRatio?: number | null;
 }): RelativeTargets {
   return {
     skinToneNeck: skinToneCheck(s.skinToneCheekVsNeck, s.driverCheekVsNeck),
     skinToneEars: skinToneCheck(s.skinToneCheekVsEars, s.driverCheekVsEars),
     sharpness: sharpnessCheck(s.sharpnessRatio, s.driverSharpnessRatio),
+    slide: slideCheck(s.textureSlidePx, s.driverTextureSlidePx),
+    seam: seamCheck(s.seamRatio, s.driverSeamRatio),
   };
 }
 
@@ -884,6 +911,11 @@ export interface TextureSlide {
   residualPx: number;
   pairs: number;
   blocks: number;
+}
+
+/** The slide metric run on the raw driver video (no persona): the wearer's own forehead against the head. */
+export function driverTextureSlide(frames: BurstFrame[], opts: { search?: number } = {}): TextureSlide | null {
+  return textureSlide(frames.map((f) => ({ output: f.driver, driver: f.driver, landmarks: f.landmarks })), opts);
 }
 
 export function textureSlide(frames: BurstFrame[], opts: { search?: number } = {}): TextureSlide | null {

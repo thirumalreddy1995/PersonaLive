@@ -188,6 +188,8 @@ interface FrameReport {
   sharpness: M.SharpnessMatch;
   driverSharpness: M.SharpnessMatch;
   seam: M.SeamScore;
+  /** The same boundary/inside ratio on the driver frame: the wearer's own face edge. */
+  driverSeam: M.SeamScore;
   mouth: M.MouthFidelity | null;
   foreheadToneStep: M.ForeheadToneStep | null;
   files: { output: string; driver: string; overlay: string | null } | null;
@@ -204,6 +206,7 @@ export interface ClipSummary {
   /** Relative targets: driver value, output value, gap and pass per the plan's acceptance rules. */
   targets: M.RelativeTargets;
   seamRatio: number | null;
+  driverSeamRatio: number | null;
   mouthLipErrorPct: number | null;
   outputFacesDetected: number;
   syntheticTeethCapturedFrames: number;
@@ -214,6 +217,8 @@ export interface ClipSummary {
   foreheadToneStepDelta: number | null;
   flicker: M.Flicker | null;
   textureSlide: M.TextureSlide | null;
+  /** Slide metric on the raw driver video: the floor set by landmark jitter and head motion. */
+  driverTextureSlide: M.TextureSlide | null;
   hairlineAlignment: null;
   hairlineAlignmentNote: string;
   performance: RealismDebugState['profile'] & { window: string; software: boolean };
@@ -355,6 +360,7 @@ async function captureClip(page: Page, args: Args, o: CaptureOptions): Promise<C
       sharpness: M.sharpnessMatch(output, lms),
       driverSharpness: M.sharpnessMatch(driver, lms),
       seam: M.seamScore(output, lms),
+      driverSeam: M.seamScore(driver, lms),
       mouth: M.mouthFidelity(c.outputLandmarks, lms),
       foreheadToneStep: M.foreheadToneStep(output, driver, lms),
       files,
@@ -381,6 +387,7 @@ async function captureClip(page: Page, args: Args, o: CaptureOptions): Promise<C
   // --- Burst metrics -------------------------------------------------------------------------
   let flicker: M.Flicker | null = null;
   let textureSlide: M.TextureSlide | null = null;
+  let driverTextureSlide: M.TextureSlide | null = null;
   let burstInfo: { start: number; frames: number; scale: number } | null = null;
   if (burst && burst.frames.length >= 2) {
     const bf: M.BurstFrame[] = burst.frames.map((f) => ({
@@ -390,6 +397,7 @@ async function captureClip(page: Page, args: Args, o: CaptureOptions): Promise<C
     }));
     flicker = M.flicker(bf);
     textureSlide = M.textureSlide(bf, { search: 6 });
+    driverTextureSlide = M.driverTextureSlide(bf, { search: 6 });
     burstInfo = { start: burst.start, frames: burst.frames.length, scale: burst.scale };
   }
 
@@ -401,12 +409,22 @@ async function captureClip(page: Page, args: Args, o: CaptureOptions): Promise<C
     driverCheekVsEars: M.meanOf(frames.map((f) => f.skinTone?.driverCheekVsEars ?? NaN)),
     sharpnessRatio: M.meanOf(frames.map((f) => f.sharpness.ratio)),
     driverSharpnessRatio: M.meanOf(frames.map((f) => f.driverSharpness.ratio)),
+    seamRatio: M.meanOf(frames.map((f) => f.seam.ratio)),
+    driverSeamRatio: M.meanOf(frames.map((f) => f.driverSeam.ratio)),
+    textureSlidePx: textureSlide?.residualPx ?? null,
+    driverTextureSlidePx: driverTextureSlide?.residualPx ?? null,
   };
   const summary: ClipSummary = {
     frames: frames.length,
-    ...base,
+    skinToneCheekVsNeck: base.skinToneCheekVsNeck,
+    skinToneCheekVsEars: base.skinToneCheekVsEars,
+    driverCheekVsNeck: base.driverCheekVsNeck,
+    driverCheekVsEars: base.driverCheekVsEars,
+    sharpnessRatio: base.sharpnessRatio,
+    driverSharpnessRatio: base.driverSharpnessRatio,
     targets: M.relativeTargets(base),
-    seamRatio: M.meanOf(frames.map((f) => f.seam.ratio)),
+    seamRatio: base.seamRatio,
+    driverSeamRatio: base.driverSeamRatio,
     mouthLipErrorPct: M.meanOf(frames.map((f) => f.mouth?.lipErrorPct ?? NaN)),
     outputFacesDetected: frames.filter((f) => f.outputFaceDetected).length,
     syntheticTeethCapturedFrames: frames.filter((f) => f.syntheticTeeth).length,
@@ -417,6 +435,7 @@ async function captureClip(page: Page, args: Args, o: CaptureOptions): Promise<C
     foreheadToneStepDelta: M.meanOf(frames.map((f) => f.foreheadToneStep?.delta ?? NaN)),
     flicker,
     textureSlide,
+    driverTextureSlide,
     hairlineAlignment: null,
     hairlineAlignmentNote: 'needs the R4 hair mask; personaTopEdge() is ready for it',
     performance: { ...finalState.profile, window: 'last 300 frames of the replay', software: args.software },
@@ -449,6 +468,8 @@ function printSummary(label: string, s: ClipSummary) {
   console.log(`    skin tone vs neck: ${check(t.skinToneNeck)} (±${t.skinToneNeck.tolerance} ΔE)`);
   console.log(`    skin tone vs ears: ${check(t.skinToneEars)} (±${t.skinToneEars.tolerance} ΔE)`);
   console.log(`    sharpness ratio:   ${check(t.sharpness)} (±${Math.round(t.sharpness.tolerance * 100)}%)`);
+  console.log(`    texture slide:     ${check(t.slide)} (gap ≤ ${t.slide.tolerance} px/frame)`);
+  console.log(`    seam ratio:        ${check(t.seam)}`);
   console.log(
     `    seam ${fmt(s.seamRatio)}  lip err ${fmt(s.mouthLipErrorPct)}%  teeth ${s.syntheticTeethFramesWholeClip}/${s.framesRenderedWholeClip}  ` +
       `forehead step out ${fmt(s.foreheadToneStepOutput)} drv ${fmt(s.foreheadToneStepDriver)} Δ ${fmt(s.foreheadToneStepDelta)}  ` +
@@ -464,11 +485,13 @@ export const GRID_METRICS: Array<{ key: string; label: string; pick: (s: ClipSum
   { key: 'skinToneEarsGapAbs', label: '|skin tone gap vs ears| (ΔE)', pick: (s) => abs(s.targets.skinToneEars.gap) },
   { key: 'sharpnessGapAbs', label: '|sharpness gap| (fraction)', pick: (s) => abs(s.targets.sharpness.gap) },
   { key: 'seamRatio', label: 'seam ratio', pick: (s) => s.seamRatio },
+  { key: 'seamGap', label: 'seam gap (output − driver)', pick: (s) => s.targets.seam?.gap ?? null },
   { key: 'mouthLipErrorPct', label: 'lip error (% face width)', pick: (s) => s.mouthLipErrorPct },
   { key: 'syntheticTeethShare', label: 'frames with synthetic teeth (share)', pick: (s) => (s.framesRenderedWholeClip ? s.syntheticTeethFramesWholeClip / s.framesRenderedWholeClip : null) },
   { key: 'foreheadToneStepDelta', label: 'forehead tone step Δ (ΔE)', pick: (s) => s.foreheadToneStepDelta },
   { key: 'flickerDelta', label: 'flicker Δ', pick: (s) => s.flicker?.delta ?? null },
   { key: 'textureSlidePx', label: 'texture slide (px/frame)', pick: (s) => s.textureSlide?.residualPx ?? null },
+  { key: 'slideGapPx', label: 'texture slide gap (output − driver, px/frame)', pick: (s) => s.targets.slide?.gap ?? null },
 ];
 
 function abs(v: number | null): number | null {

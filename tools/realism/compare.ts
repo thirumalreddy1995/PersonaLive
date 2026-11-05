@@ -12,10 +12,20 @@ import fs from 'node:fs';
 import path from 'node:path';
 import { REVIEW_DIR } from './session.ts';
 
+interface Check {
+  driver: number | null;
+  output: number | null;
+  gap: number | null;
+  pass: boolean | null;
+}
+
 interface Targets {
-  skinToneNeck: { driver: number | null; output: number | null; gap: number | null; pass: boolean | null };
-  skinToneEars: { driver: number | null; output: number | null; gap: number | null; pass: boolean | null };
-  sharpness: { driver: number | null; output: number | null; gap: number | null; pass: boolean | null };
+  skinToneNeck: Check;
+  skinToneEars: Check;
+  sharpness: Check;
+  /** Present from R2 on (driver-side controls). */
+  slide?: Check;
+  seam?: Check;
 }
 
 interface Summary {
@@ -58,6 +68,7 @@ export interface CompareRow {
 
 export const COMPARE_ROWS: CompareRow[] = [
   { key: 'textureSlide', label: 'texture slide (px/frame)', pick: (s) => s.textureSlide?.residualPx ?? null, higherIsWorse: true, noise: 0.25 },
+  { key: 'slideGap', label: 'texture slide gap (output − driver)', pick: (s) => s.targets.slide?.gap ?? null, higherIsWorse: true, noise: 0.25 },
   { key: 'flicker', label: 'flicker Δ (output − driver)', pick: (s) => s.flicker?.delta ?? null, higherIsWorse: true, noise: 0.6 },
   { key: 'teeth', label: 'synthetic-teeth frames (share)', pick: (s) => (s.framesRenderedWholeClip ? s.syntheticTeethFramesWholeClip / s.framesRenderedWholeClip : null), higherIsWorse: true, noise: 0.02 },
   { key: 'skinNeckGap', label: 'skin tone gap vs neck (ΔE)', pick: (s) => s.targets.skinToneNeck.gap, higherIsWorse: true, abs: true, noise: 0.5 },
@@ -66,6 +77,7 @@ export const COMPARE_ROWS: CompareRow[] = [
   { key: 'foreheadDelta', label: 'forehead step Δ (output − driver)', pick: (s) => s.foreheadToneStepDelta, higherIsWorse: true, abs: true, noise: 0.5 },
   { key: 'foreheadOut', label: 'forehead step output (ΔE)', pick: (s) => s.foreheadToneStepOutput, higherIsWorse: true, noise: 0.5 },
   { key: 'seam', label: 'seam ratio', pick: (s) => s.seamRatio, higherIsWorse: true, noise: 0.1 },
+  { key: 'seamGap', label: 'seam gap (output − driver)', pick: (s) => s.targets.seam?.gap ?? null, higherIsWorse: true, noise: 0.1 },
   { key: 'lipErr', label: 'lip error (% face width)', pick: (s) => s.mouthLipErrorPct, higherIsWorse: true, noise: 0.3 },
   { key: 'fps', label: 'fps', pick: (s) => s.performance?.fps ?? null, higherIsWorse: false, noise: 2, digits: 1 },
   { key: 'p95', label: 'p95 frame ms', pick: (s) => s.performance?.frameP95Ms ?? null, higherIsWorse: true, noise: 2, digits: 1 },
@@ -124,6 +136,8 @@ const GRID_NOISE: Record<string, number> = {
   foreheadToneStepDelta: 0.5,
   flickerDelta: 0.6,
   textureSlidePx: 0.25,
+  slideGapPx: 0.25,
+  seamGap: 0.1,
 };
 
 export interface GridComparison {

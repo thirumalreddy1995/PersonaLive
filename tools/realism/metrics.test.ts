@@ -28,6 +28,9 @@ import {
   relativeTargets,
   sharpnessCheck,
   skinToneCheck,
+  slideCheck,
+  seamCheck,
+  driverTextureSlide,
   trimAtHairline,
   worstOf,
 } from './metrics.ts';
@@ -399,4 +402,29 @@ test('medianOf, percentileOf and worstOf', () => {
   const worst = worstOf([{ key: 'a', value: 1 }, { key: 'b', value: 5 }, { key: 'c', value: 3 }, { key: 'd', value: NaN }], 2);
   assert.deepEqual(worst.map((w) => w.key), ['b', 'c']);
   assert.deepEqual(worstOf([{ key: 'a', value: 1 }, { key: 'b', value: 5 }], 1, false).map((w) => w.key), ['a']);
+});
+
+test('slideCheck and seamCheck report driver, output and gap', () => {
+  const s = slideCheck(2.4, 2.0);
+  assert.ok(Math.abs(s.gap! - 0.4) < 1e-9);
+  assert.equal(s.pass, true);
+  assert.equal(slideCheck(2.6, 2.0).pass, false);
+  assert.equal(slideCheck(null, 2).pass, null);
+  const m = seamCheck(2.3, 1.8);
+  assert.ok(Math.abs(m.gap! - 0.5) < 1e-9);
+  assert.equal(m.pass, null);
+  const t = relativeTargets({ textureSlidePx: 1, driverTextureSlidePx: 0.8, seamRatio: 2, driverSeamRatio: 1.5 });
+  assert.equal(t.slide.pass, true);
+  assert.ok(Math.abs(t.seam.gap! - 0.5) < 1e-9);
+});
+
+test('driverTextureSlide runs the slide metric on the driver frames alone', () => {
+  const tex = texture(11);
+  const frames = [0, 2, 4].map((shift) => {
+    const img = image((x, y) => grey(tex(x - shift, y)));
+    return { output: image(() => grey(128)), driver: img, landmarks: syntheticFace(shift, 0) };
+  });
+  const d = driverTextureSlide(frames, { search: 6 });
+  assert.ok(d, 'driver slide computed');
+  assert.ok(d!.residualPx < 0.6, `driver slide ${d!.residualPx}`);
 });
