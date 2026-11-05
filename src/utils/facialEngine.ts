@@ -128,6 +128,8 @@ export class RealtimeFacialEngine {
     chin: [1, 1, 1],
   };
   private frameIndex = 0;
+  /** frameIndex when the debug counters were last reset, so framesRendered is per replay. */
+  private frameIndexAtReset = 0;
 
   // Where the transformed pane sits on the canvas (used to place the mesh overlay)
   private paneTransform = { x: 0, y: 0, scale: 1 };
@@ -1295,7 +1297,7 @@ export class RealtimeFacialEngine {
           keyframeId: this.currentKeyframeId,
           keyframeCount: this.referenceBank.getKeyframes().length,
           personaStatus: this.status.persona,
-          framesRendered: this.frameIndex,
+          framesRendered: this.frameIndex - this.frameIndexAtReset,
           syntheticTeethFrames: this.syntheticTeethFrames,
           videoTime: v ? v.currentTime : null,
           videoDuration: v && Number.isFinite(v.duration) ? v.duration : null,
@@ -1368,6 +1370,21 @@ export class RealtimeFacialEngine {
       resetPerf: () => {
         this.profiler.reset();
         this.syntheticTeethFrames = 0;
+        this.frameIndexAtReset = this.frameIndex;
+      },
+      detectStill: async (image) => {
+        if (!this.tracker.ready) return null;
+        const w = image instanceof HTMLImageElement ? image.naturalWidth : image.width;
+        const h = image instanceof HTMLImageElement ? image.naturalHeight : image.height;
+        const { faces } = await this.tracker.detectImage(image);
+        const face = faces[0];
+        if (!face) return null;
+        const px = new Float32Array(face.landmarks.length);
+        for (let i = 0; i < face.landmarks.length; i += 2) {
+          px[i] = face.landmarks[i] * w;
+          px[i + 1] = face.landmarks[i + 1] * h;
+        }
+        return px;
       },
     };
   }

@@ -15,7 +15,7 @@ import {
   realismFlags,
 } from './flags.ts';
 import type { ProfileSummary } from './profiler.ts';
-import type { HeadPose } from '../types/index.ts';
+import type { AuthorizedPersona, HeadPose, PersonaCategory } from '../types/index.ts';
 
 export interface RealismDebugState {
   source: string;
@@ -94,6 +94,15 @@ export interface RealismEngineDebugApi {
   getBuffer(name: RealismBufferName): HTMLCanvasElement | null;
   getVideo(): HTMLVideoElement | null;
   resetPerf(): void;
+  /** Runs the landmarker on a still image; returns 478 landmarks in image pixels, or null. */
+  detectStill(image: HTMLImageElement | HTMLCanvasElement): Promise<Float32Array | null>;
+}
+
+/** What the app lets the debug surface do with its persona state. */
+export interface RealismAppHooks {
+  addPersona(persona: AuthorizedPersona): void;
+  activatePersona(persona: AuthorizedPersona): void;
+  setSubjectCategory(category: PersonaCategory): void;
 }
 
 let enabledMemo: boolean | null = null;
@@ -158,8 +167,17 @@ export interface SerializedBurst {
   frames: Array<{ t: number; frameIndex: number; outputPng: string; driverPng: string; landmarks: number[] }>;
 }
 
+export interface LoadPersonaSpec {
+  name: string;
+  category: PersonaCategory;
+  /** Image as a data URL (PNG/JPEG/WebP). */
+  dataUrl: string;
+  id?: string;
+  role?: string;
+}
+
 export interface RealismWindowHook {
-  version: 1;
+  version: 2;
   flags: {
     defs: typeof REALISM_FLAG_DEFS;
     get(): RealismFlags;
@@ -179,6 +197,10 @@ export interface RealismWindowHook {
   seek(time: number): Promise<boolean>;
   play(): Promise<boolean>;
   pause(): boolean;
+  /** Landmarks (image pixels, 478 × xy) of a still image given as a data URL, or null. */
+  detectImage(dataUrl: string): Promise<{ width: number; height: number; landmarks: number[] } | null>;
+  /** Adds a persona from an image and makes it active (test personas for the review grid). */
+  loadPersona(spec: LoadPersonaSpec): Promise<string>;
 }
 
 declare global {
@@ -191,16 +213,31 @@ function png(canvas: HTMLCanvasElement): string {
   return canvas.toDataURL('image/png');
 }
 
-/** Installs `window.__personaLiveRealism` once and applies `?rf=` flag overrides from the URL. */
-export function installRealismWindowHook(): RealismWindowHook | null {
+function loadImage(src: string): Promise<HTMLImageElement> {
+  return new Promise((resolve, reject) => {
+    const img = new Image();
+    img.onload = () => resolve(img);
+    img.onerror = () => reject(new Error('image could not be decoded'));
+    img.src = src;
+  });
+}
+
+let appHooks: RealismAppHooks | null = null;
+
+/**
+ * Installs `window.__personaLiveRealism` once and applies `?rf=` flag overrides from the URL.
+ * Calling it again only refreshes the app hooks.
+ */
+export function installRealismWindowHook(app?: RealismAppHooks): RealismWindowHook | null {
   if (typeof window === 'undefined' || !isRealismDebugEnabled()) return null;
+  if (app) appHooks = app;
   if (window.__personaLiveRealism) return window.__personaLiveRealism;
 
   const overrides = parseRealismFlagsFromSearch(location.search);
   if (Object.keys(overrides).length) realismFlags.set(overrides);
 
   const hook: RealismWindowHook = {
-    version: 1,
+    version: 2,
     flags: {
       defs: REALISM_FLAG_DEFS,
       get: () => realismFlags.get(),
@@ -284,6 +321,46 @@ export function installRealismWindowHook(): RealismWindowHook | null {
       if (!v) return false;
       v.pause();
       return true;
+    },
+    detectImage: async (dataUrl) => {
+      if (!activeEngine) return null;
+      const img = await loadImage(dataUrl);
+      const landmarks = await activeEngine.detectStill(img);
+      return landmarks ? { width: img.naturalWidth, height: img.naturalHeight, landmarks: Array.from(landmarks) } : null;
+    },
+    loadPersona: async (spec) => {
+      if (!appHooks) throw new Error('the app has not registered its persona hooks');
+      const img = await loadImage(spec.dataUrl);
+      const id = spec.id ?? `persona-test-${spec.name.replace(/[^a-z0-9]+/gi, '-').toLowerCase()}`;
+      const timestamp = new Date().toISOString();
+      const persona: AuthorizedPersona = {
+        id,
+        name: spec.name,
+        role: spec.role ?? 'Review test persona',
+        category: spec.category,
+        imageUrl: spec.dataUrl,
+        createdAt: timestamp.slice(0, 10),
+        qualityScore: 0,
+        metrics: {
+          resolution: `${img.naturalWidth} × ${img.naturalHeight} px`,
+          sharpness: 0,
+          lighting: 'Acceptable',
+          orientation: 'Frontal',
+          obstruction: 'None',
+          singleFaceVerified: true,
+        },
+        consent: {
+          signerName: 'synthetic test persona (no real person)',
+          authorizedUsage: 'Realism review only',
+          timestamp,
+          signatureHash: 'REVIEW-TEST-PERSONA',
+          verified: true,
+        },
+      };
+      appHooks.setSubjectCategory(spec.category);
+      appHooks.addPersona(persona);
+      appHooks.activatePersona(persona);
+      return id;
     },
   };
   window.__personaLiveRealism = hook;

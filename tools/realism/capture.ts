@@ -2,40 +2,54 @@
  * Realism capture tool (docs/REALISM_PLAN.md, "Capture script").
  *
  *   npm run realism:capture -- --clip A [--flags oralCavity=0,catchlights=0] [--run baseline]
+ *   npm run realism:capture -- --clip all --personas all --run baseline        # persona grid
  *
- * Renders a driver clip through the built app headlessly (Playwright + Chrome), captures PNG
+ * Renders driver clips through the built app headlessly (Playwright + Chrome), captures PNG
  * frames at fixed timestamps, re-detects landmarks on the output, computes the review metrics,
- * writes a contact sheet with 2x face crops and merges the numbers into
+ * writes contact sheets with 2x face crops and merges the numbers into
  * realism-review/out/<run>/report.json. Frames never leave realism-review/out (gitignored).
  *
+ * Without --personas the app's default persona is used and every clip gets a full frame dump
+ * (report.clips). With --personas every clip is run for every persona of the test set
+ * (realism-review/personas/manifest.json, see personas-select.ts); per persona × clip only the
+ * contact sheet is written (add --frames for the PNGs), and report.grid holds the per-persona
+ * metrics, the median and the worst personas per metric, plus grid.png (rows = personas,
+ * columns = clips).
+ *
  * Options
- *   --clip <A..E | path>      clip label (realism-review/clips/<label>.{webm,mp4,mov,mkv}) or a file path
+ *   --clip <A..E | path | list | all>   clip label(s) (realism-review/clips/<label>.{webm,mp4,mov,mkv}), a file path, or "all" (A–E)
+ *   --personas <all | ids | dir>        persona test set: all manifest entries, a comma list of ids, or a folder of images
+ *   --category <men|women>              category for personas given as a folder without a manifest (default men)
+ *   --frames                            write the frame PNGs in grid mode too
  *   --flags <string>          realism flag overrides, e.g. "oralCavity=0,syntheticSuite=off"
  *   --run <name>              output folder name (default: <date>-<flags>)
- *   --times <s,s,...>         capture timestamps in seconds (default: 8 evenly spaced)
+ *   --times <s,s,...>         capture timestamps in seconds (default: 8 evenly spaced; 4 in grid mode)
  *   --burst <start:count>     consecutive-frame burst for flicker/texture slide (default: 45% of clip, 16 frames)
- *   --persona <name>          click a persona card by (partial) name before capturing
+ *   --persona <name>          click a built-in persona card by (partial) name before capturing
  *   --url <http://...>        use an already running app instead of starting `vite preview`
  *   --browser <chrome|chromium|msedge>   browser channel (default chrome: it has H.264)
  *   --software                force SwiftShader instead of the GPU
  *   --headed                  show the browser window
  */
-import { spawn, ChildProcess, execSync } from 'node:child_process';
+import { ChildProcess, execSync } from 'node:child_process';
 import fs from 'node:fs';
-import http from 'node:http';
 import path from 'node:path';
-import { chromium, Browser, Page } from 'playwright';
+import { Browser, Page } from 'playwright';
 import { defaultRealismFlags, describeRealismFlags, parseRealismFlagString } from '../../src/realism/flags.ts';
 import type { RealismDebugState, SerializedBurst, SerializedCapture } from '../../src/realism/debug.ts';
 import * as M from './metrics.ts';
-import { compositeOnChecker, contactSheet, crop, decodePngDataUrl, scaleImage, writeDataUrlPng, writePng } from './png.ts';
+import { SheetRow, blank, blit, compositeOnChecker, contactSheet, crop, decodeImageFile, decodePngDataUrl, drawText, imageDataUrl, scaleImage, writeDataUrlPng, writePng } from './png.ts';
+import { REVIEW_DIR, ROOT, driveAppShell, hookState, launchBrowser, sleep, startPreview, waitForHookState } from './session.ts';
+import { PersonaEntry, loadPersonaSet } from './personaSet.ts';
 
-const ROOT = path.resolve(path.dirname(new URL(import.meta.url).pathname.replace(/^\/([A-Za-z]:)/, '$1')), '..', '..');
-const REVIEW_DIR = path.join(ROOT, 'realism-review');
 const CLIP_EXTENSIONS = ['.webm', '.mp4', '.mov', '.mkv', '.y4m'];
+const CLIP_LABELS = ['A', 'B', 'C', 'D', 'E'];
 
 interface Args {
-  clip: string;
+  clips: string[];
+  personas: string | null;
+  category: 'men' | 'women';
+  frames: boolean;
   flags: string;
   run: string | null;
   times: number[] | null;
@@ -49,7 +63,10 @@ interface Args {
 
 function parseArgs(argv: string[]): Args {
   const args: Args = {
-    clip: '',
+    clips: [],
+    personas: null,
+    category: 'men',
+    frames: false,
     flags: '',
     run: null,
     times: null,
@@ -69,7 +86,19 @@ function parseArgs(argv: string[]): Args {
     };
     switch (a) {
       case '--clip':
-        args.clip = next();
+        args.clips.push(...next().split(',').map((s) => s.trim()).filter(Boolean));
+        break;
+      case '--personas':
+        args.personas = next();
+        break;
+      case '--category': {
+        const c = next();
+        if (c !== 'men' && c !== 'women') throw new Error('--category must be men or women');
+        args.category = c;
+        break;
+      }
+      case '--frames':
+        args.frames = true;
         break;
       case '--flags':
         args.flags = next();
@@ -112,7 +141,7 @@ function parseArgs(argv: string[]): Args {
         throw new Error(`Unknown option ${a}`);
     }
   }
-  if (!args.clip) throw new Error('--clip is required (A..E or a path)');
+  if (!args.clips.length) throw new Error('--clip is required (A..E, all, or a path)');
   return args;
 }
 
@@ -131,109 +160,14 @@ function resolveClip(clip: string): { label: string; file: string } {
   return { label: path.basename(file, path.extname(file)), file };
 }
 
-async function waitForHttp(url: string, timeoutMs: number) {
-  const started = Date.now();
-  while (Date.now() - started < timeoutMs) {
-    const ok = await new Promise<boolean>((resolve) => {
-      const req = http.get(url, (res) => {
-        res.resume();
-        resolve((res.statusCode ?? 500) < 400);
-      });
-      req.on('error', () => resolve(false));
-      req.setTimeout(2000, () => {
-        req.destroy();
-        resolve(false);
-      });
-    });
-    if (ok) return;
-    await sleep(300);
-  }
-  throw new Error(`Server at ${url} did not answer within ${timeoutMs} ms`);
+function resolveClips(inputs: string[]): Array<{ label: string; file: string }> {
+  const names = inputs.flatMap((c) => (c === 'all' ? CLIP_LABELS : [c]));
+  const clips = names.map(resolveClip);
+  const seen = new Set<string>();
+  return clips.filter((c) => !seen.has(c.label) && seen.add(c.label));
 }
 
-function sleep(ms: number) {
-  return new Promise((r) => setTimeout(r, ms));
-}
-
-async function startPreview(): Promise<{ url: string; child: ChildProcess }> {
-  if (!fs.existsSync(path.join(ROOT, 'dist', 'index.html'))) {
-    throw new Error('dist/index.html not found. Run `npm run build` first (the capture uses the production build).');
-  }
-  const port = 4300 + Math.floor(Math.random() * 200);
-  const viteBin = path.join(ROOT, 'node_modules', 'vite', 'bin', 'vite.js');
-  const child = spawn(process.execPath, [viteBin, 'preview', '--port', String(port), '--strictPort', '--host', '127.0.0.1'], {
-    cwd: ROOT,
-    stdio: ['ignore', 'pipe', 'pipe'],
-    env: { ...process.env, DISABLE_HMR: 'true' },
-  });
-  child.stdout?.on('data', () => undefined);
-  child.stderr?.on('data', (d) => process.stderr.write(`[vite] ${d}`));
-  const url = `http://127.0.0.1:${port}/`;
-  await waitForHttp(url, 30000);
-  return { url, child };
-}
-
-async function launchBrowser(args: Args): Promise<Browser> {
-  const chromeArgs = [
-    '--ignore-gpu-blocklist',
-    '--enable-gpu-rasterization',
-    '--autoplay-policy=no-user-gesture-required',
-    '--use-fake-ui-for-media-stream',
-  ];
-  if (args.software) chromeArgs.push('--use-gl=angle', '--use-angle=swiftshader', '--enable-unsafe-swiftshader');
-  const channels = args.browser === 'chromium' ? [undefined] : [args.browser, undefined];
-  let lastError: unknown = null;
-  for (const channel of channels) {
-    try {
-      return await chromium.launch({ channel, headless: !args.headed, args: chromeArgs });
-    } catch (err) {
-      lastError = err;
-      console.warn(`Could not launch ${channel ?? 'bundled chromium'}: ${err instanceof Error ? err.message.split('\n')[0] : err}`);
-    }
-  }
-  throw new Error(`No browser could be launched. Install Chrome, or run \`npx playwright install chromium\`. Last error: ${lastError}`);
-}
-
-async function hookState(page: Page): Promise<RealismDebugState | null> {
-  return page.evaluate(() => (window.__personaLiveRealism ? window.__personaLiveRealism.state() : null));
-}
-
-async function waitFor(page: Page, label: string, predicate: (s: RealismDebugState | null) => boolean, timeoutMs: number) {
-  const started = Date.now();
-  let last: RealismDebugState | null = null;
-  while (Date.now() - started < timeoutMs) {
-    last = await hookState(page);
-    if (predicate(last)) return last;
-    // The model download sometimes fails on the first try; the UI offers a retry.
-    const retry = page.getByRole('button', { name: /Try Again/i }).first();
-    if (await retry.isVisible().catch(() => false)) await retry.click().catch(() => undefined);
-    await sleep(250);
-  }
-  throw new Error(`Timed out waiting for ${label}. Last state: ${JSON.stringify(last && { ...last, profile: undefined, flags: undefined })}`);
-}
-
-async function driveApp(page: Page, url: string, args: Args, clipFile: string, flagString: string) {
-  const query = new URLSearchParams({ realism: '1' });
-  if (flagString) query.set('rf', flagString);
-  await page.goto(`${url}?${query.toString()}`, { waitUntil: 'load' });
-  await page.getByRole('button', { name: /demo administrator|Sign In as Admin/i }).click({ timeout: 30000 });
-  await page.getByRole('button', { name: 'AI Output Only' }).click({ timeout: 30000 });
-  await page.waitForFunction(() => Boolean(window.__personaLiveRealism), null, { timeout: 30000 });
-
-  if (args.persona) {
-    await page.getByText(args.persona, { exact: false }).first().click({ timeout: 10000 });
-  }
-
-  const input = page.locator('input[data-realism-clip]');
-  await input.waitFor({ state: 'attached', timeout: 10000 });
-  await input.setInputFiles(clipFile);
-
-  await waitFor(page, 'clip source', (s) => s?.source === 'file', 30000);
-  await waitFor(page, 'persona ready', (s) => s?.personaStatus === 'ready', 120000);
-  await waitFor(page, 'face tracked on the clip', (s) => !!s?.faceVisible, 60000);
-  const state = await waitFor(page, 'video duration', (s) => (s?.videoDuration ?? 0) > 0, 15000);
-  return state!;
-}
+// --- Per-frame report -------------------------------------------------------------------------------
 
 interface FrameReport {
   t: number;
@@ -249,7 +183,49 @@ interface FrameReport {
   seam: M.SeamScore;
   mouth: M.MouthFidelity | null;
   foreheadToneStep: M.ForeheadToneStep | null;
-  files: { output: string; driver: string; overlay: string | null };
+  files: { output: string; driver: string; overlay: string | null } | null;
+}
+
+export interface ClipSummary {
+  frames: number;
+  skinToneCheekVsNeck: number | null;
+  skinToneCheekVsEars: number | null;
+  driverCheekVsNeck: number | null;
+  driverCheekVsEars: number | null;
+  sharpnessRatio: number | null;
+  driverSharpnessRatio: number | null;
+  /** Relative targets: driver value, output value, gap and pass per the plan's acceptance rules. */
+  targets: M.RelativeTargets;
+  seamRatio: number | null;
+  mouthLipErrorPct: number | null;
+  outputFacesDetected: number;
+  syntheticTeethCapturedFrames: number;
+  syntheticTeethFramesWholeClip: number;
+  framesRenderedWholeClip: number;
+  foreheadToneStepOutput: number | null;
+  foreheadToneStepDriver: number | null;
+  foreheadToneStepDelta: number | null;
+  flicker: M.Flicker | null;
+  textureSlide: M.TextureSlide | null;
+  hairlineAlignment: null;
+  hairlineAlignmentNote: string;
+  performance: RealismDebugState['profile'] & { window: string; software: boolean };
+}
+
+interface ClipReport {
+  file: string;
+  duration: number;
+  capturedAt: string;
+  flags: string;
+  flagValues: Record<string, boolean>;
+  times: number[];
+  burst: { start: number; frames: number; scale: number } | null;
+  incomplete: { captures: number; burst: number } | null;
+  pageErrors: string[];
+  summary: ClipSummary;
+  frames: FrameReport[];
+  /** Face crop of the capture nearest the middle of the clip (grid tiles). */
+  tile?: M.RgbaImage;
 }
 
 function r3(v: number | null | undefined): number | null {
@@ -275,19 +251,299 @@ function gitCommit(): string | null {
   }
 }
 
+// --- One clip through the live pipeline -------------------------------------------------------------
+
+async function loadClip(page: Page, clipFile: string): Promise<RealismDebugState> {
+  const input = page.locator('input[data-realism-clip]');
+  await input.waitFor({ state: 'attached', timeout: 10000 });
+  await input.setInputFiles(clipFile);
+  await waitForHookState(page, 'clip source', (s) => s?.source === 'file', 30000);
+  await waitForHookState(page, 'persona ready', (s) => s?.personaStatus === 'ready', 120000);
+  await waitForHookState(page, 'face tracked on the clip', (s) => !!s?.faceVisible, 60000);
+  return (await waitForHookState(page, 'video duration', (s) => (s?.videoDuration ?? 0) > 0, 15000))!;
+}
+
+interface CaptureOptions {
+  clipLabel: string;
+  clipFile: string;
+  clipDir: string;
+  sheetTitle: string;
+  flagString: string;
+  flagValues: Record<string, boolean>;
+  writeFrames: boolean;
+  defaultFrames: number;
+  pageErrors: string[];
+}
+
+async function captureClip(page: Page, args: Args, o: CaptureOptions): Promise<ClipReport> {
+  const ready = await loadClip(page, o.clipFile);
+  const duration = ready.videoDuration!;
+  const n = o.defaultFrames;
+  const times = (args.times ?? Array.from({ length: n }, (_, i) => duration * (0.1 + (0.8 * i) / Math.max(1, n - 1)))).filter((t) => t < duration - 0.1);
+  const burstStart = args.burst.start ?? duration * 0.45;
+  console.log(`  ${o.clipLabel}: ${duration.toFixed(2)} s, capturing at ${times.map((t) => t.toFixed(2)).join(', ')} s; burst from ${burstStart.toFixed(2)} s × ${args.burst.count}`);
+
+  // Replay from the start with everything scheduled, so the temporal filters see the clip as live.
+  await page.evaluate(async ({ times, burstStart, burstCount }) => {
+    const hook = window.__personaLiveRealism!;
+    hook.pause();
+    await hook.seek(0);
+    hook.resetPerf();
+    hook.scheduleCaptures(times);
+    hook.scheduleBurst(burstStart, burstCount, 0.5);
+    await hook.play();
+  }, { times, burstStart, burstCount: args.burst.count });
+
+  const deadline = Date.now() + (duration + 5) * 1000;
+  while (Date.now() < deadline) {
+    const pending = await page.evaluate(() => window.__personaLiveRealism!.pending());
+    if (pending && pending.captures === 0 && pending.burst === 0) break;
+    await sleep(250);
+  }
+  await sleep(300);
+  const finalState = (await hookState(page))!;
+  const pending = await page.evaluate(() => window.__personaLiveRealism!.pending());
+  await page.evaluate(() => window.__personaLiveRealism!.pause());
+
+  const captures = (await page.evaluate(() => window.__personaLiveRealism!.takeCaptures())) as SerializedCapture[];
+  const burst = (await page.evaluate(() => window.__personaLiveRealism!.takeBurst())) as SerializedBurst | null;
+  fs.mkdirSync(o.clipDir, { recursive: true });
+
+  // --- Per-frame metrics and files -----------------------------------------------------------
+  const frames: FrameReport[] = [];
+  const sheetRows: SheetRow[] = [];
+  let tile: M.RgbaImage | undefined;
+  let tileDistance = Infinity;
+  for (const c of captures) {
+    const tag = `t${c.t.toFixed(2).replace('.', '_')}`;
+    let files: FrameReport['files'] = null;
+    if (o.writeFrames) {
+      const f = {
+        output: path.join(o.clipDir, `${tag}-output.png`),
+        driver: path.join(o.clipDir, `${tag}-driver.png`),
+        overlay: c.overlayPng ? path.join(o.clipDir, `${tag}-overlay.png`) : null,
+      };
+      writeDataUrlPng(f.output, c.outputPng);
+      writeDataUrlPng(f.driver, c.driverPng);
+      if (f.overlay && c.overlayPng) writeDataUrlPng(f.overlay, c.overlayPng);
+      fs.writeFileSync(
+        path.join(o.clipDir, `${tag}-landmarks.json`),
+        JSON.stringify({ t: c.t, driver: c.landmarks, warp: c.warpPositions, output: c.outputLandmarks })
+      );
+      files = { output: path.relative(ROOT, f.output), driver: path.relative(ROOT, f.driver), overlay: f.overlay ? path.relative(ROOT, f.overlay) : null };
+    }
+    const output = decodePngDataUrl(c.outputPng);
+    const driver = decodePngDataUrl(c.driverPng);
+    const overlay = c.overlayPng ? decodePngDataUrl(c.overlayPng) : null;
+    const lms = c.landmarks;
+    frames.push({
+      t: c.t,
+      frameIndex: c.frameIndex,
+      mar: c.mar,
+      pose: c.pose,
+      keyframeId: c.keyframeId,
+      syntheticTeeth: c.syntheticTeeth,
+      outputFaceDetected: !!c.outputLandmarks,
+      skinTone: M.skinToneMatch(output, driver, lms),
+      sharpness: M.sharpnessMatch(output, lms),
+      driverSharpness: M.sharpnessMatch(driver, lms),
+      seam: M.seamScore(output, lms),
+      mouth: M.mouthFidelity(c.outputLandmarks, lms),
+      foreheadToneStep: M.foreheadToneStep(output, driver, lms),
+      files,
+    });
+
+    // Contact sheet row: 2x face crops of driver, output and persona layer.
+    const regions = M.faceRegions(lms, output.width, output.height);
+    const box = M.expandRect(regions.ovalBox, 1.5, 1.45);
+    const outputCrop = crop(output, box);
+    const tiles = [
+      { label: 'driver', image: scaleImage(crop(driver, box), 2) },
+      { label: 'output', image: scaleImage(outputCrop, 2) },
+    ];
+    if (overlay) tiles.push({ label: 'persona layer', image: scaleImage(compositeOnChecker(crop(overlay, box)), 2) });
+    sheetRows.push({ label: `${c.t.toFixed(2)}s`, tiles });
+    const d = Math.abs(c.t - duration / 2);
+    if (d < tileDistance) {
+      tileDistance = d;
+      tile = outputCrop;
+    }
+  }
+  if (sheetRows.length) writePng(path.join(o.clipDir, 'contact.png'), contactSheet(`${o.sheetTitle}  flags: ${o.flagString}`, sheetRows));
+
+  // --- Burst metrics -------------------------------------------------------------------------
+  let flicker: M.Flicker | null = null;
+  let textureSlide: M.TextureSlide | null = null;
+  let burstInfo: { start: number; frames: number; scale: number } | null = null;
+  if (burst && burst.frames.length >= 2) {
+    const bf: M.BurstFrame[] = burst.frames.map((f) => ({
+      output: decodePngDataUrl(f.outputPng),
+      driver: decodePngDataUrl(f.driverPng),
+      landmarks: f.landmarks,
+    }));
+    flicker = M.flicker(bf);
+    textureSlide = M.textureSlide(bf, { search: 6 });
+    burstInfo = { start: burst.start, frames: burst.frames.length, scale: burst.scale };
+  }
+
+  // --- Summary ---------------------------------------------------------------------------------
+  const base = {
+    skinToneCheekVsNeck: M.meanOf(frames.map((f) => f.skinTone?.cheekVsNeck ?? NaN)),
+    skinToneCheekVsEars: M.meanOf(frames.map((f) => f.skinTone?.cheekVsEars ?? NaN)),
+    driverCheekVsNeck: M.meanOf(frames.map((f) => f.skinTone?.driverCheekVsNeck ?? NaN)),
+    driverCheekVsEars: M.meanOf(frames.map((f) => f.skinTone?.driverCheekVsEars ?? NaN)),
+    sharpnessRatio: M.meanOf(frames.map((f) => f.sharpness.ratio)),
+    driverSharpnessRatio: M.meanOf(frames.map((f) => f.driverSharpness.ratio)),
+  };
+  const summary: ClipSummary = {
+    frames: frames.length,
+    ...base,
+    targets: M.relativeTargets(base),
+    seamRatio: M.meanOf(frames.map((f) => f.seam.ratio)),
+    mouthLipErrorPct: M.meanOf(frames.map((f) => f.mouth?.lipErrorPct ?? NaN)),
+    outputFacesDetected: frames.filter((f) => f.outputFaceDetected).length,
+    syntheticTeethCapturedFrames: frames.filter((f) => f.syntheticTeeth).length,
+    syntheticTeethFramesWholeClip: finalState.syntheticTeethFrames,
+    framesRenderedWholeClip: finalState.framesRendered,
+    foreheadToneStepOutput: M.meanOf(frames.map((f) => f.foreheadToneStep?.output ?? NaN)),
+    foreheadToneStepDriver: M.meanOf(frames.map((f) => f.foreheadToneStep?.driver ?? NaN)),
+    foreheadToneStepDelta: M.meanOf(frames.map((f) => f.foreheadToneStep?.delta ?? NaN)),
+    flicker,
+    textureSlide,
+    hairlineAlignment: null,
+    hairlineAlignmentNote: 'needs the R4 hair mask; personaTopEdge() is ready for it',
+    performance: { ...finalState.profile, window: 'last 300 frames of the replay', software: args.software },
+  };
+
+  return {
+    file: path.relative(ROOT, o.clipFile),
+    duration,
+    capturedAt: new Date().toISOString(),
+    flags: o.flagString,
+    flagValues: o.flagValues,
+    times,
+    burst: burstInfo,
+    incomplete: pending && (pending.captures > 0 || pending.burst > 0) ? pending : null,
+    pageErrors: o.pageErrors.splice(0),
+    summary,
+    frames,
+    tile,
+  };
+}
+
+function fmt(v: number | null | undefined): string {
+  return v === null || v === undefined || !Number.isFinite(v) ? '-' : v.toFixed(2);
+}
+
+function printSummary(label: string, s: ClipSummary) {
+  const t = s.targets;
+  const check = (c: M.RelativeCheck) => `driver ${fmt(c.driver)} output ${fmt(c.output)} gap ${fmt(c.gap)} ${c.pass === null ? '' : c.pass ? 'PASS' : 'FAIL'}`;
+  console.log(`  ${label}: ${s.frames} frames`);
+  console.log(`    skin tone vs neck: ${check(t.skinToneNeck)} (±${t.skinToneNeck.tolerance} ΔE)`);
+  console.log(`    skin tone vs ears: ${check(t.skinToneEars)} (±${t.skinToneEars.tolerance} ΔE)`);
+  console.log(`    sharpness ratio:   ${check(t.sharpness)} (±${Math.round(t.sharpness.tolerance * 100)}%)`);
+  console.log(
+    `    seam ${fmt(s.seamRatio)}  lip err ${fmt(s.mouthLipErrorPct)}%  teeth ${s.syntheticTeethFramesWholeClip}/${s.framesRenderedWholeClip}  ` +
+      `forehead step out ${fmt(s.foreheadToneStepOutput)} drv ${fmt(s.foreheadToneStepDriver)} Δ ${fmt(s.foreheadToneStepDelta)}  ` +
+      `flicker Δ ${fmt(s.flicker?.delta)}  slide ${fmt(s.textureSlide?.residualPx)}  fps ${s.performance.fps.toFixed(1)} p95 ${s.performance.frameP95Ms.toFixed(1)} ms`
+  );
+}
+
+// --- Persona grid aggregation -------------------------------------------------------------------------
+
+/** Metrics compared across personas; every one is "higher is worse" after taking the gap's magnitude. */
+export const GRID_METRICS: Array<{ key: string; label: string; pick: (s: ClipSummary) => number | null }> = [
+  { key: 'skinToneNeckGapAbs', label: '|skin tone gap vs neck| (ΔE)', pick: (s) => abs(s.targets.skinToneNeck.gap) },
+  { key: 'skinToneEarsGapAbs', label: '|skin tone gap vs ears| (ΔE)', pick: (s) => abs(s.targets.skinToneEars.gap) },
+  { key: 'sharpnessGapAbs', label: '|sharpness gap| (fraction)', pick: (s) => abs(s.targets.sharpness.gap) },
+  { key: 'seamRatio', label: 'seam ratio', pick: (s) => s.seamRatio },
+  { key: 'mouthLipErrorPct', label: 'lip error (% face width)', pick: (s) => s.mouthLipErrorPct },
+  { key: 'syntheticTeethShare', label: 'frames with synthetic teeth (share)', pick: (s) => (s.framesRenderedWholeClip ? s.syntheticTeethFramesWholeClip / s.framesRenderedWholeClip : null) },
+  { key: 'foreheadToneStepDelta', label: 'forehead tone step Δ (ΔE)', pick: (s) => s.foreheadToneStepDelta },
+  { key: 'flickerDelta', label: 'flicker Δ', pick: (s) => s.flicker?.delta ?? null },
+  { key: 'textureSlidePx', label: 'texture slide (px/frame)', pick: (s) => s.textureSlide?.residualPx ?? null },
+];
+
+function abs(v: number | null): number | null {
+  return v === null ? null : Math.abs(v);
+}
+
+export interface GridAggregate {
+  personas: number;
+  metrics: Record<string, { label: string; median: number | null; worst10pct: number | null; worst3: Array<{ persona: string; value: number }> }>;
+}
+
+/** Per-persona value = mean over its clips; then median, worst-10% and the worst three personas. */
+export function aggregateGrid(perPersona: Record<string, Record<string, ClipSummary>>): GridAggregate {
+  const names = Object.keys(perPersona);
+  const metrics: GridAggregate['metrics'] = {};
+  for (const m of GRID_METRICS) {
+    const entries: Array<M.Ranked<string>> = [];
+    for (const name of names) {
+      const v = M.meanOf(Object.values(perPersona[name]).map((s) => m.pick(s) ?? NaN));
+      if (v !== null) entries.push({ key: name, value: v });
+    }
+    const values = entries.map((e) => e.value);
+    metrics[m.key] = {
+      label: m.label,
+      median: M.medianOf(values),
+      worst10pct: M.percentileOf(values, 0.9),
+      worst3: M.worstOf(entries, 3).map((e) => ({ persona: e.key, value: e.value })),
+    };
+  }
+  return { personas: names.length, metrics };
+}
+
+function gridSheet(title: string, personas: string[], clips: string[], tiles: Map<string, M.RgbaImage>, tileH = 220): M.RgbaImage {
+  const pad = 6;
+  const labelW = 150;
+  const headerH = 22;
+  const titleH = 28;
+  const tileW = Math.round(tileH * 0.8);
+  const width = labelW + clips.length * (tileW + pad) + pad;
+  const height = titleH + headerH + personas.length * (tileH + pad) + pad;
+  const sheet = blank(width, height);
+  drawText(sheet, title, pad, 8, 2);
+  clips.forEach((c, i) => drawText(sheet, c, labelW + i * (tileW + pad) + 4, titleH + 4, 2, [148, 163, 184]));
+  personas.forEach((p, r) => {
+    const y = titleH + headerH + r * (tileH + pad);
+    drawText(sheet, p.slice(0, 11), pad, y + 8, 2, [251, 191, 36]);
+    clips.forEach((c, i) => {
+      const t = tiles.get(`${p}/${c}`);
+      if (!t) return;
+      const s = Math.min(tileW / t.width, tileH / t.height);
+      blit(sheet, scaleImage(t, s), labelW + i * (tileW + pad), y);
+    });
+  });
+  return sheet;
+}
+
+type GridPersona = {
+  file: string;
+  category: string;
+  attributes: Record<string, unknown>;
+  degradedOf: string | null;
+  status: string;
+  clips: Record<string, ClipSummary>;
+};
+
+// --- Main -----------------------------------------------------------------------------------------------
+
 async function main() {
   const args = parseArgs(process.argv.slice(2));
-  const { label: clipLabel, file: clipFile } = resolveClip(args.clip);
+  const clips = resolveClips(args.clips);
+  const personas: PersonaEntry[] | null = args.personas ? loadPersonaSet(args.personas, args.category) : null;
   const parsed = parseRealismFlagString(args.flags);
   if (parsed.errors.length) throw new Error(`Bad --flags: ${parsed.errors.join('; ')}`);
   const flagValues = { ...defaultRealismFlags(), ...parsed.flags };
   const flagString = describeRealismFlags(flagValues);
   const runName = args.run ?? `${new Date().toISOString().slice(0, 10)}-${flagString === 'defaults' ? 'defaults' : flagString.replace(/[^a-z0-9]+/gi, '_')}`;
   const outDir = path.join(REVIEW_DIR, 'out', runName);
-  const clipDir = path.join(outDir, clipLabel);
-  fs.mkdirSync(clipDir, { recursive: true });
+  fs.mkdirSync(outDir, { recursive: true });
+  const reportFile = path.join(outDir, 'report.json');
+  const existing: Record<string, unknown> = fs.existsSync(reportFile) ? JSON.parse(fs.readFileSync(reportFile, 'utf8')) : {};
 
-  console.log(`clip ${clipLabel} (${path.relative(ROOT, clipFile)}), flags: ${flagString}, run: ${runName}`);
+  console.log(`clips ${clips.map((c) => c.label).join(', ')}; ${personas ? `${personas.length} personas; ` : ''}flags: ${flagString}; run: ${runName}`);
 
   let server: { url: string; child: ChildProcess } | null = null;
   let browser: Browser | null = null;
@@ -298,181 +554,115 @@ async function main() {
     const page = await context.newPage();
     const pageErrors: string[] = [];
     page.on('pageerror', (e) => pageErrors.push(String(e).slice(0, 200)));
+    await driveAppShell(page, url, flagString === 'defaults' ? '' : flagString);
+    if (args.persona) await page.getByText(args.persona, { exact: false }).first().click({ timeout: 10000 });
+    const state = (await hookState(page))!;
+    const app = { url, browser: args.browser, canvas: [state.canvasWidth, state.canvasHeight], persona: args.persona ?? 'default' };
 
-    const ready = await driveApp(page, url, args, clipFile, flagString === 'defaults' ? '' : flagString);
-    const duration = ready.videoDuration!;
-    const times = (args.times ?? Array.from({ length: 8 }, (_, i) => duration * (0.1 + (0.8 * i) / 7))).filter((t) => t < duration - 0.1);
-    const burstStart = args.burst.start ?? duration * 0.45;
-    console.log(`duration ${duration.toFixed(2)} s, capturing at ${times.map((t) => t.toFixed(2)).join(', ')} s; burst from ${burstStart.toFixed(2)} s × ${args.burst.count}`);
-
-    // Replay from the start with everything scheduled, so the temporal filters see the clip as live.
-    await page.evaluate(async ({ times, burstStart, burstCount }) => {
-      const hook = window.__personaLiveRealism!;
-      hook.pause();
-      await hook.seek(0);
-      hook.resetPerf();
-      hook.scheduleCaptures(times);
-      hook.scheduleBurst(burstStart, burstCount, 0.5);
-      await hook.play();
-    }, { times, burstStart, burstCount: args.burst.count });
-
-    const deadline = Date.now() + (duration + 5) * 1000;
-    while (Date.now() < deadline) {
-      const pending = await page.evaluate(() => window.__personaLiveRealism!.pending());
-      if (pending && pending.captures === 0 && pending.burst === 0) break;
-      await sleep(250);
+    if (!personas) {
+      // --- Default persona: full frame dump per clip ----------------------------------------------
+      const clipReports: Record<string, unknown> = { ...((existing.clips as Record<string, unknown>) ?? {}) };
+      for (const clip of clips) {
+        const report = await captureClip(page, args, {
+          clipLabel: clip.label,
+          clipFile: clip.file,
+          clipDir: path.join(outDir, clip.label),
+          sheetTitle: `${clip.label}  ${runName}`,
+          flagString,
+          flagValues,
+          writeFrames: true,
+          defaultFrames: 8,
+          pageErrors,
+        });
+        printSummary(clip.label, report.summary);
+        const { tile: _tile, ...rest } = report;
+        clipReports[clip.label] = roundDeep(rest);
+        writeReport(reportFile, { ...existing, run: runName, app, clips: clipReports });
+      }
+    } else {
+      // --- Persona grid -------------------------------------------------------------------------
+      const previous = (existing.grid as { personas?: Record<string, GridPersona> } | undefined)?.personas ?? {};
+      const grid: Record<string, GridPersona> = { ...previous };
+      const perPersona: Record<string, Record<string, ClipSummary>> = {};
+      for (const [name, g] of Object.entries(grid)) perPersona[name] = g.clips;
+      const tiles = new Map<string, M.RgbaImage>();
+      for (const persona of personas) {
+        console.log(`persona ${persona.id} (${persona.category}${persona.degradedOf ? `, degraded copy of ${persona.degradedOf}` : ''})`);
+        const dataUrl = imageDataUrl(persona.file);
+        const before = await hookState(page);
+        await page.evaluate((spec) => window.__personaLiveRealism!.loadPersona(spec), {
+          name: persona.id,
+          category: persona.category,
+          dataUrl,
+          id: `persona-test-${persona.id}`,
+        });
+        // Wait for the engine to leave the previous "ready" state, then become ready for this photo.
+        if (before?.personaStatus === 'ready') await waitForHookState(page, 'persona reload', (s) => s?.personaStatus !== 'ready', 10000).catch(() => null);
+        const st = await waitForHookState(page, 'persona ready', (s) => ['ready', 'no-face', 'error'].includes(s?.personaStatus ?? ''), 120000);
+        const entry: GridPersona = {
+          file: path.relative(ROOT, persona.file),
+          category: persona.category,
+          attributes: persona.attributes,
+          degradedOf: persona.degradedOf,
+          status: st?.personaStatus ?? 'unknown',
+          clips: {},
+        };
+        grid[persona.id] = entry;
+        if (st?.personaStatus !== 'ready') {
+          console.warn(`  skipped: persona status ${st?.personaStatus}`);
+          continue;
+        }
+        for (const clip of clips) {
+          const clipDir = path.join(outDir, 'personas', persona.id, clip.label);
+          const report = await captureClip(page, args, {
+            clipLabel: clip.label,
+            clipFile: clip.file,
+            clipDir,
+            sheetTitle: `${persona.id} / ${clip.label}  ${runName}`,
+            flagString,
+            flagValues,
+            writeFrames: args.frames,
+            defaultFrames: 4,
+            pageErrors,
+          });
+          printSummary(`${persona.id}/${clip.label}`, report.summary);
+          entry.clips[clip.label] = roundDeep(report.summary);
+          if (report.tile) {
+            tiles.set(`${persona.id}/${clip.label}`, report.tile);
+            writePng(path.join(clipDir, 'tile.png'), report.tile);
+          }
+        }
+        perPersona[persona.id] = entry.clips;
+        writeReport(reportFile, { ...existing, run: runName, app, grid: { clipsRun: clips.map((c) => c.label), personas: grid, aggregate: roundDeep(aggregateGrid(perPersona)) } });
+      }
+      // Tiles of personas captured by earlier invocations of the same run are reused from disk.
+      const names = Object.keys(grid);
+      for (const name of names) {
+        for (const clip of clips) {
+          const key = `${name}/${clip.label}`;
+          const file = path.join(outDir, 'personas', name, clip.label, 'tile.png');
+          if (!tiles.has(key) && fs.existsSync(file)) tiles.set(key, decodeImageFile(file));
+        }
+      }
+      writePng(path.join(outDir, 'grid.png'), gridSheet(`${runName}  flags: ${flagString}`, names, clips.map((c) => c.label), tiles));
+      const aggregate = aggregateGrid(perPersona);
+      console.log('\nper-metric median / worst 10% / worst 3 personas');
+      for (const [key, m] of Object.entries(aggregate.metrics)) {
+        console.log(`  ${m.label} [${key}]: median ${fmt(m.median)}  worst10% ${fmt(m.worst10pct)}  worst: ${m.worst3.map((w) => `${w.persona} ${fmt(w.value)}`).join(', ')}`);
+      }
+      console.log(`grid sheet: ${path.relative(ROOT, path.join(outDir, 'grid.png'))}`);
     }
-    await sleep(300);
-    const finalState = (await hookState(page))!;
-    const pending = await page.evaluate(() => window.__personaLiveRealism!.pending());
-    await page.evaluate(() => window.__personaLiveRealism!.pause());
-
-    console.log('collecting captures…');
-    const captures = (await page.evaluate(() => window.__personaLiveRealism!.takeCaptures())) as SerializedCapture[];
-    const burst = (await page.evaluate(() => window.__personaLiveRealism!.takeBurst())) as SerializedBurst | null;
-
-    // --- Per-frame metrics and files -----------------------------------------------------------
-    const frames: FrameReport[] = [];
-    const sheetRows: Array<{ label: string; tiles: Array<{ label: string; image: M.RgbaImage }> }> = [];
-    for (const c of captures) {
-      const tag = `t${c.t.toFixed(2).replace('.', '_')}`;
-      const files = {
-        output: path.join(clipDir, `${tag}-output.png`),
-        driver: path.join(clipDir, `${tag}-driver.png`),
-        overlay: c.overlayPng ? path.join(clipDir, `${tag}-overlay.png`) : null,
-      };
-      writeDataUrlPng(files.output, c.outputPng);
-      writeDataUrlPng(files.driver, c.driverPng);
-      if (files.overlay && c.overlayPng) writeDataUrlPng(files.overlay, c.overlayPng);
-
-      fs.writeFileSync(
-        path.join(clipDir, `${tag}-landmarks.json`),
-        JSON.stringify({ t: c.t, driver: c.landmarks, warp: c.warpPositions, output: c.outputLandmarks })
-      );
-      const output = decodePngDataUrl(c.outputPng);
-      const driver = decodePngDataUrl(c.driverPng);
-      const overlay = c.overlayPng ? decodePngDataUrl(c.overlayPng) : null;
-      const lms = c.landmarks;
-      frames.push({
-        t: c.t,
-        frameIndex: c.frameIndex,
-        mar: c.mar,
-        pose: c.pose,
-        keyframeId: c.keyframeId,
-        syntheticTeeth: c.syntheticTeeth,
-        outputFaceDetected: !!c.outputLandmarks,
-        skinTone: M.skinToneMatch(output, driver, lms),
-        sharpness: M.sharpnessMatch(output, lms),
-        driverSharpness: M.sharpnessMatch(driver, lms),
-        seam: M.seamScore(output, lms),
-        mouth: M.mouthFidelity(c.outputLandmarks, lms),
-        foreheadToneStep: M.foreheadToneStep(output, driver, lms),
-        files: {
-          output: path.relative(ROOT, files.output),
-          driver: path.relative(ROOT, files.driver),
-          overlay: files.overlay ? path.relative(ROOT, files.overlay) : null,
-        },
-      });
-
-      // Contact sheet row: 2x face crops of driver, output and persona layer.
-      const regions = M.faceRegions(lms, output.width, output.height);
-      const box = M.expandRect(regions.ovalBox, 1.5, 1.45);
-      const tiles = [
-        { label: 'driver', image: scaleImage(crop(driver, box), 2) },
-        { label: 'output', image: scaleImage(crop(output, box), 2) },
-      ];
-      if (overlay) tiles.push({ label: 'persona layer', image: scaleImage(compositeOnChecker(crop(overlay, box)), 2) });
-      sheetRows.push({ label: `${c.t.toFixed(2)}s`, tiles });
-    }
-    if (sheetRows.length) {
-      const sheet = contactSheet(`${clipLabel}  ${runName}  flags: ${flagString}`, sheetRows);
-      writePng(path.join(clipDir, 'contact.png'), sheet);
-    }
-
-    // --- Burst metrics -------------------------------------------------------------------------
-    let flicker: M.Flicker | null = null;
-    let textureSlide: M.TextureSlide | null = null;
-    let burstInfo: { start: number; frames: number; scale: number } | null = null;
-    if (burst && burst.frames.length >= 2) {
-      const bf: M.BurstFrame[] = burst.frames.map((f) => ({
-        output: decodePngDataUrl(f.outputPng),
-        driver: decodePngDataUrl(f.driverPng),
-        landmarks: f.landmarks,
-      }));
-      flicker = M.flicker(bf);
-      textureSlide = M.textureSlide(bf, { search: 6 });
-      burstInfo = { start: burst.start, frames: burst.frames.length, scale: burst.scale };
-    }
-
-    // --- Summary ---------------------------------------------------------------------------------
-    const summary = {
-      frames: frames.length,
-      skinToneCheekVsNeck: M.meanOf(frames.map((f) => f.skinTone?.cheekVsNeck ?? NaN)),
-      skinToneCheekVsEars: M.meanOf(frames.map((f) => f.skinTone?.cheekVsEars ?? NaN)),
-      driverCheekVsNeck: M.meanOf(frames.map((f) => f.skinTone?.driverCheekVsNeck ?? NaN)),
-      sharpnessRatio: M.meanOf(frames.map((f) => f.sharpness.ratio)),
-      driverSharpnessRatio: M.meanOf(frames.map((f) => f.driverSharpness.ratio)),
-      seamRatio: M.meanOf(frames.map((f) => f.seam.ratio)),
-      mouthLipErrorPct: M.meanOf(frames.map((f) => f.mouth?.lipErrorPct ?? NaN)),
-      outputFacesDetected: frames.filter((f) => f.outputFaceDetected).length,
-      syntheticTeethCapturedFrames: frames.filter((f) => f.syntheticTeeth).length,
-      syntheticTeethFramesWholeClip: finalState.syntheticTeethFrames,
-      framesRenderedWholeClip: finalState.framesRendered,
-      foreheadToneStepDelta: M.meanOf(frames.map((f) => f.foreheadToneStep?.delta ?? NaN)),
-      flicker,
-      textureSlide,
-      hairlineAlignment: null as null,
-      hairlineAlignmentNote: 'needs the R4 hair mask; personaTopEdge() is ready for it',
-      performance: {
-        ...finalState.profile,
-        window: 'last 300 frames of the replay',
-        software: args.software,
-      },
-    };
-
-    const clipReport = roundDeep({
-      file: path.relative(ROOT, clipFile),
-      duration,
-      capturedAt: new Date().toISOString(),
-      flags: flagString,
-      flagValues,
-      times,
-      burst: burstInfo,
-      incomplete: pending && (pending.captures > 0 || pending.burst > 0) ? pending : null,
-      pageErrors,
-      summary,
-      frames,
-    });
-
-    const reportFile = path.join(outDir, 'report.json');
-    const existing = fs.existsSync(reportFile) ? JSON.parse(fs.readFileSync(reportFile, 'utf8')) : {};
-    const report = {
-      schema: 1,
-      run: runName,
-      commit: gitCommit(),
-      app: { url, browser: args.browser, canvas: [finalState.canvasWidth, finalState.canvasHeight], persona: args.persona ?? 'default' },
-      updatedAt: new Date().toISOString(),
-      clips: { ...(existing.clips ?? {}), [clipLabel]: clipReport },
-    };
-    fs.writeFileSync(reportFile, JSON.stringify(report, null, 2) + '\n');
-
-    console.log(`\n${clipLabel}: ${frames.length} frames → ${path.relative(ROOT, clipDir)}`);
-    console.table(
-      Object.fromEntries(
-        Object.entries(summary)
-          .filter(([, v]) => typeof v === 'number' || v === null)
-          .map(([k, v]) => [k, typeof v === 'number' ? Math.round(v * 1000) / 1000 : v])
-      )
-    );
-    if (flicker) console.log('flicker', roundDeep(flicker));
-    if (textureSlide) console.log('textureSlide', roundDeep(textureSlide));
-    console.log('performance', roundDeep({ fps: finalState.profile.fps, p50: finalState.profile.frameP50Ms, p95: finalState.profile.frameP95Ms, stages: finalState.profile.stages }));
     if (pageErrors.length) console.warn('page errors:', pageErrors);
     console.log(`report: ${path.relative(ROOT, reportFile)}`);
   } finally {
     await browser?.close().catch(() => undefined);
     server?.child.kill();
   }
+}
+
+function writeReport(file: string, body: Record<string, unknown>) {
+  const report = { schema: 2, ...body, commit: gitCommit(), updatedAt: new Date().toISOString() };
+  fs.writeFileSync(file, JSON.stringify(report, null, 2) + '\n');
 }
 
 main().catch((err) => {
