@@ -15,3 +15,9 @@ test('parseSettingsFromSearch reads the rs parameter', () => {
   assert.deepEqual(parseSettingsFromSearch('?realism=1&rs=blendStrength%3D100%2CeyeGazeSync%3D0'), { blendStrength: 100, eyeGazeSync: false });
   assert.deepEqual(parseSettingsFromSearch('?realism=1'), {});
 });
+
+test('parseSettingsString reads the rigid-pose tuning settings', () => {
+  const { settings, errors } = parseSettingsString('rigidPoseMinCutoff=5,rigidPoseBeta=2,rigidShapeOffset=0');
+  assert.deepEqual(errors, []);
+  assert.deepEqual(settings, { rigidPoseMinCutoff: 5, rigidPoseBeta: 2, rigidShapeOffset: false });
+});

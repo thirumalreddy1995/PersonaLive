@@ -46,7 +46,9 @@ tokens override them, e.g. `--flags r1,rigidForehead=1`. R2 flags: `closedLipMas
 driver and output next to the measured values.
 
 `--settings temporalSmoothing=20,blendStrength=100` overrides the inspector settings for the run (the
-same keys as `TransformationSettings`; `?rs=` on the page URL does the same in a browser).
+same keys as `TransformationSettings`; `?rs=` on the page URL does the same in a browser). The rigid
+forehead can be tuned the same way: `rigidPoseMinCutoff` / `rigidPoseBeta` (One Euro on the head
+pose), `rigidShapeOffset=0` (no learned forehead shape); it fades out between 15° and 30° of yaw.
 `npm run realism:compare -- <before-run> <after-run> [--clips A,E] [--md]` prints the before → after
 table per clip and, when both runs have persona grids, the median / worst-10% comparison and the
 personas that regressed beyond the measured run-to-run noise.
@@ -109,7 +111,10 @@ with the patches, the face oval and landmarks 9/10 drawn on it, a 3x face zoom, 
    are loaded through `loadPersona()` on the hook, which adds them to the library and activates them.
 3. The engine copies the output, the driver frame and the persona layer when the clip passes each
    capture time, and records a short burst of consecutive half-size frames for flicker and
-   texture-slide. It then re-detects landmarks on each output frame.
+   texture-slide. It then re-detects landmarks on each output frame; a re-detection counts (for the
+   lip error and the "faces detected" count) only when its eye corners, nose bridge, chin and
+   forehead top agree with the driver's within 10% of face width (`detectionAgrees`), so a detector
+   misfit on a tilted-back or profile frame is not reported as a mouth error.
 4. `tools/realism/metrics.ts` computes the numbers from the pixels and landmarks (pure functions,
    unit-tested in `metrics.test.ts`). `personaSet.ts` and `degrade.ts` hold the pure parts of the
    persona tooling.

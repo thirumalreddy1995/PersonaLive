@@ -108,6 +108,11 @@ export function rotate(q: [number, number, number, number], p: [number, number, 
 }
 
 /** Yaw, pitch and roll (degrees) of a pose, for the debug panel. */
+function smoothstep(a: number, b: number, x: number): number {
+  const t = Math.min(1, Math.max(0, (x - a) / (b - a)));
+  return t * t * (3 - 2 * t);
+}
+
 export function poseAngles(q: [number, number, number, number]): { yaw: number; pitch: number; roll: number } {
   const [x, y, z, w] = q;
   const sinp = 2 * (w * x - y * z);
@@ -173,6 +178,11 @@ export interface StabilizerOptions {
   shapeTau?: number;
   /** |yaw| and |pitch| (degrees) below which the shape offset keeps learning. */
   frontalDeg?: number;
+  /** Learn the per-vertex shape offset at all (false: the forehead is the rigid model alone). */
+  learnShape?: boolean;
+  /** |yaw| (degrees) up to which the rigid forehead has full weight, and where it has faded out to the tracked points. */
+  yawFadeStartDeg?: number;
+  yawFadeEndDeg?: number;
 }
 
 /**
@@ -191,6 +201,13 @@ export class RigidPoseStabilizer {
   public readonly rigid = new Float32Array(CANONICAL_FACE_VERTEX_COUNT * 2);
   public lastPose: RigidPose | null = null;
   public lastFit: Similarity | null = null;
+  /**
+   * Weight of the rigid positions in apply(): 1 near frontal, fading to 0 across the yaw band.
+   * On a yaw turn the canonical model (and the frontal shape offset) no longer matches the wearer's
+   * forehead and the rigid points drift against the real head motion (clip B slide 0.3 → 1.2 px per
+   * frame), while the nod and hand clips that the stabiliser was built for stay near frontal.
+   */
+  public lastWeight = 1;
   private readonly opts: Required<StabilizerOptions>;
 
   constructor(opts: StabilizerOptions = {}) {
@@ -201,8 +218,22 @@ export class RigidPoseStabilizer {
       browBeta: opts.browBeta ?? 0.05,
       shapeTau: opts.shapeTau ?? 1.0,
       frontalDeg: opts.frontalDeg ?? 12,
+      learnShape: opts.learnShape ?? true,
+      yawFadeStartDeg: opts.yawFadeStartDeg ?? 15,
+      yawFadeEndDeg: opts.yawFadeEndDeg ?? 30,
     };
     this.poseFilters = Array.from({ length: 7 }, () => new OneEuroFilter(this.opts.poseMinCutoff, this.opts.poseBeta, 1.0));
+  }
+
+  /** Changes the filter parameters in place; turning shape learning off also clears the learned offset. */
+  configure(opts: StabilizerOptions) {
+    Object.assign(this.opts, opts);
+    for (const f of this.poseFilters) f.setParams(this.opts.poseMinCutoff, this.opts.poseBeta);
+    for (const pair of this.browFilters.values()) for (const f of pair) f.setParams(this.opts.browMinCutoff, this.opts.browBeta);
+    if (!this.opts.learnShape) {
+      this.shapeOffset.fill(0);
+      this.shapeFrames = 0;
+    }
   }
 
   reset() {
@@ -213,6 +244,7 @@ export class RigidPoseStabilizer {
     this.lastTime = null;
     this.lastPose = null;
     this.lastFit = null;
+    this.lastWeight = 1;
   }
 
   /**
@@ -244,9 +276,10 @@ export class RigidPoseStabilizer {
 
     // Learn the wearer's forehead shape (tracked − rigid, in projected units) while near frontal.
     const angles = poseAngles(pose.q);
+    this.lastWeight = 1 - smoothstep(this.opts.yawFadeStartDeg, this.opts.yawFadeEndDeg, Math.abs(angles.yaw));
     const dt = this.lastTime === null ? 1 / 30 : Math.max(1e-3, (timestamp - this.lastTime) / 1000);
     this.lastTime = timestamp;
-    if (Math.abs(angles.yaw) < this.opts.frontalDeg && Math.abs(angles.pitch) < this.opts.frontalDeg && fit.s > 0) {
+    if (this.opts.learnShape && Math.abs(angles.yaw) < this.opts.frontalDeg && Math.abs(angles.pitch) < this.opts.frontalDeg && fit.s > 0) {
       const a = this.shapeFrames === 0 ? 1 : 1 - Math.exp(-dt / this.opts.shapeTau);
       for (const v of FOREHEAD_VERTICES) {
         const ox = (tracked[v * 2] - fit.tx) / fit.s - this.projected[v * 2];
@@ -270,9 +303,10 @@ export class RigidPoseStabilizer {
    */
   apply(smoothed: Float32Array, timestamp: number) {
     if (!this.lastPose) return;
+    const w = this.lastWeight;
     for (const v of FOREHEAD_VERTICES) {
-      smoothed[v * 2] = this.rigid[v * 2];
-      smoothed[v * 2 + 1] = this.rigid[v * 2 + 1];
+      smoothed[v * 2] += (this.rigid[v * 2] - smoothed[v * 2]) * w;
+      smoothed[v * 2 + 1] += (this.rigid[v * 2 + 1] - smoothed[v * 2 + 1]) * w;
     }
     for (const v of BROW_VERTICES) {
       let pair = this.browFilters.get(v);
@@ -282,8 +316,8 @@ export class RigidPoseStabilizer {
       }
       const ox = pair[0].filter(smoothed[v * 2] - this.rigid[v * 2], timestamp);
       const oy = pair[1].filter(smoothed[v * 2 + 1] - this.rigid[v * 2 + 1], timestamp);
-      smoothed[v * 2] = this.rigid[v * 2] + ox;
-      smoothed[v * 2 + 1] = this.rigid[v * 2 + 1] + oy;
+      smoothed[v * 2] += (this.rigid[v * 2] + ox - smoothed[v * 2]) * w;
+      smoothed[v * 2 + 1] += (this.rigid[v * 2 + 1] + oy - smoothed[v * 2 + 1]) * w;
     }
   }
 }

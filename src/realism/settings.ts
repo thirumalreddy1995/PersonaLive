@@ -13,6 +13,8 @@ const NUMERIC_KEYS: ReadonlyArray<SettingKey> = [
   'lipSyncSensitivity',
   'manualSmileBias',
   'eyePassThroughRadius',
+  'rigidPoseMinCutoff',
+  'rigidPoseBeta',
 ];
 const BOOLEAN_KEYS: ReadonlyArray<SettingKey> = [
   'audioReactiveLipSync',
@@ -22,6 +24,7 @@ const BOOLEAN_KEYS: ReadonlyArray<SettingKey> = [
   'preserveFacialHair',
   'showLandmarkOverlay',
   'showBoundingBoxes',
+  'rigidShapeOffset',
 ];
 const ENUM_KEYS: Partial<Record<SettingKey, ReadonlyArray<string>>> = {
   outputResolution: ['1080p', '720p', '540p'],

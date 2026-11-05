@@ -233,6 +233,8 @@ In the shader:
 - If the controlled slide gap on clip C or E is still > 0.5 px/frame, rigid-pose stabilisation lands in R2, before the texture work and before R4b: `outputFacialTransformationMatrixes` on, landmarks split into rigid head pose + per-landmark expression offsets, rigid pose smoothed with a One Euro filter, forehead and upper-face vertices driven from the rigid pose plus brow offsets only (flag `rigidForehead`).
 - Closed-lip outline: with the mouth closed, persona lips are limited to the intersection of the persona and wearer lip rings, feathered (flag `closedLipMask`).
 - The R1 persona-grid regressions on neck gap and slide are accepted as measurement shifts from removing the mesh offsets.
+- Metric change in R2: an output re-detection counts only when its rigid landmarks agree with the driver's within 10% of face width (`detectionAgrees`); before, one more detected tilted-back frame on clip E could add a 10–25% lip error from a detector misfit. Lip-error and faces-detected values from the R0/R1 grids were recorded without the gate.
+- The rigid forehead fades out between 15° and 30° of yaw: on the yaw clip B the canonical model and the frontal shape offset no longer match the wearer's forehead and the rigid points slide against the head (measured 0.3 → 1.2 px/frame on Arshad, 0.28 → 1.0 on grid personas). Settings `rigidPoseMinCutoff`, `rigidPoseBeta`, `rigidShapeOffset` expose the stabiliser for sweeps.
 
 ---
 

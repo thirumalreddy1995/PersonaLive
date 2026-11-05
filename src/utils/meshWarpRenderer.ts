@@ -289,8 +289,26 @@ interface GLResources {
   } | null;
 }
 
-/** Side of the square framebuffer the face crop is downsampled into before readback. */
-export const READBACK_SIZE = 96;
+/**
+ * Side of the square readback framebuffer. The readbacks sample a window of this many display
+ * pixels at 1:1 from the middle of the face box (upsampling only when the face is smaller), so the
+ * Laplacian measures the same single-pixel band as the review metric. Downsampling the whole face
+ * into it (R2 first cut, 96 px) measured a coarser band that camera blur hardly touches and left
+ * the loop believing a 2x sharper persona was matched.
+ */
+export const READBACK_SIZE = 160;
+
+/** Side, in pixels, of the readback window for a w×h face region: 1:1 up to READBACK_SIZE. */
+export function readbackWindow(w: number, h: number): number {
+  return Math.max(1, Math.min(READBACK_SIZE, w, h));
+}
+
+/** The sub-rectangle of `rect` (x, y, w, h) with the given size, centred, clipped to `rect`. */
+export function centredRect(rect: [number, number, number, number], size: [number, number]): [number, number, number, number] {
+  const w = Math.min(rect[2], size[0]);
+  const h = Math.min(rect[3], size[1]);
+  return [rect[0] + (rect[2] - w) / 2, rect[1] + (rect[3] - h) / 2, w, h];
+}
 
 interface PendingReadback {
   buffer: WebGLBuffer;
@@ -309,10 +327,12 @@ function isPowerOfTwo(n: number): boolean {
 }
 
 /**
- * Laplacian variance and high-pass MAD of an RGBA buffer (0..255 luma), skipping transparent
- * pixels. Pure, shared by the GPU readback path and the tests.
+ * Laplacian variance and high-pass MAD of an RGBA buffer (0..255 luma). Pixels below `minAlpha`
+ * and their neighbours are skipped: the persona layer is premultiplied, so its feathered edges
+ * (mask, eye and mouth holes) darken towards transparent and would read as strong edges that no
+ * camera blur removes. Pure, shared by the GPU readback path and the tests.
  */
-export function faceStatsFromPixels(data: ArrayLike<number>, width: number, height: number, minAlpha = 8): FaceStats {
+export function faceStatsFromPixels(data: ArrayLike<number>, width: number, height: number, minAlpha = 240): FaceStats {
   const luma = new Float32Array(width * height);
   const valid = new Uint8Array(width * height);
   for (let i = 0; i < width * height; i++) {
@@ -322,7 +342,9 @@ export function faceStatsFromPixels(data: ArrayLike<number>, width: number, heig
     luma[i] = 0.2126 * data[o] + 0.7152 * data[o + 1] + 0.0722 * data[o + 2];
   }
   let n = 0, mean = 0, m2 = 0;
-  const hp: number[] = [];
+  // Histogram of the high-pass magnitude (0.25 steps up to 64) so the median costs no sort.
+  const bins = new Uint32Array(HP_BINS);
+  let hpCount = 0;
   for (let y = 1; y < height - 1; y++) {
     for (let x = 1; x < width - 1; x++) {
       const i = y * width + x;
@@ -335,13 +357,24 @@ export function faceStatsFromPixels(data: ArrayLike<number>, width: number, heig
       // 3×3 mean high-pass for the noise estimate.
       let s = 0;
       for (let dy = -1; dy <= 1; dy++) for (let dx = -1; dx <= 1; dx++) s += luma[i + dy * width + dx];
-      hp.push(Math.abs(luma[i] - s / 9));
+      bins[Math.min(HP_BINS - 1, Math.floor(Math.abs(luma[i] - s / 9) / HP_BIN_WIDTH))]++;
+      hpCount++;
     }
   }
-  hp.sort((a, b) => a - b);
-  const median = hp.length ? hp[hp.length >> 1] : 0;
-  return { laplacianVariance: n > 1 ? m2 / n : 0, noiseMad: median * 1.4826, samples: n };
+  let median = 0;
+  for (let b = 0, seen = 0; b < HP_BINS; b++) {
+    seen += bins[b];
+    if (seen > hpCount >> 1) {
+      // Bin centre; the first bin reports 0 so a noise-free image measures as such.
+      median = b === 0 ? 0 : (b + 0.5) * HP_BIN_WIDTH;
+      break;
+    }
+  }
+  return { laplacianVariance: n > 1 ? m2 / n : 0, noiseMad: hpCount ? median * 1.4826 : 0, samples: n };
 }
+
+const HP_BIN_WIDTH = 0.25;
+const HP_BINS = 256;
 
 export class MeshWarpRenderer {
   private _canvas: HTMLCanvasElement;
@@ -812,9 +845,10 @@ export class MeshWarpRenderer {
   }
 
   /**
-   * Downsamples the given region of the current warp output into a small framebuffer and starts
-   * an asynchronous readback. Resolves with the statistics a few frames later (or null if the
-   * context was lost). Call right after render() while the drawing buffer still holds the frame.
+   * Copies the given region of the current warp output and starts an asynchronous readback of
+   * the READBACK_SIZE-pixel window at its centre (1:1; the whole region, upsampled, when it is
+   * smaller). Resolves with the statistics a few frames later (or null if the context was lost).
+   * Call right after render() while the drawing buffer still holds the frame.
    */
   readFaceStats(region: [number, number, number, number]): Promise<FaceStats | null> {
     const gl = this.gl2;
@@ -832,14 +866,17 @@ export class MeshWarpRenderer {
     gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MAG_FILTER, gl.LINEAR);
     gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_WRAP_S, gl.CLAMP_TO_EDGE);
     gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_WRAP_T, gl.CLAMP_TO_EDGE);
-    return this.downsampleAndRead(gl, r, [0, 0, 1, 1]);
+    const win = readbackWindow(w, h);
+    return this.downsampleAndRead(gl, r, centredRect([0, 0, 1, 1], [win / w, win / h]));
   }
 
   /**
-   * Uploads a video or canvas frame as a texture, downsamples the given normalized region of it
-   * and starts an asynchronous readback (the driver face crop for the camera-match estimate).
+   * Uploads a video or canvas frame as a texture and starts an asynchronous readback of the given
+   * normalized region (the driver face box for the camera-match estimate). `window`, in the same
+   * normalized units, limits the sample to a centred window of the region so it covers the same
+   * display pixels as readFaceStats does on the output.
    */
-  readSourceFaceStats(source: TexImageSource, region: [number, number, number, number]): Promise<FaceStats | null> {
+  readSourceFaceStats(source: TexImageSource, region: [number, number, number, number], window?: [number, number]): Promise<FaceStats | null> {
     const gl = this.gl2;
     const r = this.resources?.readback;
     if (!gl || !r || this.contextLost) return Promise.resolve(null);
@@ -850,7 +887,7 @@ export class MeshWarpRenderer {
     gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MAG_FILTER, gl.LINEAR);
     gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_WRAP_S, gl.CLAMP_TO_EDGE);
     gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_WRAP_T, gl.CLAMP_TO_EDGE);
-    return this.downsampleAndRead(gl, r, region);
+    return this.downsampleAndRead(gl, r, window ? centredRect(region, window) : region);
   }
 
   private downsampleAndRead(gl: WebGL2RenderingContext, r: NonNullable<GLResources['readback']>, rect: [number, number, number, number]): Promise<FaceStats | null> {

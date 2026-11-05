@@ -131,3 +131,33 @@ test('the stabiliser removes forehead jitter while the brows keep their expressi
   const a = poseAngles(stab.lastPose!.q);
   assert.ok(Math.abs(a.pitch) < 9);
 });
+
+test('the rigid forehead fades out across the yaw band so a turned head keeps its tracked points', () => {
+  // No shape learning, so the fixed disagreement is not absorbed into the offset on the first frame.
+  const stab = new RigidPoseStabilizer({ yawFadeStartDeg: 15, yawFadeEndDeg: 30, learnShape: false });
+  const proj = new Float32Array(CANONICAL_FACE_VERTEX_COUNT * 2);
+  const run = (yaw: number) => {
+    stab.reset();
+    const pose = decomposeTransform(matrix(yaw, 0, [0, 0, -45]))!;
+    projectCanonical(pose, proj);
+    const tracked = new Float32Array(proj.length);
+    for (let i = 0; i < proj.length; i += 2) {
+      tracked[i] = 900 * proj[i] + 640 + (i % 4 === 0 ? 3 : -3); // a fixed 3 px disagreement
+      tracked[i + 1] = 900 * proj[i + 1] + 360;
+    }
+    assert.ok(stab.update(matrix(yaw, 0, [0, 0, -45]), tracked, 0));
+    const smoothed = new Float32Array(tracked);
+    stab.apply(smoothed, 0);
+    const v = FOREHEAD_VERTICES[0];
+    return { weight: stab.lastWeight, moved: Math.abs(smoothed[v * 2] - tracked[v * 2]) };
+  };
+  const frontal = run(0);
+  assert.equal(frontal.weight, 1);
+  assert.ok(frontal.moved > 0.5, 'frontal: forehead follows the rigid model');
+  const turned = run(45);
+  assert.equal(turned.weight, 0);
+  assert.equal(turned.moved, 0, 'turned: tracked points untouched');
+  const mid = run(22.5);
+  assert.ok(mid.weight > 0.3 && mid.weight < 0.7, `mid weight ${mid.weight}`);
+});
+

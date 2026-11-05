@@ -88,6 +88,12 @@ export interface TransformationSettings {
   eyePassThroughRadius: number;
   /** Longest edge of the persona texture after the face crop (R2 §2). */
   personaTextureSize: 512 | 1024 | 2048;
+  /** One Euro minimum cutoff (Hz) of the rigid head pose behind the forehead (realism flag rigidForehead). */
+  rigidPoseMinCutoff: number;
+  /** One Euro speed coefficient of the rigid head pose: higher follows fast turns with less lag. */
+  rigidPoseBeta: number;
+  /** Learn the wearer's forehead shape as a per-vertex offset while the head is near frontal. */
+  rigidShapeOffset: boolean;
   lightingAdaptation: boolean;
   preserveFacialHair: boolean;
   showLandmarkOverlay: boolean;

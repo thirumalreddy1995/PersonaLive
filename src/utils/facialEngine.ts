@@ -12,7 +12,7 @@
  */
 import { AuthorizedPersona, EngineStatus, FacialMetrics, HeadPose, TransformationSettings } from '../types/index.ts';
 import { OneEuroFilter } from './faceMath.ts';
-import { RigidPoseStabilizer, poseAngles } from './rigidPose.ts';
+import { RigidPoseStabilizer, StabilizerOptions, poseAngles } from './rigidPose.ts';
 import { cropUvs, planCrop } from './personaCrop.ts';
 import { CameraMatchState, initialCameraMatch, stepCameraMatch } from './cameraMatch.ts';
 import {
@@ -40,7 +40,7 @@ import {
   FACE_TESSELLATION,
   TrackedFace,
 } from './faceTracker.ts';
-import { FacialLightingZones, MeshWarpRenderer } from './meshWarpRenderer.ts';
+import { FacialLightingZones, MeshWarpRenderer, readbackWindow } from './meshWarpRenderer.ts';
 import { OralCavityRenderer, extractOralApertureMetrics } from './oralCavityRenderer.ts';
 import { MultiReferenceBank } from './multiReferenceBank.ts';
 import { CranialBoundaryBlender } from './cranialBoundaryBlender.ts';
@@ -82,6 +82,11 @@ interface SourceLayout {
   drawWidth: number;
   drawHeight: number;
   mirror: boolean;
+}
+
+/** Rigid-pose stabiliser options from the settings the user or the capture tool can set. */
+function rigidOptions(s: TransformationSettings): StabilizerOptions {
+  return { poseMinCutoff: s.rigidPoseMinCutoff, poseBeta: s.rigidPoseBeta, learnShape: s.rigidShapeOffset };
 }
 
 export class RealtimeFacialEngine {
@@ -206,6 +211,7 @@ export class RealtimeFacialEngine {
     this.warp = new MeshWarpRenderer(w, h, realismFlags.get().webgl2);
     this.warp.setTopology(this.topology);
     this.warp.setEyeFade(eyeFadeWeights(this.topology, settings.eyePassThroughRadius));
+    this.rigid.configure(rigidOptions(settings));
     this.status.renderer = this.warp.usesWebGL2 ? 'webgl2' : this.warp.usesWebGL ? 'webgl' : 'canvas2d';
 
     this.demoCanvas = document.createElement('canvas');
@@ -355,6 +361,13 @@ export class RealtimeFacialEngine {
     }
     if (prev.personaTextureSize !== settings.personaTextureSize && this.personaImage && realismFlags.get().personaCrop) {
       void this.preparePersona();
+    }
+    if (
+      prev.rigidPoseMinCutoff !== settings.rigidPoseMinCutoff ||
+      prev.rigidPoseBeta !== settings.rigidPoseBeta ||
+      prev.rigidShapeOffset !== settings.rigidShapeOffset
+    ) {
+      this.rigid.configure(rigidOptions(settings));
     }
   }
 
@@ -889,8 +902,11 @@ export class RealtimeFacialEngine {
       const sy1 = (bounds.minY + bounds.height - layout.offsetY) / layout.drawHeight;
       const srcRect: [number, number, number, number] = [clamp(sx0, 0, 1), clamp(sy0, 0, 1), clamp(sx1 - sx0, 0.01, 1), clamp(sy1 - sy0, 0.01, 1)];
       const token = this.personaPrepareToken;
+      // Both readbacks sample the same square window of display pixels at 1:1, so the loop sees
+      // the single-pixel band the camera blur removes (the band the review metric measures).
+      const win = readbackWindow(bounds.width, bounds.height);
       const output = this.warp.readFaceStats(faceRect);
-      const driver = this.warp.readSourceFaceStats(source as TexImageSource, srcRect);
+      const driver = this.warp.readSourceFaceStats(source as TexImageSource, srcRect, [win / layout.drawWidth, win / layout.drawHeight]);
       void Promise.all([driver, output]).then(([d, o]) => {
         this.cameraMatchPending = false;
         if (this.disposed || token !== this.personaPrepareToken || !d || !o) return;

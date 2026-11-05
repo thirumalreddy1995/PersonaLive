@@ -661,6 +661,24 @@ export function mouthFidelity(outputLandmarks: Landmarks | null, driverLandmarks
 }
 
 /** Pixels darker than this share of the reference patch's median luminance count as hair, not skin. */
+/** Rigid landmarks (eye corners, nose bridge, chin, forehead top) that must agree before an output detection counts. */
+export const DETECTION_AGREEMENT_POINTS: ReadonlyArray<number> = [33, 133, 362, 263, 6, 168, 152, 10];
+/** Mean rigid-landmark error, as a fraction of face width, above which the output detection is not the wearer's face. */
+export const DETECTION_AGREEMENT_MAX = 0.1;
+
+/**
+ * True when the landmarks re-detected on the output sit on the wearer's face: the mean error over
+ * the rigid points is at most `maxFrac` of the face width. Without this gate a detector fit that
+ * landed elsewhere on a tilted-back or profile frame is reported as a mouth error of a quarter of
+ * the face width, and a build that gets one more such frame detected looks worse.
+ */
+export function detectionAgrees(outputLandmarks: Landmarks | null, driverLandmarks: Landmarks, maxFrac = DETECTION_AGREEMENT_MAX): boolean {
+  if (!outputLandmarks) return false;
+  let s = 0;
+  for (const i of DETECTION_AGREEMENT_POINTS) s += dist(lm(outputLandmarks, i), lm(driverLandmarks, i));
+  return s / DETECTION_AGREEMENT_POINTS.length <= maxFrac * faceSize(driverLandmarks).width;
+}
+
 export const HAIR_LUMINANCE_RATIO = 0.6;
 
 /**

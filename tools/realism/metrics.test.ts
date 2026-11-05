@@ -33,6 +33,8 @@ import {
   driverTextureSlide,
   trimAtHairline,
   worstOf,
+  detectionAgrees,
+  faceSize,
 } from './metrics.ts';
 
 // --- Fixtures -------------------------------------------------------------------------------------
@@ -427,4 +429,14 @@ test('driverTextureSlide runs the slide metric on the driver frames alone', () =
   const d = driverTextureSlide(frames, { search: 6 });
   assert.ok(d, 'driver slide computed');
   assert.ok(d!.residualPx < 0.6, `driver slide ${d!.residualPx}`);
+});
+
+test('detectionAgrees accepts a re-detection on the same face and rejects one that landed elsewhere', () => {
+  const face = syntheticFace(0, 0);
+  assert.equal(detectionAgrees(face, face), true);
+  assert.equal(detectionAgrees(null, face), false);
+  const w = faceSize(face).width;
+  const off = face.map((v, i) => (i % 2 === 0 ? v + w * 0.3 : v));
+  assert.equal(detectionAgrees(off, face), false);
+  assert.equal(detectionAgrees(off, face, 0.5), true);
 });

@@ -67,8 +67,8 @@ export const REALISM_FLAG_DEFS: ReadonlyArray<RealismFlagDef> = [
     key: 'rigidForehead',
     label: 'Rigid-pose forehead',
     description:
-      'Forehead vertices follow the smoothed head pose from the facial transformation matrix (plus a learned shape offset); brows follow it plus a smoothed expression offset (R2).',
-    defaultValue: false,
+      'Forehead vertices follow the smoothed head pose from the facial transformation matrix (plus a learned shape offset) and fade back to the tracked points between 15° and 30° of yaw; brows follow it plus a smoothed expression offset (R2).',
+    defaultValue: true,
     group: 'mesh',
   },
   {
@@ -133,7 +133,7 @@ export const REALISM_FLAG_DEFS: ReadonlyArray<RealismFlagDef> = [
     key: 'webgl2',
     label: 'WebGL2 renderer',
     description: 'Prefer a WebGL2 context (GLSL ES 3.00, highp, mipmaps for any texture size, asynchronous readback). Takes effect when the engine is created (R2 §1).',
-    defaultValue: false,
+    defaultValue: true,
     group: 'texture',
     appliesOn: 'engine-restart',
   },
@@ -141,7 +141,7 @@ export const REALISM_FLAG_DEFS: ReadonlyArray<RealismFlagDef> = [
     key: 'personaCrop',
     label: 'Persona crop + mipmaps',
     description: 'Crop the reference to the face oval × 1.6, resize to the texture-size setting, recompute UVs and upload with mipmaps and anisotropic filtering (R2 §2).',
-    defaultValue: false,
+    defaultValue: true,
     group: 'texture',
     appliesOn: 'persona-reload',
   },
@@ -149,7 +149,7 @@ export const REALISM_FLAG_DEFS: ReadonlyArray<RealismFlagDef> = [
     key: 'cameraMatch',
     label: 'Camera-matched sharpness and noise',
     description: 'Every 15 frames compare the wearer\'s and the persona\'s face-region sharpness and noise (asynchronous readback, WebGL2 only) and blur/sharpen the persona plus add matching noise (R2 §4).',
-    defaultValue: false,
+    defaultValue: true,
     group: 'texture',
   },
   {
@@ -170,7 +170,7 @@ export const REALISM_FLAG_DEFS: ReadonlyArray<RealismFlagDef> = [
     key: 'closedLipMask',
     label: 'Closed-lip mask',
     description: 'With the mouth closed, removes persona lip colour outside the wearer\'s outer lip contour (feathered to the next ring) so fuller persona lips draw no painted outline (R2).',
-    defaultValue: false,
+    defaultValue: true,
     group: 'mouth-eyes',
   },
 ];

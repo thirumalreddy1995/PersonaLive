@@ -357,6 +357,8 @@ async function captureClip(page: Page, args: Args, o: CaptureOptions): Promise<C
     const driver = decodePngDataUrl(c.driverPng);
     const overlay = c.overlayPng ? decodePngDataUrl(c.overlayPng) : null;
     const lms = c.landmarks;
+    // A re-detection counts only when it landed on the wearer's face (R2; see detectionAgrees).
+    const outputLms = M.detectionAgrees(c.outputLandmarks, lms) ? c.outputLandmarks : null;
     frames.push({
       t: c.t,
       frameIndex: c.frameIndex,
@@ -364,13 +366,13 @@ async function captureClip(page: Page, args: Args, o: CaptureOptions): Promise<C
       pose: c.pose,
       keyframeId: c.keyframeId,
       syntheticTeeth: c.syntheticTeeth,
-      outputFaceDetected: !!c.outputLandmarks,
+      outputFaceDetected: !!outputLms,
       skinTone: M.skinToneMatch(output, driver, lms),
       sharpness: M.sharpnessMatch(output, lms),
       driverSharpness: M.sharpnessMatch(driver, lms),
       seam: M.seamScore(output, lms),
       driverSeam: M.seamScore(driver, lms),
-      mouth: M.mouthFidelity(c.outputLandmarks, lms),
+      mouth: M.mouthFidelity(outputLms, lms),
       foreheadToneStep: M.foreheadToneStep(output, driver, lms),
       files,
     });
