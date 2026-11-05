@@ -273,6 +273,15 @@ out      = detail * rebuild(shadeLum, tone)
 - On clip B (head turns), the shadowed side of the face is dark like the real one.
 - No flicker regression.
 
+### R3 additions (R2 review, 2026-11-06)
+- Mouth thresholds per wearer: the resting mouth aperture is learned from the first frontal seconds (10th percentile of MAR over a ~2 s window, recalibrated while frontal) and the lip-fade thresholds sit relative to it (flag `restMouth`, `src/utils/restMouth.ts`). `closedLipMask` is judged on clip A and on three fuller-lip grid personas with contact sheets; with no visible benefit it defaults off (it costs ~0.25% lip error).
+- Interior-skin sharpness: the camera-match acceptance metric is the sharpness ratio with the eyes, brows and mouth cut out of the face mask (`targets.sharpnessInterior`); the face/ring ratio stays as a diagnostic.
+- Camera-match stability: the blur and noise estimates go through a slow EMA with a dead band and hold during fast head motion (flag `steadyCameraMatch`); directional motion blur proportional to head velocity sits behind `motionBlur`. Flicker and the blur-bias trace are measured on clip B.
+- The eye and mouth pass-through fades widen to the camera-match blur radius (flag `softHoles`) so they do not sit sharper than the skin on turned heads.
+- Seam metric replaced before R4: ΔE between narrow bands either side of the persona boundary at the jaw and cheeks, minus the wearer's own step at the same place (`targets.seamStep`, gap ≤ 1 ΔE passes). Validated on `realism-review/before/`: it flags the visible edge there (mean 11.7–20.3 ΔE, worst segments 27–55) and the band positions are drawn on the stills.
+- Acceptance as agreed: neck-gap median and worst 10% beat the R0 grid (3.1 / 10.3), skin gaps within ±3 ΔE of the driver's own, and on clip D the persona's shading follows the lamp (`summary.shading.slope` ≈ 1); p05's ear gap rise (1.84 → 3.42) explained in the report.
+- The 5-zone CPU gain stays in the code while `relight` is off so the r0/r1/r2 presets still reproduce their phases; it is deleted once R3's defaults are accepted (R6 at the latest).
+
 ---
 
 ## Phase R4 — Boundaries and occlusion

@@ -16,6 +16,8 @@ import {
   LEFT_EYE_RING,
   LIP_FEATHER_RING1,
   lipFadeForMar,
+  toneWeights,
+  TONE_WEIGHT_CENTRE,
   LM,
   OUTER_LIP_RING,
   RIGHT_EYE_RING,
@@ -265,4 +267,14 @@ test('closedLipMaskForZone keeps the lip band, masks just outside the contour an
   const mid = closedLipMaskForZone(2.5);
   assert.ok(mid > 0.4 && mid < 0.6, `mid ${mid}`);
   assert.equal(closedLipMaskForZone(3), 0);
+});
+
+test('toneWeights is 1 on the face oval and falls to the centre weight a few rings in', () => {
+  const topo = buildFaceTopology(TESSELLATION, OVAL, 468);
+  const w = toneWeights(topo);
+  for (const v of [10, 152, 234, 454]) assert.equal(w[v], 1, `oval vertex ${v}`);
+  assert.ok(Math.abs(w[LM.NOSE_TIP] - TONE_WEIGHT_CENTRE) < 1e-6, `nose ${w[LM.NOSE_TIP]}`);
+  let monotone = true;
+  for (let v = 0; v < topo.vertexCount; v++) if (w[v] < TONE_WEIGHT_CENTRE - 1e-9 || w[v] > 1) monotone = false;
+  assert.ok(monotone);
 });

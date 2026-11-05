@@ -327,6 +327,24 @@ export const InspectorPanel: React.FC<InspectorPanelProps> = ({
               className="accent-sky-500 w-4 h-4 rounded cursor-pointer"
             />
           </label>
+
+          {settings.lightingAdaptation && (
+            <div className="px-2 pb-1 space-y-1">
+              <div className="flex items-center justify-between text-[10px] text-slate-500">
+                <span>Skin tone: persona ↔ match me</span>
+                <span className="text-slate-300">{Math.round(settings.skinToneMatch * 100)}%</span>
+              </div>
+              <input
+                type="range"
+                min="0"
+                max="1"
+                step="0.05"
+                value={settings.skinToneMatch}
+                onChange={(e) => onUpdateSettings({ skinToneMatch: Number(e.target.value) })}
+                className="w-full accent-sky-500 cursor-pointer h-1.5 bg-slate-800 rounded-lg"
+              />
+            </div>
+          )}
         </div>
       </div>
 

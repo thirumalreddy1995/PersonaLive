@@ -39,7 +39,12 @@ export type RealismFlagKey =
   | 'rigidForehead'
   | 'webgl2'
   | 'personaCrop'
-  | 'cameraMatch';
+  | 'cameraMatch'
+  | 'relight'
+  | 'restMouth'
+  | 'softHoles'
+  | 'steadyCameraMatch'
+  | 'motionBlur';
 
 export const REALISM_FLAG_DEFS: ReadonlyArray<RealismFlagDef> = [
   {
@@ -167,6 +172,42 @@ export const REALISM_FLAG_DEFS: ReadonlyArray<RealismFlagDef> = [
     group: 'mouth-eyes',
   },
   {
+    key: 'relight',
+    label: 'Relight from the real frame',
+    description:
+      'Frequency-separation relighting (R3): the persona keeps its own detail (pores, brows, stubble) over the wearer\'s low-pass shading, with its chroma matched toward the wearer\'s at the face boundary (setting skinToneMatch). Replaces the 5-zone gain while on.',
+    defaultValue: false,
+    group: 'shader',
+  },
+  {
+    key: 'steadyCameraMatch',
+    label: 'Steady camera match',
+    description: 'Camera-match estimates go through a slow EMA with a dead band and hold during fast head motion, so the blur tracks the camera\'s steady softness rather than per-frame motion blur (R3 item 3).',
+    defaultValue: false,
+    group: 'texture',
+  },
+  {
+    key: 'motionBlur',
+    label: 'Directional motion blur',
+    description: 'Blurs the persona along the head\'s screen velocity, proportional to it, so a moving persona smears like the camera frame does (R3 item 3).',
+    defaultValue: false,
+    group: 'texture',
+  },
+  {
+    key: 'restMouth',
+    label: 'Rest-mouth calibration',
+    description: 'Learns the wearer\'s resting mouth aperture from frontal frames (low percentile over ~2 s, recalibrated while frontal) and places the lip-fade thresholds above it (R3 item 1).',
+    defaultValue: false,
+    group: 'mouth-eyes',
+  },
+  {
+    key: 'softHoles',
+    label: 'Soft pass-through edges',
+    description: 'Widens the eye and mouth pass-through fades to the camera-match blur radius so their edges do not sit sharper than the matched skin (R3 item 4).',
+    defaultValue: false,
+    group: 'mouth-eyes',
+  },
+  {
     key: 'closedLipMask',
     label: 'Closed-lip mask',
     description: 'With the mouth closed, removes persona lip colour outside the wearer\'s outer lip contour (feathered to the next ring) so fuller persona lips draw no painted outline (R2).',
@@ -180,14 +221,18 @@ export const REALISM_FLAG_DEFS: ReadonlyArray<RealismFlagDef> = [
  * the current defaults are. Update this only when a phase report changes defaults.
  */
 export const R0_FLAG_STRING =
-  'speechAnatomy=1,perspectiveForeshortening=1,eyelidKinematics=1,foreheadHarmonize=1,hairlineSoften=1,oralCavity=1,catchlights=1,syntheticSuite=1,shaderUnsharp=1,shaderSubsurface=1,shaderSebum=1,realMouth=0,eyePassThrough=0,closedLipMask=0,rigidForehead=0,webgl2=0,personaCrop=0,cameraMatch=0';
+  'speechAnatomy=1,perspectiveForeshortening=1,eyelidKinematics=1,foreheadHarmonize=1,hairlineSoften=1,oralCavity=1,catchlights=1,syntheticSuite=1,shaderUnsharp=1,shaderSubsurface=1,shaderSebum=1,realMouth=0,eyePassThrough=0,closedLipMask=0,rigidForehead=0,webgl2=0,personaCrop=0,cameraMatch=0,relight=0,restMouth=0,softHoles=0,steadyCameraMatch=0,motionBlur=0';
 
 /** The R1 defaults, as a flag string: `--flags r1` reproduces the end-of-R1 behaviour. */
 export const R1_FLAG_STRING =
-  'speechAnatomy=0,perspectiveForeshortening=0,eyelidKinematics=0,foreheadHarmonize=1,hairlineSoften=1,oralCavity=0,catchlights=0,syntheticSuite=0,shaderUnsharp=0,shaderSubsurface=0,shaderSebum=0,realMouth=1,eyePassThrough=1,closedLipMask=0,rigidForehead=0,webgl2=0,personaCrop=0,cameraMatch=0';
+  'speechAnatomy=0,perspectiveForeshortening=0,eyelidKinematics=0,foreheadHarmonize=1,hairlineSoften=1,oralCavity=0,catchlights=0,syntheticSuite=0,shaderUnsharp=0,shaderSubsurface=0,shaderSebum=0,realMouth=1,eyePassThrough=1,closedLipMask=0,rigidForehead=0,webgl2=0,personaCrop=0,cameraMatch=0,relight=0,restMouth=0,softHoles=0,steadyCameraMatch=0,motionBlur=0';
+
+/** The R2 defaults, as a flag string: `--flags r2` reproduces the end-of-R2 behaviour. */
+export const R2_FLAG_STRING =
+  'speechAnatomy=0,perspectiveForeshortening=0,eyelidKinematics=0,foreheadHarmonize=1,hairlineSoften=1,oralCavity=0,catchlights=0,syntheticSuite=0,shaderUnsharp=0,shaderSubsurface=0,shaderSebum=0,realMouth=1,eyePassThrough=1,closedLipMask=1,rigidForehead=1,webgl2=1,personaCrop=1,cameraMatch=1,relight=0,restMouth=0,softHoles=0,steadyCameraMatch=0,motionBlur=0';
 
 /** Named flag presets accepted by parseRealismFlagString (case-insensitive). */
-export const REALISM_FLAG_PRESETS: Record<string, string> = { r0: R0_FLAG_STRING, r1: R1_FLAG_STRING };
+export const REALISM_FLAG_PRESETS: Record<string, string> = { r0: R0_FLAG_STRING, r1: R1_FLAG_STRING, r2: R2_FLAG_STRING };
 
 export type RealismFlags = Record<RealismFlagKey, boolean>;
 

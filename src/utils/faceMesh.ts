@@ -68,6 +68,8 @@ export interface FaceTopology {
   lipZones: Float32Array;
   /** BFS ring distance of every vertex from the eye rings (0 on the rings; -1 if unreachable). */
   eyeRingDistance: Int16Array;
+  /** BFS ring distance of every vertex from the face oval (0 on the oval; -1 if unreachable). */
+  ovalRingDistance: Int16Array;
   /** Number of vertices referenced (468 mesh points; iris points are not part of the surface). */
   vertexCount: number;
 }
@@ -154,8 +156,27 @@ export function buildFaceTopology(
     lipWeights,
     lipZones,
     eyeRingDistance,
+    ovalRingDistance: distance,
     vertexCount,
   };
+}
+
+/** Tone-match weight is this at the face centre (the persona keeps its own complexion there) ... */
+export const TONE_WEIGHT_CENTRE = 0.3;
+/** ... rising to 1 on the face oval over this many tessellation rings. */
+export const TONE_WEIGHT_RINGS = 10;
+
+/**
+ * Per-vertex weight of the R3 tone match: 1 on the face boundary (skin meets the neck and ears
+ * without a colour step), falling to TONE_WEIGHT_CENTRE a few rings inward.
+ */
+export function toneWeights(topology: FaceTopology): Float32Array {
+  const out = new Float32Array(topology.vertexCount);
+  for (let v = 0; v < topology.vertexCount; v++) {
+    const d = topology.ovalRingDistance[v];
+    out[v] = d < 0 ? TONE_WEIGHT_CENTRE : 1 - (1 - TONE_WEIGHT_CENTRE) * Math.min(d, TONE_WEIGHT_RINGS) / TONE_WEIGHT_RINGS;
+  }
+  return out;
 }
 
 /**
@@ -213,9 +234,13 @@ export function eyeFadeWeights(topology: FaceTopology, radius: number): Float32A
   return out;
 }
 
-/** How much of the persona lip band to fade for a given mouth openness (MAR). */
-export function lipFadeForMar(mar: number, closedFade = 0): number {
-  const t = clamp((mar - 0.02) / 0.08, 0, 1);
+/**
+ * How much of the persona lip band to fade for a given mouth openness (MAR): 0 up to `start`,
+ * 1 from `end` (the R1 fixed thresholds by default; R3 places them above the wearer's resting
+ * aperture, see restMouth.ts).
+ */
+export function lipFadeForMar(mar: number, closedFade = 0, start = 0.02, end = 0.1): number {
+  const t = clamp((mar - start) / Math.max(1e-6, end - start), 0, 1);
   const s = t * t * (3 - 2 * t);
   return closedFade + (1 - closedFade) * s;
 }

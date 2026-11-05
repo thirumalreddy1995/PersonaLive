@@ -1,7 +1,7 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { CAMERA_MATCH_LIMITS, initialCameraMatch, stepCameraMatch } from './cameraMatch.ts';
-import { faceStatsFromPixels, toGlslEs3 } from './meshWarpRenderer.ts';
+import { CAMERA_MATCH_LIMITS, STEADY_DEADBAND, initialCameraMatch, stepCameraMatch } from './cameraMatch.ts';
+import { blurTaps, derivativesPreamble, faceStatsFromPixels, lowPassSigma, softHoleRadiusPx, toGlslEs3, uvWidth } from './meshWarpRenderer.ts';
 
 const stats = (laplacianVariance: number, noiseMad: number, samples = 5000) => ({ laplacianVariance, noiseMad, samples });
 
@@ -59,4 +59,52 @@ test('toGlslEs3 rewrites ES 1.00 shaders for WebGL2', () => {
   const f = toGlslEs3('precision highp float;\nuniform sampler2D uTexture;\nvarying vec2 vUv;\nvoid main() { gl_FragColor = texture2D(uTexture, vUv, 1.0); }', 'fragment');
   assert.ok(f.includes('out vec4 fragColor;') && f.includes('in vec2 vUv;') && f.includes('fragColor = texture(uTexture, vUv, 1.0);'));
   assert.ok(!f.includes('gl_FragColor') && !f.includes('texture2D'));
+});
+
+test('steady camera match follows a slow EMA, ignores small errors and holds during motion', () => {
+  let s = initialCameraMatch();
+  // Persona 8× sharper: the steady loop still blurs, but needs more updates than the plain one.
+  for (let i = 0; i < 6; i++) s = stepCameraMatch(s, stats(50, 2), stats(400, 1), 0.35, { steady: true });
+  const slow = s.lodBias;
+  let fast = initialCameraMatch();
+  for (let i = 0; i < 6; i++) fast = stepCameraMatch(fast, stats(50, 2), stats(400, 1));
+  assert.ok(slow > 0 && slow <= fast.lodBias, `steady ${slow} vs plain ${fast.lodBias}`);
+  // Matched: one motion-blurred driver measurement (Laplacian collapses) barely moves the estimate ...
+  for (let i = 0; i < 60; i++) s = stepCameraMatch(s, stats(100, 1), stats(100, 1), 0.35, { steady: true });
+  const settled = s.lodBias;
+  s = stepCameraMatch(s, stats(10, 1), stats(100, 1), 0.35, { steady: true });
+  assert.ok(Math.abs(s.lodBias - settled) < 0.15, `one blurred frame moved the bias by ${Math.abs(s.lodBias - settled)}`);
+  // ... and a held update moves nothing at all while still recording the measurement.
+  const held = stepCameraMatch(s, stats(10, 1), stats(100, 1), 0.35, { steady: true, hold: true });
+  assert.equal(held.lodBias, s.lodBias);
+  assert.equal(held.driverLaplacian, 10);
+  assert.equal(held.driverLogEma, s.driverLogEma);
+  // Inside the dead band the controls stay put.
+  const inBand = stepCameraMatch(s, stats(100, 1), stats(100 * Math.exp(STEADY_DEADBAND * 0.5), 1), 0.35, { steady: true });
+  assert.equal(inBand.lodBias, s.lodBias);
+});
+
+test('R3 relight helpers: low-pass sigma, blur taps, soft-hole radius, UV width and the derivatives preamble', () => {
+  // 8% of a 300 px face at 1/8 scale is 3 texels; tiny and huge faces are clamped.
+  assert.ok(Math.abs(lowPassSigma(300) - 3) < 1e-9);
+  assert.equal(lowPassSigma(10), 1);
+  assert.equal(lowPassSigma(100000), 40);
+  // Small sigmas sample every texel; larger ones spread the 15 taps so ±7 taps still cover ~2.8 sigma.
+  assert.deepEqual(blurTaps(2), { spacing: 1, sigmaTaps: 2 });
+  const wide = blurTaps(10);
+  assert.ok(wide.spacing > 1 && Math.abs(wide.sigmaTaps - 2.5) < 1e-9);
+  // Soft holes: a bias of 2 at one texel per pixel widens the fade to 6 px; clamped to 1..12.
+  assert.ok(Math.abs(softHoleRadiusPx(2, 1) - 6) < 1e-9);
+  assert.equal(softHoleRadiusPx(0, 0.1), 1);
+  assert.equal(softHoleRadiusPx(4, 2), 12);
+  const uv = new Float32Array(468 * 2);
+  for (let i = 0; i < 468; i++) uv[i * 2] = 0.2 + (i / 467) * 0.5;
+  assert.ok(Math.abs(uvWidth(uv) - 0.5) < 1e-6, `uv width ${uvWidth(uv)} (float32 storage)`);
+  assert.equal(uvWidth(new Float32Array(468 * 2)), 1, 'degenerate UVs fall back to 1');
+  assert.equal(derivativesPreamble(true, false), '#define HAS_DERIVATIVES 1\n');
+  assert.ok(derivativesPreamble(false, true).startsWith('#extension GL_OES_standard_derivatives : enable'));
+  assert.equal(derivativesPreamble(false, false), '');
+  // The ES3 conversion keeps the version line first and the defines right after it.
+  const es3 = toGlslEs3('precision highp float;\nvoid main() {}', 'fragment', '#define HAS_DERIVATIVES 1\n');
+  assert.ok(es3.startsWith('#version 300 es\n#define HAS_DERIVATIVES 1\n'));
 });

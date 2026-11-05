@@ -107,6 +107,7 @@ export default function App() {
     rigidPoseMinCutoff: 1.2,
     rigidPoseBeta: 0.05,
     rigidShapeOffset: true,
+    skinToneMatch: 1,
     lightingAdaptation: true,
     preserveFacialHair: true,
     showLandmarkOverlay: false,

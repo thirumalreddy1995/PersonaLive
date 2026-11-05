@@ -16,7 +16,7 @@
  * is the fallback, then a Canvas 2D per-triangle affine warp. The renderer survives WebGL
  * context loss (GPU reset, tab backgrounding) by rebuilding its GPU resources on restore.
  */
-import { closedLipMaskForZone, type FaceTopology } from './faceMesh.ts';
+import { closedLipMaskForZone, toneWeights, type FaceTopology } from './faceMesh.ts';
 
 export interface FacialLightingZones {
   forehead: [number, number, number];
@@ -36,6 +36,26 @@ export interface CameraMatchOptions {
   /** Frame counter that changes the noise pattern every frame. */
   frame: number;
 }
+
+/** R3 relighting inputs (realism flag relight). */
+export interface RelightOptions {
+  /** The current driver frame. */
+  source: TexImageSource;
+  /** Where the frame sits on the canvas: offsetX, offsetY, drawWidth, drawHeight. */
+  srcMap: [number, number, number, number];
+  mirror: boolean;
+  /** Face width in canvas pixels: the low-pass radius is a share of it. */
+  faceWidthPx: number;
+  /** 0..1 tone match toward the wearer at the face boundary (setting skinToneMatch). */
+  toneMatch: number;
+}
+
+/** The low-pass framebuffers run at 1/RELIGHT_SCALE of the canvas (and of the persona texture). */
+export const RELIGHT_SCALE = 8;
+/** Gaussian sigma of the low pass as a share of face width (plan R3: radius 6–10% of face width). */
+export const RELIGHT_RADIUS_SHARE = 0.08;
+/** Soft pass-through edges: the fade spans this many camera-blur radii (R3 item 4), clamped to 1..12 px. */
+export const SOFT_HOLE_RADII = 1.5;
 
 export interface WarpFrameOptions {
   /** Flat [x, y, ...] pixel positions for 468+ vertices in output canvas space. */
@@ -60,6 +80,12 @@ export interface WarpFrameOptions {
   shader?: { unsharp: boolean; subsurface: boolean; sebum: boolean };
   /** Camera-matched sharpness and noise (R2 §4); omitted = off. */
   cameraMatch?: CameraMatchOptions;
+  /** R3 relighting from the real frame; omitted = the zone gains above. */
+  relight?: RelightOptions;
+  /** Directional motion blur: head velocity in screen pixels per frame (y up), scaled by the exposure share. */
+  motionBlurPx?: [number, number];
+  /** Widen the eye and mouth pass-through fades to the camera-match blur radius (realism flag softHoles). */
+  softHoles?: boolean;
 }
 
 /** Face-region pixel statistics from an asynchronous readback. */
@@ -81,6 +107,7 @@ attribute float aFeather;
 attribute float aLip;
 attribute float aLipZone;
 attribute float aEyeFade;
+attribute float aToneWeight;
 
 uniform vec2 uResolution;
 uniform vec4 uFaceBounds;
@@ -97,6 +124,7 @@ varying vec2 vNormPos;
 varying float vLip;
 varying float vLipZone;
 varying float vEyeFade;
+varying float vToneWeight;
 
 void main() {
   vec2 clip = vec2(aPosition.x / uResolution.x * 2.0 - 1.0, 1.0 - aPosition.y / uResolution.y * 2.0);
@@ -106,6 +134,7 @@ void main() {
   vLip = aLip;
   vLipZone = aLipZone;
   vEyeFade = aEyeFade;
+  vToneWeight = aToneWeight;
 
   // Normalized position relative to face bounding box [0, 1]
   vec2 nPos = clamp((aPosition - uFaceBounds.xy) / max(uFaceBounds.zw, vec2(1.0)), 0.0, 1.0);
@@ -130,6 +159,9 @@ void main() {
 const FRAGMENT_SHADER_ES1 = `
 precision highp float;
 uniform sampler2D uTexture;
+uniform sampler2D uDriverLow;
+uniform sampler2D uPersonaLow;
+uniform vec2 uResolution;
 uniform float uOpacity;
 uniform float uUnsharp;
 uniform float uSubsurface;
@@ -142,6 +174,10 @@ uniform float uLodBias;
 uniform float uSharpen;
 uniform float uNoiseSigma;
 uniform float uFrame;
+uniform float uRelight;
+uniform float uToneMatch;
+uniform vec2 uMotionBlur;
+uniform float uSoftHolesPx;
 
 varying vec2 vUv;
 varying float vFeather;
@@ -150,6 +186,7 @@ varying vec2 vNormPos;
 varying float vLip;
 varying float vLipZone;
 varying float vEyeFade;
+varying float vToneWeight;
 
 // Per-pixel, per-frame hash in [0, 1).
 float hash12(vec2 p) {
@@ -158,9 +195,36 @@ float hash12(vec2 p) {
   return fract((p3.x + p3.y) * p3.z);
 }
 
+vec3 srgbToLinear(vec3 c) { return pow(max(c, vec3(0.0)), vec3(2.2)); }
+vec3 linearToSrgb(vec3 c) { return pow(max(c, vec3(0.0)), vec3(1.0 / 2.2)); }
+float luma(vec3 c) { return dot(c, vec3(0.2126, 0.7152, 0.0722)); }
+
+// Widens a 0..1 fade so its screen-space transition spans at least radiusPx (R3 item 4): the
+// eye and mouth pass-through edges then sit no sharper than the camera-matched skin around them.
+float soften(float v, float radiusPx) {
+#ifdef HAS_DERIVATIVES
+  float g = fwidth(v);
+  if (g < 1e-5 || radiusPx <= 0.0) return v;
+  float widthPx = 1.0 / g;
+  float want = max(widthPx, radiusPx);
+  return clamp((v - 0.5) * (widthPx / want) + 0.5, 0.0, 1.0);
+#else
+  return v;
+#endif
+}
+
 void main() {
   // Camera match: a mip LOD bias blurs the persona toward the camera's softness (R2 §4).
   vec4 c = texture2D(uTexture, vUv, uLodBias);
+#ifdef HAS_DERIVATIVES
+  // Directional motion blur along the head's screen velocity (realism flag motionBlur, R3 item 3).
+  if (dot(uMotionBlur, uMotionBlur) > 0.25) {
+    vec2 uvStep = (dFdx(vUv) * uMotionBlur.x + dFdy(vUv) * uMotionBlur.y) / 4.0;
+    vec4 acc = vec4(0.0);
+    for (int i = -2; i <= 2; i++) acc += texture2D(uTexture, vUv + uvStep * float(i), uLodBias);
+    c = acc / 5.0;
+  }
+#endif
   if (c.a < 0.02) discard;
 
   // 1. Unsharp mask with a texel-sized kernel: the fixed-offset R0 version (flag shaderUnsharp)
@@ -174,8 +238,30 @@ void main() {
   vec3 highPass = c.rgb - blurred;
   vec3 microSkin = c.rgb + highPass * (0.35 * uUnsharp + uSharpen);
 
-  // 2. Multi-zone directional lighting adaptation
-  vec3 lit = clamp(microSkin, 0.0, 1.0) * vLighting;
+  // 2. Lighting. R3 (flag relight): frequency separation in linear light. The persona keeps its
+  //    own detail (persona / persona low-pass) and takes the wearer's low-pass shading; its chroma
+  //    is mixed toward the wearer's by the tone weight (1 at the face boundary, 0.3 at the centre)
+  //    times the user's skin-tone-match setting. Otherwise the multi-zone gain of R0.
+  vec3 base = clamp(microSkin, 0.0, 1.0);
+  vec3 gain = vLighting;
+  if (uRelight > 0.5) {
+    vec4 pl = texture2D(uPersonaLow, vUv);
+    vec4 dl = texture2D(uDriverLow, gl_FragCoord.xy / uResolution);
+    if (pl.a > 0.05 && dl.a > 0.05) {
+      vec3 P = srgbToLinear(base);
+      vec3 PL = pl.rgb / pl.a;  // the low passes are stored in linear light (see PAINT_FRAGMENT_ES1)
+      vec3 DL = dl.rgb / dl.a;
+      vec3 detail = clamp(P / max(PL, vec3(0.002)), 0.0, 4.0);
+      float shade = luma(DL);
+      vec3 chromaP = PL / max(luma(PL), 0.002);
+      vec3 chromaD = DL / max(luma(DL), 0.002);
+      float tw = clamp(uToneMatch * vToneWeight * min(1.0, dl.a / 0.3), 0.0, 1.0);
+      vec3 tone = mix(chromaP, chromaD, tw);
+      base = linearToSrgb(clamp(detail * shade * tone, 0.0, 1.0));
+      gain = vec3(1.0);
+    }
+  }
+  vec3 lit = base * gain;
 
   // 3. Warm "subdermal" tint on mid-tones (realism flag shaderSubsurface)
   float lum = dot(lit, vec3(0.299, 0.587, 0.114));
@@ -204,14 +290,65 @@ void main() {
   // into the driver's hairline and temple shadow, eliminating horizontal seam cuts
   float cranialFalloff = smoothstep(0.0, 0.15, vNormPos.y);
 
-  // 8. Keep my real mouth / eye pass-through / closed-lip mask.
-  float closedMask = smoothstep(1.0, 1.3, vLipZone) * (1.0 - smoothstep(2.0, 3.0, vLipZone)) * uClosedLipMask * (1.0 - uLipFade);
-  float lipHole = max(clamp(vLip * uLipFade, 0.0, 1.0), closedMask);
-  float holes = (1.0 - lipHole) * (1.0 - clamp(vEyeFade * uEyeFade, 0.0, 1.0));
+  // 8. Keep my real mouth / eye pass-through / closed-lip mask (edges softened by uSoftHolesPx).
+  float closedMask = soften(smoothstep(1.0, 1.3, vLipZone) * (1.0 - smoothstep(2.0, 3.0, vLipZone)), uSoftHolesPx) * uClosedLipMask * (1.0 - uLipFade);
+  float lipHole = max(soften(clamp(vLip * uLipFade, 0.0, 1.0), uSoftHolesPx), closedMask);
+  float holes = (1.0 - lipHole) * (1.0 - soften(clamp(vEyeFade * uEyeFade, 0.0, 1.0), uSoftHolesPx));
 
   float a = uOpacity * f * cranialFalloff * c.a * holes;
 
   gl_FragColor = vec4(naturalSkin * a, a);
+}`;
+
+/**
+ * R3 low-pass pipeline, pass 1: paints the face mesh into a small framebuffer with the colour of
+ * a source texture (decoded to linear light) and alpha 1 (holes and the outside stay 0). Mode 0 = the driver frame at the
+ * mesh's screen positions (canvas space); mode 1 = the persona at its UVs (texture space).
+ */
+const PAINT_VERTEX_ES1 = `
+attribute vec2 aPosition;
+attribute vec2 aUv;
+uniform float uMode;
+uniform vec2 uResolution;
+uniform vec4 uSrcMap;
+uniform float uMirror;
+varying vec2 vTex;
+void main() {
+  if (uMode < 0.5) {
+    gl_Position = vec4(aPosition.x / uResolution.x * 2.0 - 1.0, 1.0 - aPosition.y / uResolution.y * 2.0, 0.0, 1.0);
+    float x = uMirror > 0.5 ? uResolution.x - aPosition.x : aPosition.x;
+    vTex = vec2((x - uSrcMap.x) / uSrcMap.z, (aPosition.y - uSrcMap.y) / uSrcMap.w);
+  } else {
+    gl_Position = vec4(aUv.x * 2.0 - 1.0, aUv.y * 2.0 - 1.0, 0.0, 1.0);
+    vTex = aUv;
+  }
+}`;
+const PAINT_FRAGMENT_ES1 = `
+precision highp float;
+uniform sampler2D uTexture;
+varying vec2 vTex;
+void main() {
+  // Linear light before the blur, so the low pass is a true mean and not a gamma-space one.
+  vec3 c = texture2D(uTexture, clamp(vTex, 0.0, 1.0)).rgb;
+  gl_FragColor = vec4(pow(max(c, vec3(0.0)), vec3(2.2)), 1.0);
+}`;
+
+/** R3 low-pass pipeline, pass 2: separable Gaussian on premultiplied RGBA (15 taps, spaced). */
+const BLUR_FRAGMENT_ES1 = `
+precision highp float;
+uniform sampler2D uTexture;
+uniform vec2 uStep;
+uniform float uSigma;
+varying vec2 vUv;
+void main() {
+  vec4 acc = vec4(0.0);
+  float wsum = 0.0;
+  for (int i = -7; i <= 7; i++) {
+    float w = exp(-0.5 * float(i * i) / max(uSigma * uSigma, 1e-4));
+    acc += texture2D(uTexture, vUv + uStep * float(i)) * w;
+    wsum += w;
+  }
+  gl_FragColor = acc / wsum;
 }`;
 
 /** Simple textured quad, used to downsample a source into a small framebuffer for readback. */
@@ -229,12 +366,18 @@ uniform sampler2D uTexture;
 varying vec2 vUv;
 void main() { gl_FragColor = texture2D(uTexture, vUv); }`;
 
-/** Converts GLSL ES 1.00 shader source to GLSL ES 3.00 for WebGL2. */
-export function toGlslEs3(source: string, stage: 'vertex' | 'fragment'): string {
+/** Converts GLSL ES 1.00 shader source to GLSL ES 3.00 for WebGL2 (`defines` go after the version line). */
+export function toGlslEs3(source: string, stage: 'vertex' | 'fragment', defines = ''): string {
   let s = source.replace(/\btexture2D\(/g, 'texture(').replace(/\battribute\b/g, 'in');
   s = s.replace(/\bvarying\b/g, stage === 'vertex' ? 'out' : 'in');
   if (stage === 'fragment') s = s.replace(/\bgl_FragColor\b/g, 'fragColor').replace(/precision highp float;/, 'precision highp float;\nout vec4 fragColor;');
-  return `#version 300 es\n${s}`;
+  return `#version 300 es\n${defines}${s}`;
+}
+
+/** Fragment-shader preamble that enables screen-space derivatives where they exist. */
+export function derivativesPreamble(es3: boolean, extensionAvailable: boolean): string {
+  if (es3) return '#define HAS_DERIVATIVES 1\n';
+  return extensionAvailable ? '#extension GL_OES_standard_derivatives : enable\n#define HAS_DERIVATIVES 1\n' : '';
 }
 
 interface GLResources {
@@ -245,6 +388,7 @@ interface GLResources {
   lipBuffer: WebGLBuffer;
   lipZoneBuffer: WebGLBuffer;
   eyeFadeBuffer: WebGLBuffer;
+  toneBuffer: WebGLBuffer;
   indexBuffer: WebGLBuffer;
   eyeIndexBuffer: WebGLBuffer;
   texture: WebGLTexture;
@@ -255,6 +399,7 @@ interface GLResources {
     aLip: number;
     aLipZone: number;
     aEyeFade: number;
+    aToneWeight: number;
     uResolution: WebGLUniformLocation | null;
     uTexture: WebGLUniformLocation | null;
     uFaceBounds: WebGLUniformLocation | null;
@@ -275,7 +420,15 @@ interface GLResources {
     uSharpen: WebGLUniformLocation | null;
     uNoiseSigma: WebGLUniformLocation | null;
     uFrame: WebGLUniformLocation | null;
+    uDriverLow: WebGLUniformLocation | null;
+    uPersonaLow: WebGLUniformLocation | null;
+    uRelight: WebGLUniformLocation | null;
+    uToneMatch: WebGLUniformLocation | null;
+    uMotionBlur: WebGLUniformLocation | null;
+    uSoftHolesPx: WebGLUniformLocation | null;
   };
+  /** R3 relighting: created on first use (see ensureRelight). */
+  relight: RelightResources | null;
   /** WebGL2 only: downsample + asynchronous readback resources. */
   readback: {
     program: WebGLProgram;
@@ -310,6 +463,55 @@ export function centredRect(rect: [number, number, number, number], size: [numbe
   return [rect[0] + (rect[2] - w) / 2, rect[1] + (rect[3] - h) / 2, w, h];
 }
 
+/** A small RGBA framebuffer pair (ping-pong) holding a premultiplied, masked low-pass image. */
+interface LowPassTarget {
+  fbo: [WebGLFramebuffer, WebGLFramebuffer];
+  tex: [WebGLTexture, WebGLTexture];
+  width: number;
+  height: number;
+}
+
+interface RelightResources {
+  paint: {
+    program: WebGLProgram;
+    aPosition: number;
+    aUv: number;
+    uMode: WebGLUniformLocation | null;
+    uResolution: WebGLUniformLocation | null;
+    uSrcMap: WebGLUniformLocation | null;
+    uMirror: WebGLUniformLocation | null;
+    uTexture: WebGLUniformLocation | null;
+  };
+  blur: {
+    program: WebGLProgram;
+    aPosition: number;
+    uTexture: WebGLUniformLocation | null;
+    uSrcRect: WebGLUniformLocation | null;
+    uStep: WebGLUniformLocation | null;
+    uSigma: WebGLUniformLocation | null;
+  };
+  quad: WebGLBuffer;
+  driverTexture: WebGLTexture;
+  driver: LowPassTarget | null;
+  persona: LowPassTarget | null;
+}
+
+/** Gaussian sigma (in low-pass texels) for a face this wide (in the source's own pixels). */
+export function lowPassSigma(faceWidth: number): number {
+  return Math.min(40, Math.max(1, (RELIGHT_RADIUS_SHARE * faceWidth) / RELIGHT_SCALE));
+}
+
+/** Tap spacing and per-tap sigma for the 15-tap blur so sigma up to ~17 texels fits ±7 taps. */
+export function blurTaps(sigma: number): { spacing: number; sigmaTaps: number } {
+  const spacing = Math.max(1, sigma / 2.5);
+  return { spacing, sigmaTaps: sigma / spacing };
+}
+
+/** Screen-pixel radius the pass-through fades widen to for a camera-match LOD bias (R3 item 4). */
+export function softHoleRadiusPx(lodBias: number, texelPx: number): number {
+  return Math.min(12, Math.max(1, Math.pow(2, Math.max(0, lodBias)) * texelPx * SOFT_HOLE_RADII));
+}
+
 interface PendingReadback {
   buffer: WebGLBuffer;
   sync: WebGLSync;
@@ -324,6 +526,19 @@ function sourceSize(image: PersonaSource): { width: number; height: number } {
 
 function isPowerOfTwo(n: number): boolean {
   return n > 0 && (n & (n - 1)) === 0;
+}
+
+/** max u − min u over the 468 mesh vertices of a flat UV array. */
+export function uvWidth(uv: Float32Array): number {
+  let lo = Infinity;
+  let hi = -Infinity;
+  const n = Math.min(468, uv.length / 2);
+  for (let i = 0; i < n; i++) {
+    const u = uv[i * 2];
+    if (u < lo) lo = u;
+    if (u > hi) hi = u;
+  }
+  return Number.isFinite(hi - lo) && hi > lo ? hi - lo : 1;
 }
 
 /**
@@ -390,6 +605,11 @@ export class MeshWarpRenderer {
   private personaImage: PersonaSource | null = null;
   private personaUv: Float32Array | null = null;
   private personaSize = { width: 1, height: 1 };
+  /** Width of the persona face in UV units (max u − min u), for texel-size maths. */
+  private personaUvWidth = 1;
+  /** The persona low-pass must be rebuilt (new persona, UVs, texture or topology). */
+  private personaLowDirty = true;
+  private relightFailed = false;
   private pending: PendingReadback[] = [];
 
   /**
@@ -464,6 +684,7 @@ export class MeshWarpRenderer {
 
   private compileProgram(gl: WebGLRenderingContext, vertex: string, fragment: string): WebGLProgram {
     const es3 = this.gl2 !== null;
+    const preamble = derivativesPreamble(es3, es3 || gl.getExtension('OES_standard_derivatives') !== null);
     const compile = (type: number, source: string): WebGLShader => {
       const shader = gl.createShader(type);
       if (!shader) throw new Error('Could not create WebGL shader');
@@ -479,7 +700,7 @@ export class MeshWarpRenderer {
     const program = gl.createProgram();
     if (!program) throw new Error('Could not create WebGL program');
     gl.attachShader(program, compile(gl.VERTEX_SHADER, es3 ? toGlslEs3(vertex, 'vertex') : vertex));
-    gl.attachShader(program, compile(gl.FRAGMENT_SHADER, es3 ? toGlslEs3(fragment, 'fragment') : fragment));
+    gl.attachShader(program, compile(gl.FRAGMENT_SHADER, es3 ? toGlslEs3(fragment, 'fragment', preamble) : preamble + fragment));
     gl.linkProgram(program);
     if (!gl.getProgramParameter(program, gl.LINK_STATUS)) {
       const log = gl.getProgramInfoLog(program) || 'Program link failed';
@@ -545,6 +766,7 @@ export class MeshWarpRenderer {
       lipBuffer: buffer(),
       lipZoneBuffer: buffer(),
       eyeFadeBuffer: buffer(),
+      toneBuffer: buffer(),
       indexBuffer: buffer(),
       eyeIndexBuffer: buffer(),
       texture,
@@ -555,6 +777,7 @@ export class MeshWarpRenderer {
         aLip: gl.getAttribLocation(program, 'aLip'),
         aLipZone: gl.getAttribLocation(program, 'aLipZone'),
         aEyeFade: gl.getAttribLocation(program, 'aEyeFade'),
+        aToneWeight: gl.getAttribLocation(program, 'aToneWeight'),
         uResolution: u('uResolution'),
         uTexture: u('uTexture'),
         uFaceBounds: u('uFaceBounds'),
@@ -575,9 +798,187 @@ export class MeshWarpRenderer {
         uSharpen: u('uSharpen'),
         uNoiseSigma: u('uNoiseSigma'),
         uFrame: u('uFrame'),
+        uDriverLow: u('uDriverLow'),
+        uPersonaLow: u('uPersonaLow'),
+        uRelight: u('uRelight'),
+        uToneMatch: u('uToneMatch'),
+        uMotionBlur: u('uMotionBlur'),
+        uSoftHolesPx: u('uSoftHolesPx'),
       },
+      relight: null,
       readback,
     };
+  }
+
+  /** Creates the R3 low-pass programs and the driver texture on first use (any WebGL version). */
+  private ensureRelight(gl: WebGLRenderingContext | WebGL2RenderingContext, r: GLResources): RelightResources | null {
+    if (r.relight) return r.relight;
+    try {
+      const paint = this.compileProgram(gl, PAINT_VERTEX_ES1, PAINT_FRAGMENT_ES1);
+      const blur = this.compileProgram(gl, COPY_VERTEX_ES1, BLUR_FRAGMENT_ES1);
+      const quad = gl.createBuffer()!;
+      gl.bindBuffer(gl.ARRAY_BUFFER, quad);
+      gl.bufferData(gl.ARRAY_BUFFER, new Float32Array([-1, -1, 1, -1, -1, 1, 1, 1]), gl.STATIC_DRAW);
+      const driverTexture = gl.createTexture()!;
+      r.relight = {
+        paint: {
+          program: paint,
+          aPosition: gl.getAttribLocation(paint, 'aPosition'),
+          aUv: gl.getAttribLocation(paint, 'aUv'),
+          uMode: gl.getUniformLocation(paint, 'uMode'),
+          uResolution: gl.getUniformLocation(paint, 'uResolution'),
+          uSrcMap: gl.getUniformLocation(paint, 'uSrcMap'),
+          uMirror: gl.getUniformLocation(paint, 'uMirror'),
+          uTexture: gl.getUniformLocation(paint, 'uTexture'),
+        },
+        blur: {
+          program: blur,
+          aPosition: gl.getAttribLocation(blur, 'aPosition'),
+          uTexture: gl.getUniformLocation(blur, 'uTexture'),
+          uSrcRect: gl.getUniformLocation(blur, 'uSrcRect'),
+          uStep: gl.getUniformLocation(blur, 'uStep'),
+          uSigma: gl.getUniformLocation(blur, 'uSigma'),
+        },
+        quad,
+        driverTexture,
+        driver: null,
+        persona: null,
+      };
+      this.personaLowDirty = true;
+      return r.relight;
+    } catch (err) {
+      console.warn('Relighting unavailable on this GPU; keeping the zone gains.', err);
+      this.relightFailed = true;
+      return null;
+    }
+  }
+
+  /** (Re)creates a ping-pong low-pass target at the given size. */
+  private ensureTarget(gl: WebGLRenderingContext, target: LowPassTarget | null, width: number, height: number): LowPassTarget {
+    if (target && target.width === width && target.height === height) return target;
+    if (target) this.deleteTarget(gl, target);
+    const make = (): [WebGLTexture, WebGLFramebuffer] => {
+      const tex = gl.createTexture()!;
+      gl.bindTexture(gl.TEXTURE_2D, tex);
+      gl.texImage2D(gl.TEXTURE_2D, 0, gl.RGBA, width, height, 0, gl.RGBA, gl.UNSIGNED_BYTE, null);
+      gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MIN_FILTER, gl.LINEAR);
+      gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MAG_FILTER, gl.LINEAR);
+      gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_WRAP_S, gl.CLAMP_TO_EDGE);
+      gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_WRAP_T, gl.CLAMP_TO_EDGE);
+      const fbo = gl.createFramebuffer()!;
+      gl.bindFramebuffer(gl.FRAMEBUFFER, fbo);
+      gl.framebufferTexture2D(gl.FRAMEBUFFER, gl.COLOR_ATTACHMENT0, gl.TEXTURE_2D, tex, 0);
+      return [tex, fbo];
+    };
+    const [t0, f0] = make();
+    const [t1, f1] = make();
+    gl.bindFramebuffer(gl.FRAMEBUFFER, null);
+    return { fbo: [f0, f1], tex: [t0, t1], width, height };
+  }
+
+  private deleteTarget(gl: WebGLRenderingContext, t: LowPassTarget) {
+    for (const f of t.fbo) gl.deleteFramebuffer(f);
+    for (const x of t.tex) gl.deleteTexture(x);
+  }
+
+  /**
+   * R3 §1–2: paints the wearer's face (driver frame under the mesh) and, when stale, the persona's
+   * face into small framebuffers and Gaussian-blurs both (mask-aware: alpha carries the mesh
+   * coverage, so eye and mouth holes and the outside never bleed in). Returns false when the
+   * pipeline is unavailable. Leaves the caller to restore the main program and attributes.
+   */
+  private relightPasses(gl: WebGLRenderingContext | WebGL2RenderingContext, r: GLResources, o: RelightOptions): boolean {
+    if (this.relightFailed || !this.topology) return false;
+    const rl = this.ensureRelight(gl, r);
+    if (!rl) return false;
+    const W = this._canvas.width;
+    const H = this._canvas.height;
+
+    // Driver frame → texture (mipmapped on WebGL2 so the 1/8 paint is a box prefilter, not a point sample).
+    gl.activeTexture(gl.TEXTURE0);
+    gl.bindTexture(gl.TEXTURE_2D, rl.driverTexture);
+    gl.pixelStorei(gl.UNPACK_FLIP_Y_WEBGL, false);
+    gl.pixelStorei(gl.UNPACK_PREMULTIPLY_ALPHA_WEBGL, false);
+    gl.texImage2D(gl.TEXTURE_2D, 0, gl.RGBA, gl.RGBA, gl.UNSIGNED_BYTE, o.source);
+    gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_WRAP_S, gl.CLAMP_TO_EDGE);
+    gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_WRAP_T, gl.CLAMP_TO_EDGE);
+    gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MAG_FILTER, gl.LINEAR);
+    if (this.gl2) {
+      gl.generateMipmap(gl.TEXTURE_2D);
+      gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MIN_FILTER, gl.LINEAR_MIPMAP_LINEAR);
+    } else {
+      gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MIN_FILTER, gl.LINEAR);
+    }
+
+    rl.driver = this.ensureTarget(gl, rl.driver, Math.max(1, Math.ceil(W / RELIGHT_SCALE)), Math.max(1, Math.ceil(H / RELIGHT_SCALE)));
+    const pw = Math.max(1, Math.ceil(this.personaSize.width / RELIGHT_SCALE));
+    const ph = Math.max(1, Math.ceil(this.personaSize.height / RELIGHT_SCALE));
+    const personaStale = this.personaLowDirty || !rl.persona || rl.persona.width !== pw || rl.persona.height !== ph;
+    rl.persona = this.ensureTarget(gl, rl.persona, pw, ph);
+
+    gl.disable(gl.BLEND);
+    if (personaStale) {
+      this.paintMesh(gl, r, rl, rl.persona, 1, o);
+      this.blurTarget(gl, rl, rl.persona, lowPassSigma(this.personaUvWidth * this.personaSize.width));
+      this.personaLowDirty = false;
+    }
+    this.paintMesh(gl, r, rl, rl.driver, 0, o);
+    this.blurTarget(gl, rl, rl.driver, lowPassSigma(o.faceWidthPx));
+
+    gl.bindFramebuffer(gl.FRAMEBUFFER, null);
+    gl.viewport(0, 0, W, H);
+    gl.enable(gl.BLEND);
+    return true;
+  }
+
+  private paintMesh(gl: WebGLRenderingContext, r: GLResources, rl: RelightResources, target: LowPassTarget, mode: 0 | 1, o: RelightOptions) {
+    const topo = this.topology!;
+    gl.bindFramebuffer(gl.FRAMEBUFFER, target.fbo[0]);
+    gl.viewport(0, 0, target.width, target.height);
+    gl.clearColor(0, 0, 0, 0);
+    gl.clear(gl.COLOR_BUFFER_BIT);
+    gl.useProgram(rl.paint.program);
+    gl.bindBuffer(gl.ARRAY_BUFFER, r.positionBuffer);
+    gl.enableVertexAttribArray(rl.paint.aPosition);
+    gl.vertexAttribPointer(rl.paint.aPosition, 2, gl.FLOAT, false, 0, 0);
+    gl.bindBuffer(gl.ARRAY_BUFFER, r.uvBuffer);
+    gl.enableVertexAttribArray(rl.paint.aUv);
+    gl.vertexAttribPointer(rl.paint.aUv, 2, gl.FLOAT, false, 0, 0);
+    gl.uniform1f(rl.paint.uMode, mode);
+    gl.uniform2f(rl.paint.uResolution, this._canvas.width, this._canvas.height);
+    gl.uniform4f(rl.paint.uSrcMap, o.srcMap[0], o.srcMap[1], Math.max(1, o.srcMap[2]), Math.max(1, o.srcMap[3]));
+    gl.uniform1f(rl.paint.uMirror, o.mirror ? 1 : 0);
+    gl.activeTexture(gl.TEXTURE0);
+    gl.bindTexture(gl.TEXTURE_2D, mode === 0 ? rl.driverTexture : r.texture);
+    gl.uniform1i(rl.paint.uTexture, 0);
+    gl.bindBuffer(gl.ELEMENT_ARRAY_BUFFER, r.indexBuffer);
+    gl.drawElements(gl.TRIANGLES, topo.triangles.length, gl.UNSIGNED_SHORT, 0);
+  }
+
+  private blurTarget(gl: WebGLRenderingContext, rl: RelightResources, target: LowPassTarget, sigma: number) {
+    const { spacing, sigmaTaps } = blurTaps(sigma);
+    gl.useProgram(rl.blur.program);
+    gl.bindBuffer(gl.ARRAY_BUFFER, rl.quad);
+    gl.enableVertexAttribArray(rl.blur.aPosition);
+    gl.vertexAttribPointer(rl.blur.aPosition, 2, gl.FLOAT, false, 0, 0);
+    gl.uniform4f(rl.blur.uSrcRect, 0, 0, 1, 1);
+    gl.uniform1f(rl.blur.uSigma, sigmaTaps);
+    gl.activeTexture(gl.TEXTURE0);
+    gl.uniform1i(rl.blur.uTexture, 0);
+    gl.viewport(0, 0, target.width, target.height);
+    const pass = (src: WebGLTexture, dst: WebGLFramebuffer, stepX: number, stepY: number) => {
+      gl.bindFramebuffer(gl.FRAMEBUFFER, dst);
+      gl.bindTexture(gl.TEXTURE_2D, src);
+      gl.uniform2f(rl.blur.uStep, stepX, stepY);
+      gl.drawArrays(gl.TRIANGLE_STRIP, 0, 4);
+    };
+    pass(target.tex[0], target.fbo[1], spacing / target.width, 0);
+    pass(target.tex[1], target.fbo[0], 0, spacing / target.height);
+  }
+
+  /** True when the R3 relighting can run (any WebGL context that compiled its programs). */
+  get supportsRelight(): boolean {
+    return this.gl !== null && !this.contextLost && !this.relightFailed;
   }
 
   private deleteResources(gl: WebGLRenderingContext | WebGL2RenderingContext, r: GLResources) {
@@ -587,10 +988,20 @@ export class MeshWarpRenderer {
     gl.deleteBuffer(r.lipBuffer);
     gl.deleteBuffer(r.lipZoneBuffer);
     gl.deleteBuffer(r.eyeFadeBuffer);
+    gl.deleteBuffer(r.toneBuffer);
     gl.deleteBuffer(r.indexBuffer);
     gl.deleteBuffer(r.eyeIndexBuffer);
     gl.deleteTexture(r.texture);
     gl.deleteProgram(r.program);
+    if (r.relight) {
+      gl.deleteProgram(r.relight.paint.program);
+      gl.deleteProgram(r.relight.blur.program);
+      gl.deleteBuffer(r.relight.quad);
+      gl.deleteTexture(r.relight.driverTexture);
+      if (r.relight.driver) this.deleteTarget(gl, r.relight.driver);
+      if (r.relight.persona) this.deleteTarget(gl, r.relight.persona);
+      r.relight = null;
+    }
     if (r.readback) {
       gl.deleteProgram(r.readback.program);
       gl.deleteBuffer(r.readback.quad);
@@ -647,6 +1058,9 @@ export class MeshWarpRenderer {
     gl.bufferData(gl.ARRAY_BUFFER, topology.lipWeights, gl.STATIC_DRAW);
     gl.bindBuffer(gl.ARRAY_BUFFER, r.lipZoneBuffer);
     gl.bufferData(gl.ARRAY_BUFFER, topology.lipZones, gl.STATIC_DRAW);
+    gl.bindBuffer(gl.ARRAY_BUFFER, r.toneBuffer);
+    gl.bufferData(gl.ARRAY_BUFFER, toneWeights(topology), gl.STATIC_DRAW);
+    this.personaLowDirty = true;
     if (!this.eyeFadeWeights || this.eyeFadeWeights.length !== topology.vertexCount) {
       this.eyeFadeWeights = new Float32Array(topology.vertexCount);
     }
@@ -710,6 +1124,8 @@ export class MeshWarpRenderer {
     this.personaImage = image;
     this.personaUv = uv;
     this.personaSize = sourceSize(image);
+    this.personaUvWidth = uvWidth(uv);
+    this.personaLowDirty = true;
     if (this.gl && this.resources && this.glReady) {
       this.uploadTexture(this.gl, this.resources, image);
       this.uploadUvs(this.gl, this.resources, uv, this.gl.STATIC_DRAW);
@@ -727,6 +1143,8 @@ export class MeshWarpRenderer {
    */
   updateUVs(uv: Float32Array) {
     this.personaUv = uv;
+    this.personaUvWidth = uvWidth(uv);
+    this.personaLowDirty = true;
     if (this.gl && this.resources && this.glReady) this.uploadUvs(this.gl, this.resources, uv, this.gl.DYNAMIC_DRAW);
   }
 
@@ -735,6 +1153,7 @@ export class MeshWarpRenderer {
     if (this.personaImage === image) return;
     this.personaImage = image;
     this.personaSize = sourceSize(image);
+    this.personaLowDirty = true;
     if (this.gl && this.resources && this.glReady) this.uploadTexture(this.gl, this.resources, image);
   }
 
@@ -764,6 +1183,11 @@ export class MeshWarpRenderer {
 
     gl.bindBuffer(gl.ARRAY_BUFFER, r.positionBuffer);
     gl.bufferData(gl.ARRAY_BUFFER, opts.positions, gl.DYNAMIC_DRAW);
+
+    // R3: the low-pass passes run first (they switch programs, framebuffers and attribute 0).
+    const relit = opts.relight ? this.relightPasses(gl, r, opts.relight) : false;
+    gl.useProgram(r.program);
+    gl.bindBuffer(gl.ARRAY_BUFFER, r.positionBuffer);
     gl.enableVertexAttribArray(loc.aPosition);
     gl.vertexAttribPointer(loc.aPosition, 2, gl.FLOAT, false, 0, 0);
 
@@ -786,6 +1210,28 @@ export class MeshWarpRenderer {
     gl.bindBuffer(gl.ARRAY_BUFFER, r.eyeFadeBuffer);
     gl.enableVertexAttribArray(loc.aEyeFade);
     gl.vertexAttribPointer(loc.aEyeFade, 1, gl.FLOAT, false, 0, 0);
+
+    gl.bindBuffer(gl.ARRAY_BUFFER, r.toneBuffer);
+    gl.enableVertexAttribArray(loc.aToneWeight);
+    gl.vertexAttribPointer(loc.aToneWeight, 1, gl.FLOAT, false, 0, 0);
+
+    // R3 relighting inputs on units 1 and 2 (bound whether or not the passes ran this frame).
+    const rl = r.relight;
+    gl.uniform1f(loc.uRelight, relit && rl?.driver && rl.persona ? 1 : 0);
+    gl.uniform1f(loc.uToneMatch, opts.relight?.toneMatch ?? 0);
+    if (relit && rl?.driver && rl.persona) {
+      gl.activeTexture(gl.TEXTURE1);
+      gl.bindTexture(gl.TEXTURE_2D, rl.driver.tex[0]);
+      gl.uniform1i(loc.uDriverLow, 1);
+      gl.activeTexture(gl.TEXTURE2);
+      gl.bindTexture(gl.TEXTURE_2D, rl.persona.tex[0]);
+      gl.uniform1i(loc.uPersonaLow, 2);
+    }
+    const mb = opts.motionBlurPx ?? [0, 0];
+    gl.uniform2f(loc.uMotionBlur, mb[0], mb[1]);
+    const faceWidthPx = opts.faceBounds?.[2] ?? this._canvas.width;
+    const texelPx = faceWidthPx / Math.max(1, this.personaUvWidth * this.personaSize.width);
+    gl.uniform1f(loc.uSoftHolesPx, opts.softHoles ? softHoleRadiusPx(opts.cameraMatch?.lodBias ?? 0, texelPx) : 0);
 
     gl.activeTexture(gl.TEXTURE0);
     gl.bindTexture(gl.TEXTURE_2D, r.texture);

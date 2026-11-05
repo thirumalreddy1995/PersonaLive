@@ -94,6 +94,8 @@ export interface TransformationSettings {
   rigidPoseBeta: number;
   /** Learn the wearer's forehead shape as a per-vertex offset while the head is near frontal. */
   rigidShapeOffset: boolean;
+  /** R3 relighting tone match, 0..1: 0 keeps the persona's complexion everywhere, 1 matches the wearer's at the face boundary. */
+  skinToneMatch: number;
   lightingAdaptation: boolean;
   preserveFacialHair: boolean;
   showLandmarkOverlay: boolean;

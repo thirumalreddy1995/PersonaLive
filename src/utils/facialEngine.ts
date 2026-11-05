@@ -15,6 +15,7 @@ import { OneEuroFilter } from './faceMath.ts';
 import { RigidPoseStabilizer, StabilizerOptions, poseAngles } from './rigidPose.ts';
 import { cropUvs, planCrop } from './personaCrop.ts';
 import { CameraMatchState, initialCameraMatch, stepCameraMatch } from './cameraMatch.ts';
+import { RestMouthCalibrator, lipFadeWindow } from './restMouth.ts';
 import {
   applyEyelidKinematics,
   eyeFadeWeights,
@@ -88,6 +89,12 @@ interface SourceLayout {
 function rigidOptions(s: TransformationSettings): StabilizerOptions {
   return { poseMinCutoff: s.rigidPoseMinCutoff, poseBeta: s.rigidPoseBeta, learnShape: s.rigidShapeOffset };
 }
+
+/** Share of one frame's head displacement the directional motion blur spans (realism flag motionBlur). */
+const MOTION_BLUR_EXPOSURE = 0.5;
+/** Steady camera match holds its estimate while the head moves faster than this share of face width per frame. */
+const CAMERA_MATCH_HOLD_SPEED = 0.015;
+const IDENTITY_GAIN: [number, number, number] = [1, 1, 1];
 
 export class RealtimeFacialEngine {
   private canvas: HTMLCanvasElement;
@@ -186,6 +193,13 @@ export class RealtimeFacialEngine {
   /** Camera-match loop (realism flag cameraMatch). */
   private cameraMatch: CameraMatchState = initialCameraMatch();
   private cameraMatchPending = false;
+  /** Blur bias after each loop update, for the review tool's trace (R3 item 3). */
+  private cameraMatchTrace: number[] = [];
+  /** Resting mouth aperture learned from frontal frames (realism flag restMouth, R3 item 1). */
+  private restMouth = new RestMouthCalibrator();
+  /** Smoothed screen velocity of the face (canvas px per frame) for motion blur and the steady camera match. */
+  private headVelocity = { x: 0, y: 0 };
+  private prevHeadCenter: { x: number; y: number } | null = null;
   /** Lip-band fade applied on the last frame (debug panel). */
   private lastLipFade = 0;
   private overlayDrawnThisFrame = false;
@@ -239,7 +253,10 @@ export class RealtimeFacialEngine {
     // Flags that change how the persona is prepared take effect by re-preparing it.
     this.flagsUnsubscribe = realismFlags.subscribe((_flags, changed) => {
       if ((changed.includes('syntheticSuite') || changed.includes('personaCrop')) && this.personaImage) void this.preparePersona();
-      if (changed.includes('cameraMatch')) this.cameraMatch = initialCameraMatch();
+      if (changed.includes('cameraMatch')) {
+        this.cameraMatch = initialCameraMatch();
+        this.cameraMatchTrace = [];
+      }
     });
     if (isRealismDebugEnabled()) {
       this.profiler.measure = true;
@@ -445,6 +462,7 @@ export class RealtimeFacialEngine {
       this.currentKeyframeSource = texture;
       this.currentKeyframeId = null;
       this.cameraMatch = initialCameraMatch();
+      this.cameraMatchTrace = [];
       this.personaMean = this.sampleMeanColor(img, face.landmarks, img.naturalWidth, img.naturalHeight, false);
 
       // Synthesize calibrated multi-angle, multi-expression identity suite for Person A.
@@ -574,6 +592,7 @@ export class RealtimeFacialEngine {
     this.lastMetrics = metrics;
     this.lastPose = pose;
     this.lastMar = kinematics?.mar ?? 0;
+    if (kinematics && realismFlags.get().restMouth) this.restMouth.push(kinematics.mar, timestamp, kinematics.yaw, kinematics.pitch);
 
     // --- 3. Compose base frame --------------------------------------------------------------
     ctx.fillStyle = '#0b1220';
@@ -709,6 +728,9 @@ export class RealtimeFacialEngine {
   private resetTracking() {
     this.resetFilters();
     this.rigid.reset();
+    this.restMouth.reset();
+    this.prevHeadCenter = null;
+    this.headVelocity = { x: 0, y: 0 };
     this.lastFace = null;
     this.faceVisible = false;
     this.framesSinceFace = 0;
@@ -851,15 +873,31 @@ export class RealtimeFacialEngine {
       }
     }
 
-    if (s.lightingAdaptation && this.frameIndex % 5 === 0) {
+    // R3 (flag relight): the shader relights from the real frame; the CPU zone gains stay off.
+    const relightOn = flags.relight && s.lightingAdaptation && this.warp.supportsRelight;
+    if (s.lightingAdaptation && !relightOn && this.frameIndex % 5 === 0) {
       this.updateLightingGain(layout, source, srcW, srcH);
     }
+
+    // Head velocity (nose and cheeks), smoothed over ~2 frames.
+    const hc = {
+      x: (this.smoothed[LM.NOSE_TIP * 2] + this.smoothed[LM.LEFT_CHEEK * 2] + this.smoothed[LM.RIGHT_CHEEK * 2]) / 3,
+      y: (this.smoothed[LM.NOSE_TIP * 2 + 1] + this.smoothed[LM.LEFT_CHEEK * 2 + 1] + this.smoothed[LM.RIGHT_CHEEK * 2 + 1]) / 3,
+    };
+    if (this.prevHeadCenter) {
+      this.headVelocity.x += (hc.x - this.prevHeadCenter.x - this.headVelocity.x) * 0.5;
+      this.headVelocity.y += (hc.y - this.prevHeadCenter.y - this.headVelocity.y) * 0.5;
+    }
+    this.prevHeadCenter = hc;
+    const headSpeed = Math.hypot(this.headVelocity.x, this.headVelocity.y);
 
     const bounds = pointBounds(this.warpPositions.subarray(0, 468 * 2));
     const strength = clamp(s.blendStrength / 100, 0, 1);
     const drawPersonaEyes = !s.eyeGazeSync || (k.earLeft < 0.18 && k.earRight < 0.18);
-    // "Keep my real mouth": fade the persona lip band as the mouth opens (R1 §2).
-    const lipFade = flags.realMouth && s.keepRealMouth ? lipFadeForMar(k.mar) : 0;
+    // "Keep my real mouth": fade the persona lip band as the mouth opens (R1 §2); with restMouth
+    // (R3 item 1) the thresholds sit above the wearer's learned resting aperture.
+    const fadeWindow = lipFadeWindow(flags.restMouth ? this.restMouth.rest : null);
+    const lipFade = flags.realMouth && s.keepRealMouth ? lipFadeForMar(k.mar, 0, fadeWindow.start, fadeWindow.end) : 0;
     // Eye pass-through ring: only while the wearer's real eyes are showing (R1 §6).
     const eyeFade = flags.eyePassThrough && !drawPersonaEyes ? 1 : 0;
     // Closed-lip mask (R2): persona lips end at the wearer's lip contour while the mouth is closed.
@@ -871,8 +909,8 @@ export class RealtimeFacialEngine {
     this.warp.render({
       positions: this.warpPositions,
       opacity: Math.pow(strength, 0.55),
-      colorGain: this.colorGain,
-      zoneLighting: this.zoneLighting,
+      colorGain: relightOn ? IDENTITY_GAIN : this.colorGain,
+      zoneLighting: relightOn ? undefined : this.zoneLighting,
       faceBounds: [bounds.minX, bounds.minY, bounds.width, bounds.height],
       drawPersonaEyes,
       lipFade,
@@ -882,6 +920,17 @@ export class RealtimeFacialEngine {
       cameraMatch: cameraMatchOn
         ? { lodBias: this.cameraMatch.lodBias, sharpen: this.cameraMatch.sharpen, noiseSigma: this.cameraMatch.noiseSigma, frame: this.frameIndex }
         : undefined,
+      relight: relightOn
+        ? {
+            source: source as TexImageSource,
+            srcMap: [layout.offsetX, layout.offsetY, layout.drawWidth, layout.drawHeight],
+            mirror: layout.mirror,
+            faceWidthPx: k.faceWidth,
+            toneMatch: clamp(s.skinToneMatch, 0, 1),
+          }
+        : undefined,
+      motionBlurPx: flags.motionBlur ? [this.headVelocity.x * MOTION_BLUR_EXPOSURE, -this.headVelocity.y * MOTION_BLUR_EXPOSURE] : undefined,
+      softHoles: flags.softHoles,
     });
 
     // R2 §4: every 15 frames read the wearer's and the persona's face-region statistics back
@@ -902,6 +951,8 @@ export class RealtimeFacialEngine {
       const sy1 = (bounds.minY + bounds.height - layout.offsetY) / layout.drawHeight;
       const srcRect: [number, number, number, number] = [clamp(sx0, 0, 1), clamp(sy0, 0, 1), clamp(sx1 - sx0, 0.01, 1), clamp(sy1 - sy0, 0.01, 1)];
       const token = this.personaPrepareToken;
+      const steady = flags.steadyCameraMatch;
+      const hold = steady && headSpeed > CAMERA_MATCH_HOLD_SPEED * k.faceWidth;
       // Both readbacks sample the same square window of display pixels at 1:1, so the loop sees
       // the single-pixel band the camera blur removes (the band the review metric measures).
       const win = readbackWindow(bounds.width, bounds.height);
@@ -910,7 +961,9 @@ export class RealtimeFacialEngine {
       void Promise.all([driver, output]).then(([d, o]) => {
         this.cameraMatchPending = false;
         if (this.disposed || token !== this.personaPrepareToken || !d || !o) return;
-        this.cameraMatch = stepCameraMatch(this.cameraMatch, d, o);
+        this.cameraMatch = stepCameraMatch(this.cameraMatch, d, o, 0.35, { steady, hold });
+        if (this.cameraMatchTrace.length >= 1024) this.cameraMatchTrace.shift();
+        this.cameraMatchTrace.push(this.cameraMatch.lodBias);
       });
     }
   }
@@ -1399,6 +1452,8 @@ export class RealtimeFacialEngine {
           lipFade: this.lastLipFade,
           rigidPose: this.rigid.lastPose ? poseAngles(this.rigid.lastPose.q) : null,
           cameraMatch: realismFlags.get().cameraMatch ? { ...this.cameraMatch } : null,
+          cameraMatchTrace: [...this.cameraMatchTrace],
+          restMar: this.restMouth.rest,
           renderer: this.status.renderer,
           pose: { ...this.lastPose },
           isSpeaking: this.lastMetrics?.isSpeaking ?? false,

@@ -15,6 +15,7 @@ const NUMERIC_KEYS: ReadonlyArray<SettingKey> = [
   'eyePassThroughRadius',
   'rigidPoseMinCutoff',
   'rigidPoseBeta',
+  'skinToneMatch',
 ];
 const BOOLEAN_KEYS: ReadonlyArray<SettingKey> = [
   'audioReactiveLipSync',
