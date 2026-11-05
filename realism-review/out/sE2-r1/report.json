@@ -1,0 +1,1031 @@
+{
+  "schema": 2,
+  "run": "sE2-r1",
+  "app": {
+    "url": "http://127.0.0.1:4790/",
+    "browser": "chrome",
+    "canvas": [
+      1280,
+      720
+    ],
+    "persona": "default",
+    "settingsOverrides": {},
+    "settings": {
+      "blendStrength": 92,
+      "temporalSmoothing": 60,
+      "expressionGain": 1,
+      "lipSyncSensitivity": 1.2,
+      "manualSmileBias": 0,
+      "audioReactiveLipSync": true,
+      "eyeGazeSync": true,
+      "keepRealMouth": true,
+      "eyePassThroughRadius": 1,
+      "personaTextureSize": 1024,
+      "rigidPoseMinCutoff": 1.2,
+      "rigidPoseBeta": 0.05,
+      "rigidShapeOffset": true,
+      "lightingAdaptation": true,
+      "preserveFacialHair": true,
+      "showLandmarkOverlay": false,
+      "showBoundingBoxes": false,
+      "outputResolution": "720p",
+      "viewMode": "transformed-only",
+      "virtualCameraActive": true
+    }
+  },
+  "clips": {
+    "E": {
+      "file": "realism-review\\clips\\E.mp4",
+      "duration": 22.808,
+      "capturedAt": "2026-11-05T16:36:35.489Z",
+      "flags": "defaults",
+      "flagValues": {
+        "speechAnatomy": false,
+        "perspectiveForeshortening": false,
+        "eyelidKinematics": false,
+        "rigidForehead": false,
+        "foreheadHarmonize": true,
+        "hairlineSoften": true,
+        "oralCavity": false,
+        "catchlights": false,
+        "syntheticSuite": false,
+        "shaderUnsharp": false,
+        "shaderSubsurface": false,
+        "shaderSebum": false,
+        "webgl2": false,
+        "personaCrop": false,
+        "cameraMatch": false,
+        "realMouth": true,
+        "eyePassThrough": true,
+        "closedLipMask": false
+      },
+      "times": [
+        2.281,
+        4.887,
+        7.494,
+        10.101,
+        12.707,
+        15.314,
+        17.921,
+        20.527
+      ],
+      "burst": {
+        "start": 10,
+        "frames": 48,
+        "scale": 0.5
+      },
+      "incomplete": null,
+      "pageErrors": [],
+      "summary": {
+        "frames": 8,
+        "skinToneCheekVsNeck": 30.805,
+        "skinToneCheekVsEars": 18.908,
+        "driverCheekVsNeck": 23.712,
+        "driverCheekVsEars": 14.611,
+        "sharpnessRatio": 0.762,
+        "driverSharpnessRatio": 0.184,
+        "targets": {
+          "skinToneNeck": {
+            "driver": 23.712,
+            "output": 30.805,
+            "gap": 7.092,
+            "tolerance": 3,
+            "pass": false
+          },
+          "skinToneEars": {
+            "driver": 14.611,
+            "output": 18.908,
+            "gap": 4.297,
+            "tolerance": 3,
+            "pass": false
+          },
+          "sharpness": {
+            "driver": 0.184,
+            "output": 0.762,
+            "gap": 3.148,
+            "tolerance": 0.15,
+            "pass": false
+          },
+          "slide": {
+            "driver": 0.671,
+            "output": 1.599,
+            "gap": 0.928,
+            "tolerance": 0.5,
+            "pass": false
+          },
+          "seam": {
+            "driver": 2.45,
+            "output": 2.331,
+            "gap": -0.119,
+            "tolerance": null,
+            "pass": null
+          }
+        },
+        "seamRatio": 2.331,
+        "driverSeamRatio": 2.45,
+        "mouthLipErrorPct": 0.488,
+        "outputFacesDetected": 8,
+        "syntheticTeethCapturedFrames": 0,
+        "syntheticTeethFramesWholeClip": 0,
+        "framesRenderedWholeClip": 961,
+        "foreheadToneStepOutput": 6.036,
+        "foreheadToneStepDriver": 6.159,
+        "foreheadToneStepDelta": -0.123,
+        "flicker": {
+          "output": 5.347,
+          "driver": 3.449,
+          "delta": 1.898,
+          "pairs": 47
+        },
+        "textureSlide": {
+          "residualPx": 1.599,
+          "pairs": 45,
+          "blocks": 155
+        },
+        "driverTextureSlide": {
+          "residualPx": 0.671,
+          "pairs": 39,
+          "blocks": 107
+        },
+        "hairlineAlignment": null,
+        "hairlineAlignmentNote": "needs the R4 hair mask; personaTopEdge() is ready for it",
+        "performance": {
+          "fps": 46.16,
+          "frameP50Ms": 19.4,
+          "frameP95Ms": 26.6,
+          "frameAvgMs": 20.33,
+          "frames": 300,
+          "stages": {
+            "track": {
+              "avgMs": 18.27,
+              "p95Ms": 21.5,
+              "samples": 300
+            },
+            "kinematics": {
+              "avgMs": 0.04,
+              "p95Ms": 0.1,
+              "samples": 300
+            },
+            "composite": {
+              "avgMs": 0.3,
+              "p95Ms": 0.5,
+              "samples": 300
+            },
+            "watermark": {
+              "avgMs": 0.19,
+              "p95Ms": 0.3,
+              "samples": 300
+            },
+            "warp": {
+              "avgMs": 1.24,
+              "p95Ms": 6.3,
+              "samples": 300
+            },
+            "overlay": {
+              "avgMs": 0.19,
+              "p95Ms": 0.3,
+              "samples": 300
+            },
+            "post": {
+              "avgMs": 0.01,
+              "p95Ms": 0.1,
+              "samples": 300
+            }
+          },
+          "window": "last 300 frames of the replay",
+          "software": false
+        },
+        "renderer": "webgl",
+        "cameraMatch": null
+      },
+      "frames": [
+        {
+          "t": 2.281,
+          "frameIndex": 412,
+          "mar": 0.003,
+          "pose": {
+            "yaw": -0.3,
+            "pitch": -10.9,
+            "roll": 167.5
+          },
+          "keyframeId": null,
+          "syntheticTeeth": false,
+          "outputFaceDetected": true,
+          "skinTone": {
+            "cheekVsNeck": 23.183,
+            "cheekVsEars": 25.714,
+            "driverCheekVsNeck": 12.976,
+            "driverCheekVsEars": 23.208
+          },
+          "sharpness": {
+            "ratio": 0.653,
+            "inside": 80.201,
+            "outside": 122.825
+          },
+          "driverSharpness": {
+            "ratio": 0.199,
+            "inside": 25.31,
+            "outside": 127.339
+          },
+          "seam": {
+            "ratio": 2.591,
+            "boundary": 49.142,
+            "inside": 18.97
+          },
+          "driverSeam": {
+            "ratio": 2.621,
+            "boundary": 46.636,
+            "inside": 17.795
+          },
+          "mouth": {
+            "lipErrorPct": 0.346,
+            "lipErrorPx": 0.767,
+            "points": 40
+          },
+          "foreheadToneStep": {
+            "output": 6.385,
+            "driver": 11.643,
+            "delta": -5.258,
+            "patches": {
+              "upper": [
+                {
+                  "x": 556.372,
+                  "y": 313.943
+                },
+                {
+                  "x": 608.839,
+                  "y": 304.763
+                },
+                {
+                  "x": 604.337,
+                  "y": 279.03
+                },
+                {
+                  "x": 551.87,
+                  "y": 288.21
+                }
+              ],
+              "lower": [
+                {
+                  "x": 563.488,
+                  "y": 354.617
+                },
+                {
+                  "x": 615.955,
+                  "y": 345.437
+                },
+                {
+                  "x": 613.414,
+                  "y": 330.911
+                },
+                {
+                  "x": 560.947,
+                  "y": 340.09
+                }
+              ]
+            },
+            "hairlineAt": null,
+            "excluded": {
+              "output": {
+                "upper": 0,
+                "lower": 0
+              },
+              "driver": {
+                "upper": 0,
+                "lower": 0
+              }
+            }
+          },
+          "files": {
+            "output": "realism-review\\out\\sE2-r1\\E\\t2_28-output.png",
+            "driver": "realism-review\\out\\sE2-r1\\E\\t2_28-driver.png",
+            "overlay": "realism-review\\out\\sE2-r1\\E\\t2_28-overlay.png"
+          }
+        },
+        {
+          "t": 4.887,
+          "frameIndex": 534,
+          "mar": 0.005,
+          "pose": {
+            "yaw": -1.4,
+            "pitch": -16,
+            "roll": -176
+          },
+          "keyframeId": null,
+          "syntheticTeeth": false,
+          "outputFaceDetected": true,
+          "skinTone": {
+            "cheekVsNeck": 24.605,
+            "cheekVsEars": 19.435,
+            "driverCheekVsNeck": 19.306,
+            "driverCheekVsEars": 14.159
+          },
+          "sharpness": {
+            "ratio": 1.046,
+            "inside": 128.157,
+            "outside": 122.541
+          },
+          "driverSharpness": {
+            "ratio": 0.265,
+            "inside": 32.519,
+            "outside": 122.541
+          },
+          "seam": {
+            "ratio": 3.169,
+            "boundary": 54.176,
+            "inside": 17.093
+          },
+          "driverSeam": {
+            "ratio": 3.302,
+            "boundary": 53.913,
+            "inside": 16.327
+          },
+          "mouth": {
+            "lipErrorPct": 0.449,
+            "lipErrorPx": 0.923,
+            "points": 40
+          },
+          "foreheadToneStep": {
+            "output": 10.847,
+            "driver": 8.593,
+            "delta": 2.254,
+            "patches": {
+              "upper": [
+                {
+                  "x": 634.184,
+                  "y": 281.631
+                },
+                {
+                  "x": 683.413,
+                  "y": 285.224
+                },
+                {
+                  "x": 684.741,
+                  "y": 267.031
+                },
+                {
+                  "x": 635.512,
+                  "y": 263.438
+                }
+              ],
+              "lower": [
+                {
+                  "x": 630.833,
+                  "y": 327.557
+                },
+                {
+                  "x": 680.061,
+                  "y": 331.15
+                },
+                {
+                  "x": 681.258,
+                  "y": 314.748
+                },
+                {
+                  "x": 632.03,
+                  "y": 311.155
+                }
+              ]
+            },
+            "hairlineAt": 22,
+            "excluded": {
+              "output": {
+                "upper": 554,
+                "lower": 0
+              },
+              "driver": {
+                "upper": 470,
+                "lower": 0
+              }
+            }
+          },
+          "files": {
+            "output": "realism-review\\out\\sE2-r1\\E\\t4_89-output.png",
+            "driver": "realism-review\\out\\sE2-r1\\E\\t4_89-driver.png",
+            "overlay": "realism-review\\out\\sE2-r1\\E\\t4_89-overlay.png"
+          }
+        },
+        {
+          "t": 7.494,
+          "frameIndex": 659,
+          "mar": 0.023,
+          "pose": {
+            "yaw": 3.4,
+            "pitch": -34.3,
+            "roll": -179.6
+          },
+          "keyframeId": null,
+          "syntheticTeeth": false,
+          "outputFaceDetected": true,
+          "skinTone": {
+            "cheekVsNeck": 40.911,
+            "cheekVsEars": 19.882,
+            "driverCheekVsNeck": 40.373,
+            "driverCheekVsEars": 19.341
+          },
+          "sharpness": {
+            "ratio": 1.175,
+            "inside": 245.696,
+            "outside": 209.032
+          },
+          "driverSharpness": {
+            "ratio": 0.2,
+            "inside": 41.818,
+            "outside": 209.032
+          },
+          "seam": {
+            "ratio": 1.795,
+            "boundary": 46.81,
+            "inside": 26.076
+          },
+          "driverSeam": {
+            "ratio": 2.43,
+            "boundary": 46.677,
+            "inside": 19.211
+          },
+          "mouth": {
+            "lipErrorPct": 0.524,
+            "lipErrorPx": 1.052,
+            "points": 40
+          },
+          "foreheadToneStep": {
+            "output": 11.449,
+            "driver": 10.435,
+            "delta": 1.014,
+            "patches": {
+              "upper": [
+                {
+                  "x": 611.954,
+                  "y": 253.14
+                },
+                {
+                  "x": 659.99,
+                  "y": 249.644
+                },
+                {
+                  "x": 659.068,
+                  "y": 236.974
+                },
+                {
+                  "x": 611.032,
+                  "y": 240.469
+                }
+              ],
+              "lower": [
+                {
+                  "x": 613.995,
+                  "y": 281.192
+                },
+                {
+                  "x": 662.031,
+                  "y": 277.697
+                },
+                {
+                  "x": 661.302,
+                  "y": 267.678
+                },
+                {
+                  "x": 613.266,
+                  "y": 271.173
+                }
+              ]
+            },
+            "hairlineAt": 15,
+            "excluded": {
+              "output": {
+                "upper": 291,
+                "lower": 0
+              },
+              "driver": {
+                "upper": 289,
+                "lower": 0
+              }
+            }
+          },
+          "files": {
+            "output": "realism-review\\out\\sE2-r1\\E\\t7_49-output.png",
+            "driver": "realism-review\\out\\sE2-r1\\E\\t7_49-driver.png",
+            "overlay": "realism-review\\out\\sE2-r1\\E\\t7_49-overlay.png"
+          }
+        },
+        {
+          "t": 10.101,
+          "frameIndex": 784,
+          "mar": 0.005,
+          "pose": {
+            "yaw": 1.2,
+            "pitch": -1,
+            "roll": -178.3
+          },
+          "keyframeId": null,
+          "syntheticTeeth": false,
+          "outputFaceDetected": true,
+          "skinTone": {
+            "cheekVsNeck": 32.187,
+            "cheekVsEars": 16.605,
+            "driverCheekVsNeck": 19.26,
+            "driverCheekVsEars": 6.316
+          },
+          "sharpness": {
+            "ratio": 0.632,
+            "inside": 132.919,
+            "outside": 210.357
+          },
+          "driverSharpness": {
+            "ratio": 0.156,
+            "inside": 32.109,
+            "outside": 205.407
+          },
+          "seam": {
+            "ratio": 2.807,
+            "boundary": 49.826,
+            "inside": 17.749
+          },
+          "driverSeam": {
+            "ratio": 2.86,
+            "boundary": 47.921,
+            "inside": 16.755
+          },
+          "mouth": {
+            "lipErrorPct": 0.657,
+            "lipErrorPx": 1.346,
+            "points": 40
+          },
+          "foreheadToneStep": {
+            "output": 4.542,
+            "driver": 3.189,
+            "delta": 1.353,
+            "patches": {
+              "upper": [
+                {
+                  "x": 620.86,
+                  "y": 317.896
+                },
+                {
+                  "x": 670.024,
+                  "y": 318.97
+                },
+                {
+                  "x": 670.791,
+                  "y": 283.855
+                },
+                {
+                  "x": 621.628,
+                  "y": 282.781
+                }
+              ],
+              "lower": [
+                {
+                  "x": 619.647,
+                  "y": 373.4
+                },
+                {
+                  "x": 668.811,
+                  "y": 374.474
+                },
+                {
+                  "x": 669.244,
+                  "y": 354.652
+                },
+                {
+                  "x": 620.08,
+                  "y": 353.577
+                }
+              ]
+            },
+            "hairlineAt": null,
+            "excluded": {
+              "output": {
+                "upper": 0,
+                "lower": 0
+              },
+              "driver": {
+                "upper": 0,
+                "lower": 0
+              }
+            }
+          },
+          "files": {
+            "output": "realism-review\\out\\sE2-r1\\E\\t10_10-output.png",
+            "driver": "realism-review\\out\\sE2-r1\\E\\t10_10-driver.png",
+            "overlay": "realism-review\\out\\sE2-r1\\E\\t10_10-overlay.png"
+          }
+        },
+        {
+          "t": 12.707,
+          "frameIndex": 895,
+          "mar": 0.007,
+          "pose": {
+            "yaw": 11.7,
+            "pitch": -2.3,
+            "roll": -175.2
+          },
+          "keyframeId": null,
+          "syntheticTeeth": false,
+          "outputFaceDetected": true,
+          "skinTone": {
+            "cheekVsNeck": 33.379,
+            "cheekVsEars": 19.932,
+            "driverCheekVsNeck": 22.974,
+            "driverCheekVsEars": 15.503
+          },
+          "sharpness": {
+            "ratio": 0.79,
+            "inside": 131.702,
+            "outside": 166.808
+          },
+          "driverSharpness": {
+            "ratio": 0.182,
+            "inside": 29.697,
+            "outside": 163.26
+          },
+          "seam": {
+            "ratio": 1.912,
+            "boundary": 36.401,
+            "inside": 19.039
+          },
+          "driverSeam": {
+            "ratio": 2.042,
+            "boundary": 34.435,
+            "inside": 16.864
+          },
+          "mouth": {
+            "lipErrorPct": 0.363,
+            "lipErrorPx": 0.723,
+            "points": 40
+          },
+          "foreheadToneStep": {
+            "output": 5.815,
+            "driver": 3.556,
+            "delta": 2.258,
+            "patches": {
+              "upper": [
+                {
+                  "x": 673.747,
+                  "y": 318.634
+                },
+                {
+                  "x": 721.613,
+                  "y": 319.419
+                },
+                {
+                  "x": 722.167,
+                  "y": 285.657
+                },
+                {
+                  "x": 674.3,
+                  "y": 284.872
+                }
+              ],
+              "lower": [
+                {
+                  "x": 672.871,
+                  "y": 371.999
+                },
+                {
+                  "x": 720.738,
+                  "y": 372.785
+                },
+                {
+                  "x": 721.05,
+                  "y": 353.725
+                },
+                {
+                  "x": 673.184,
+                  "y": 352.94
+                }
+              ]
+            },
+            "hairlineAt": null,
+            "excluded": {
+              "output": {
+                "upper": 1,
+                "lower": 0
+              },
+              "driver": {
+                "upper": 0,
+                "lower": 0
+              }
+            }
+          },
+          "files": {
+            "output": "realism-review\\out\\sE2-r1\\E\\t12_71-output.png",
+            "driver": "realism-review\\out\\sE2-r1\\E\\t12_71-driver.png",
+            "overlay": "realism-review\\out\\sE2-r1\\E\\t12_71-overlay.png"
+          }
+        },
+        {
+          "t": 15.314,
+          "frameIndex": 1011,
+          "mar": 0.006,
+          "pose": {
+            "yaw": 2.9,
+            "pitch": -8.4,
+            "roll": -179.7
+          },
+          "keyframeId": null,
+          "syntheticTeeth": false,
+          "outputFaceDetected": true,
+          "skinTone": {
+            "cheekVsNeck": 27.863,
+            "cheekVsEars": 18.435,
+            "driverCheekVsNeck": 22.237,
+            "driverCheekVsEars": 14.078
+          },
+          "sharpness": {
+            "ratio": 0.72,
+            "inside": 103.457,
+            "outside": 143.686
+          },
+          "driverSharpness": {
+            "ratio": 0.133,
+            "inside": 19.057,
+            "outside": 143.686
+          },
+          "seam": {
+            "ratio": 1.968,
+            "boundary": 39.864,
+            "inside": 20.258
+          },
+          "driverSeam": {
+            "ratio": 2.109,
+            "boundary": 39.854,
+            "inside": 18.9
+          },
+          "mouth": {
+            "lipErrorPct": 0.29,
+            "lipErrorPx": 0.62,
+            "points": 40
+          },
+          "foreheadToneStep": {
+            "output": 4.836,
+            "driver": 5.593,
+            "delta": -0.756,
+            "patches": {
+              "upper": [
+                {
+                  "x": 609.444,
+                  "y": 297.075
+                },
+                {
+                  "x": 660.756,
+                  "y": 295.988
+                },
+                {
+                  "x": 660.099,
+                  "y": 264.974
+                },
+                {
+                  "x": 608.787,
+                  "y": 266.061
+                }
+              ],
+              "lower": [
+                {
+                  "x": 610.482,
+                  "y": 346.097
+                },
+                {
+                  "x": 661.794,
+                  "y": 345.011
+                },
+                {
+                  "x": 661.424,
+                  "y": 327.503
+                },
+                {
+                  "x": 610.111,
+                  "y": 328.589
+                }
+              ]
+            },
+            "hairlineAt": null,
+            "excluded": {
+              "output": {
+                "upper": 0,
+                "lower": 0
+              },
+              "driver": {
+                "upper": 0,
+                "lower": 0
+              }
+            }
+          },
+          "files": {
+            "output": "realism-review\\out\\sE2-r1\\E\\t15_31-output.png",
+            "driver": "realism-review\\out\\sE2-r1\\E\\t15_31-driver.png",
+            "overlay": "realism-review\\out\\sE2-r1\\E\\t15_31-overlay.png"
+          }
+        },
+        {
+          "t": 17.921,
+          "frameIndex": 1137,
+          "mar": 0.008,
+          "pose": {
+            "yaw": 6.9,
+            "pitch": -0.8,
+            "roll": -180
+          },
+          "keyframeId": null,
+          "syntheticTeeth": false,
+          "outputFaceDetected": true,
+          "skinTone": {
+            "cheekVsNeck": 32.961,
+            "cheekVsEars": 13.112,
+            "driverCheekVsNeck": 24.507,
+            "driverCheekVsEars": 9.066
+          },
+          "sharpness": {
+            "ratio": 0.411,
+            "inside": 93.563,
+            "outside": 227.792
+          },
+          "driverSharpness": {
+            "ratio": 0.117,
+            "inside": 26.662,
+            "outside": 227.792
+          },
+          "seam": {
+            "ratio": 3.186,
+            "boundary": 43.66,
+            "inside": 13.703
+          },
+          "driverSeam": {
+            "ratio": 2.916,
+            "boundary": 40.798,
+            "inside": 13.99
+          },
+          "mouth": {
+            "lipErrorPct": 0.967,
+            "lipErrorPx": 2.062,
+            "points": 40
+          },
+          "foreheadToneStep": {
+            "output": 1.295,
+            "driver": 3.182,
+            "delta": -1.886,
+            "patches": {
+              "upper": [
+                {
+                  "x": 635.831,
+                  "y": 320.648
+                },
+                {
+                  "x": 686.994,
+                  "y": 318.613
+                },
+                {
+                  "x": 685.582,
+                  "y": 283.122
+                },
+                {
+                  "x": 634.419,
+                  "y": 285.156
+                }
+              ],
+              "lower": [
+                {
+                  "x": 638.062,
+                  "y": 376.746
+                },
+                {
+                  "x": 689.225,
+                  "y": 374.712
+                },
+                {
+                  "x": 688.428,
+                  "y": 354.676
+                },
+                {
+                  "x": 637.265,
+                  "y": 356.711
+                }
+              ]
+            },
+            "hairlineAt": null,
+            "excluded": {
+              "output": {
+                "upper": 0,
+                "lower": 0
+              },
+              "driver": {
+                "upper": 0,
+                "lower": 0
+              }
+            }
+          },
+          "files": {
+            "output": "realism-review\\out\\sE2-r1\\E\\t17_92-output.png",
+            "driver": "realism-review\\out\\sE2-r1\\E\\t17_92-driver.png",
+            "overlay": "realism-review\\out\\sE2-r1\\E\\t17_92-overlay.png"
+          }
+        },
+        {
+          "t": 20.527,
+          "frameIndex": 1255,
+          "mar": 0.005,
+          "pose": {
+            "yaw": 16.5,
+            "pitch": -10,
+            "roll": 176.9
+          },
+          "keyframeId": null,
+          "syntheticTeeth": false,
+          "outputFaceDetected": true,
+          "skinTone": {
+            "cheekVsNeck": 31.348,
+            "cheekVsEars": 18.147,
+            "driverCheekVsNeck": 28.067,
+            "driverCheekVsEars": 15.212
+          },
+          "sharpness": {
+            "ratio": 0.666,
+            "inside": 118.495,
+            "outside": 177.868
+          },
+          "driverSharpness": {
+            "ratio": 0.217,
+            "inside": 38.466,
+            "outside": 177.419
+          },
+          "seam": {
+            "ratio": 1.218,
+            "boundary": 26.461,
+            "inside": 21.721
+          },
+          "driverSeam": {
+            "ratio": 1.323,
+            "boundary": 26.117,
+            "inside": 19.745
+          },
+          "mouth": {
+            "lipErrorPct": 0.31,
+            "lipErrorPx": 0.64,
+            "points": 40
+          },
+          "foreheadToneStep": {
+            "output": 3.122,
+            "driver": 3.083,
+            "delta": 0.039,
+            "patches": {
+              "upper": [
+                {
+                  "x": 637.777,
+                  "y": 299.764
+                },
+                {
+                  "x": 686.801,
+                  "y": 292.844
+                },
+                {
+                  "x": 682.336,
+                  "y": 261.208
+                },
+                {
+                  "x": 633.312,
+                  "y": 268.127
+                }
+              ],
+              "lower": [
+                {
+                  "x": 644.836,
+                  "y": 349.771
+                },
+                {
+                  "x": 693.86,
+                  "y": 342.851
+                },
+                {
+                  "x": 691.339,
+                  "y": 324.992
+                },
+                {
+                  "x": 642.315,
+                  "y": 331.911
+                }
+              ]
+            },
+            "hairlineAt": null,
+            "excluded": {
+              "output": {
+                "upper": 0,
+                "lower": 0
+              },
+              "driver": {
+                "upper": 0,
+                "lower": 0
+              }
+            }
+          },
+          "files": {
+            "output": "realism-review\\out\\sE2-r1\\E\\t20_53-output.png",
+            "driver": "realism-review\\out\\sE2-r1\\E\\t20_53-driver.png",
+            "overlay": "realism-review\\out\\sE2-r1\\E\\t20_53-overlay.png"
+          }
+        }
+      ]
+    }
+  },
+  "commit": "d22b1f8",
+  "updatedAt": "2026-11-05T16:36:35.595Z"
+}
