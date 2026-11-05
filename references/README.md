@@ -21,3 +21,10 @@ metrics (resolution, sharpness, lighting) are measured from the image when the a
 
 The GitHub Pages build runs in CI, where this folder does not exist, so it ships only the stock
 sample personas. `PERSONALIVE_LOCAL_PERSONAS=0 npm run build` reproduces that locally.
+
+## Keep this folder when switching branches
+
+Commits before 168b680 still track these files. Checking such a commit out and coming back deletes
+the local copies (git removes files that stop being tracked). Restore them with
+`git show <old-commit>:references/<file> > references/<file>` until the history purge in the R0
+report has been done.

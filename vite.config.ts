@@ -73,7 +73,7 @@ function readLocalPersonas(): { dir: string; entries: LocalPersonaFile[] } {
   const parsed = JSON.parse(fs.readFileSync(manifest, 'utf8')) as { personas?: LocalPersonaFile[] };
   const entries = (parsed.personas ?? []).filter((p) => {
     const ok = typeof p.file === 'string' && !p.file.includes('..') && fs.existsSync(path.join(dir, p.file));
-    if (!ok) console.warn(`[local-personas] skipping ${p.id ?? '?'}: file ${p.file} not found in references/`);
+    if (!ok) console.warn(`[local-personas] skipping ${p.id ?? '?'}: ${p.file} not found in ${dir}`);
     return ok;
   });
   return { dir, entries };
