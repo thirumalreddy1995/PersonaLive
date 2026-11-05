@@ -95,14 +95,14 @@ function fromManifest(manifest: PersonaManifest, dir: string, ids: string[] | nu
 // --- Prompt attribute parsing (SFHQ-T2I prompts are free text) ----------------------------------------
 
 const ETHNICITIES: Array<[RegExp, string]> = [
-  [/\b(south asian|indian|pakistani|bangladeshi|sri lankan|nepali|nepalese|bengali|punjabi|tamil|gujarati|sindhi|desi)\b/i, 'South Asian'],
+  [/\b(south asian|indian|pakistani|bangladeshi|sri lankan|nepali|nepalese|bengali|punjabi|tamil|gujarati|sindhi|sinhalese|sinhala|marathi|kashmiri|bhutanese|maldivian|desi)\b/i, 'South Asian'],
   [/\b(east asian|chinese|japanese|korean|vietnamese|taiwanese)\b/i, 'East Asian'],
   [/\b(southeast asian|thai|filipino|filipina|indonesian|malaysian)\b/i, 'Southeast Asian'],
   [/\b(middle eastern|arab|persian|iranian|turkish|lebanese|egyptian)\b/i, 'Middle Eastern'],
-  [/\b(black|african|african[- ]american|nigerian|ethiopian|ghanaian|kenyan|afro)\b/i, 'Black'],
+  [/\b(black (man|woman|person|male|female|guy|lady|boy|girl|gentleman|skin|skinned|ethnicity|descent)|african|african[- ]american|nigerian|ethiopian|ghanaian|kenyan|afro[- ]caribbean|afro[- ]american)\b/i, 'Black'],
   [/\b(hispanic|latino|latina|latinx|mexican|brazilian|colombian)\b/i, 'Hispanic / Latino'],
   [/\b(native american|indigenous|first nations)\b/i, 'Indigenous'],
-  [/\b(white|caucasian|european|scandinavian|irish|british|german|italian|french|russian|polish)\b/i, 'White'],
+  [/\b(white (man|woman|person|male|female|guy|lady|boy|girl|gentleman|skin|skinned|ethnicity|descent)|caucasian|european|scandinavian|irish|british|german|italian|french|russian|polish)\b/i, 'White'],
   [/\b(mixed[- ]race|biracial|multiracial)\b/i, 'Mixed'],
 ];
 

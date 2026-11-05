@@ -21,6 +21,8 @@ export interface TrackedFace {
   landmarks: Float32Array;
   /** Blendshape scores keyed by MediaPipe category name (e.g. "mouthSmileLeft"). */
   blendshapes: Record<string, number>;
+  /** 4×4 facial transformation matrix (canonical face model → camera space), VIDEO mode only. */
+  transform: number[] | null;
 }
 
 const WASM_BASE_PATH = `${import.meta.env.BASE_URL}mediapipe/wasm`;
@@ -138,7 +140,8 @@ export class FaceTracker {
         runningMode,
         numFaces: 1,
         outputFaceBlendshapes: true,
-        outputFacialTransformationMatrixes: false,
+        // The rigid-pose stabiliser (realism flag rigidForehead) reads the head pose from this.
+        outputFacialTransformationMatrixes: runningMode === 'VIDEO',
         minFaceDetectionConfidence: 0.5,
         minFacePresenceConfidence: 0.5,
         minTrackingConfidence: 0.5,
@@ -220,5 +223,7 @@ function toTrackedFace(result: FaceLandmarkerResult, index = 0): TrackedFace | n
   const blendshapes: Record<string, number> = {};
   const bs = result.faceBlendshapes?.[index];
   if (bs) for (const c of bs.categories) blendshapes[c.categoryName] = c.score;
-  return { landmarks: flat, blendshapes };
+  const matrix = result.facialTransformationMatrixes?.[index];
+  const transform = matrix && matrix.data.length === 16 ? Array.from(matrix.data) : null;
+  return { landmarks: flat, blendshapes, transform };
 }

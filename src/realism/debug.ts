@@ -28,6 +28,8 @@ export interface RealismDebugState {
   mar: number;
   /** Lip-band fade applied on the last frame (0 = persona lips, 1 = wearer's lips). */
   lipFade: number;
+  /** Smoothed head pose from the facial transformation matrix when rigidForehead ran (degrees). */
+  rigidPose: { yaw: number; pitch: number; roll: number } | null;
   pose: HeadPose;
   isSpeaking: boolean;
   isSmiling: boolean;

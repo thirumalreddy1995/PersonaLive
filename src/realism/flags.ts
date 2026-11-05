@@ -35,7 +35,8 @@ export type RealismFlagKey =
   | 'shaderSebum'
   | 'realMouth'
   | 'eyePassThrough'
-  | 'closedLipMask';
+  | 'closedLipMask'
+  | 'rigidForehead';
 
 export const REALISM_FLAG_DEFS: ReadonlyArray<RealismFlagDef> = [
   {
@@ -56,6 +57,14 @@ export const REALISM_FLAG_DEFS: ReadonlyArray<RealismFlagDef> = [
     key: 'eyelidKinematics',
     label: 'Eyelid kinematics',
     description: 'applyEyelidKinematics folds persona eyelid vertices down on blinks.',
+    defaultValue: false,
+    group: 'mesh',
+  },
+  {
+    key: 'rigidForehead',
+    label: 'Rigid-pose forehead',
+    description:
+      'Forehead vertices follow the smoothed head pose from the facial transformation matrix (plus a learned shape offset); brows follow it plus a smoothed expression offset (R2).',
     defaultValue: false,
     group: 'mesh',
   },
@@ -145,11 +154,11 @@ export const REALISM_FLAG_DEFS: ReadonlyArray<RealismFlagDef> = [
  * the current defaults are. Update this only when a phase report changes defaults.
  */
 export const R0_FLAG_STRING =
-  'speechAnatomy=1,perspectiveForeshortening=1,eyelidKinematics=1,foreheadHarmonize=1,hairlineSoften=1,oralCavity=1,catchlights=1,syntheticSuite=1,shaderUnsharp=1,shaderSubsurface=1,shaderSebum=1,realMouth=0,eyePassThrough=0,closedLipMask=0';
+  'speechAnatomy=1,perspectiveForeshortening=1,eyelidKinematics=1,foreheadHarmonize=1,hairlineSoften=1,oralCavity=1,catchlights=1,syntheticSuite=1,shaderUnsharp=1,shaderSubsurface=1,shaderSebum=1,realMouth=0,eyePassThrough=0,closedLipMask=0,rigidForehead=0';
 
 /** The R1 defaults, as a flag string: `--flags r1` reproduces the end-of-R1 behaviour. */
 export const R1_FLAG_STRING =
-  'speechAnatomy=0,perspectiveForeshortening=0,eyelidKinematics=0,foreheadHarmonize=1,hairlineSoften=1,oralCavity=0,catchlights=0,syntheticSuite=0,shaderUnsharp=0,shaderSubsurface=0,shaderSebum=0,realMouth=1,eyePassThrough=1,closedLipMask=0';
+  'speechAnatomy=0,perspectiveForeshortening=0,eyelidKinematics=0,foreheadHarmonize=1,hairlineSoften=1,oralCavity=0,catchlights=0,syntheticSuite=0,shaderUnsharp=0,shaderSubsurface=0,shaderSebum=0,realMouth=1,eyePassThrough=1,closedLipMask=0,rigidForehead=0';
 
 /** Named flag presets accepted by parseRealismFlagString (case-insensitive). */
 export const REALISM_FLAG_PRESETS: Record<string, string> = { r0: R0_FLAG_STRING, r1: R1_FLAG_STRING };

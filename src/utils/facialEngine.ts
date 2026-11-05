@@ -12,6 +12,7 @@
  */
 import { AuthorizedPersona, EngineStatus, FacialMetrics, HeadPose, TransformationSettings } from '../types/index.ts';
 import { OneEuroFilter } from './faceMath.ts';
+import { RigidPoseStabilizer, poseAngles } from './rigidPose.ts';
 import {
   applyEyelidKinematics,
   eyeFadeWeights,
@@ -171,6 +172,10 @@ export class RealtimeFacialEngine {
   private lastMetrics: FacialMetrics | null = null;
   private lastPose: HeadPose = { yaw: 0, pitch: 0, roll: 0 };
   private lastMar = 0;
+  /** Rigid-pose stabiliser for the upper face (realism flag rigidForehead). */
+  private readonly rigid = new RigidPoseStabilizer();
+  /** Raw (unsmoothed) tracked landmarks in canvas pixels, fed to the stabiliser. */
+  private readonly rawPx = new Float32Array(LANDMARK_COUNT * 2);
   /** Lip-band fade applied on the last frame (debug panel). */
   private lastLipFade = 0;
   private overlayDrawnThisFrame = false;
@@ -508,7 +513,7 @@ export class RealtimeFacialEngine {
     }
     profiler.end('track');
     if (tracked && layout) {
-      this.ingestLandmarks(tracked.landmarks, layout, timestamp);
+      this.ingestLandmarks(tracked.landmarks, layout, timestamp, tracked.transform);
       this.lastFace = tracked;
       this.faceVisible = true;
       this.framesSinceFace = 0;
@@ -642,14 +647,20 @@ export class RealtimeFacialEngine {
   // Tracking helpers
   // ---------------------------------------------------------------------------------------------
 
-  private ingestLandmarks(normalized: Float32Array, layout: SourceLayout, timestamp: number) {
+  private ingestLandmarks(normalized: Float32Array, layout: SourceLayout, timestamp: number, transform: number[] | null = null) {
     const n = Math.min(LANDMARK_COUNT, normalized.length / 2);
     for (let i = 0; i < n; i++) {
       let x = layout.offsetX + normalized[i * 2] * layout.drawWidth;
       const y = layout.offsetY + normalized[i * 2 + 1] * layout.drawHeight;
       if (layout.mirror) x = this.canvas.width - x;
+      this.rawPx[i * 2] = x;
+      this.rawPx[i * 2 + 1] = y;
       this.smoothed[i * 2] = this.filters[i * 2].filter(x, timestamp);
       this.smoothed[i * 2 + 1] = this.filters[i * 2 + 1].filter(y, timestamp);
+    }
+    // Rigid-pose forehead: the upper face follows the smoothed head pose instead of jittery points.
+    if (realismFlags.get().rigidForehead && transform) {
+      if (this.rigid.update(transform, this.rawPx, timestamp, layout.mirror)) this.rigid.apply(this.smoothed, timestamp);
     }
   }
 
@@ -659,6 +670,7 @@ export class RealtimeFacialEngine {
 
   private resetTracking() {
     this.resetFilters();
+    this.rigid.reset();
     this.lastFace = null;
     this.faceVisible = false;
     this.framesSinceFace = 0;
@@ -1312,6 +1324,7 @@ export class RealtimeFacialEngine {
           faceBox: b ? { x: b.minX, y: b.minY, w: b.width, h: b.height } : null,
           mar: this.lastMar,
           lipFade: this.lastLipFade,
+          rigidPose: this.rigid.lastPose ? poseAngles(this.rigid.lastPose.q) : null,
           pose: { ...this.lastPose },
           isSpeaking: this.lastMetrics?.isSpeaking ?? false,
           isSmiling: this.lastMetrics?.isSmiling ?? false,
