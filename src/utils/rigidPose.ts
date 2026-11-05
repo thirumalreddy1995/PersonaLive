@@ -28,12 +28,19 @@ export const BROW_VERTICES: ReadonlyArray<number> = [70, 63, 105, 66, 107, 55, 6
 /** Vertices that barely move with expression: nose bridge and tip, eye corners, temples. */
 export const RIGID_FIT_VERTICES: ReadonlyArray<number> = [6, 168, 197, 195, 5, 4, 1, 2, 33, 133, 362, 263, 234, 454, 127, 356];
 
-/** Canonical height above which a vertex counts as forehead (just above the brows). */
-const FOREHEAD_MIN_Y = Math.max(...BROW_VERTICES.map((v) => CANONICAL_FACE_MODEL[v * 3 + 1])) + 0.3;
+/** Eye rings (MediaPipe indices): the rigid region starts just above the upper lids. */
+const EYE_RING_VERTICES: ReadonlyArray<number> = [263, 249, 390, 373, 374, 380, 381, 382, 362, 398, 384, 385, 386, 387, 388, 466, 33, 7, 163, 144, 145, 153, 154, 155, 133, 173, 157, 158, 159, 160, 161, 246];
 
-/** Forehead vertices: everything in the canonical model above the brow line. */
+/** Canonical height above which a vertex counts as upper face (just above the upper eyelids). */
+const FOREHEAD_MIN_Y = Math.max(...EYE_RING_VERTICES.map((v) => CANONICAL_FACE_MODEL[v * 3 + 1])) + 0.1;
+
+/**
+ * Upper-face vertices driven by the rigid pose: everything in the canonical model above the
+ * eyelids (forehead, glabella, upper nose bridge) except the brows (rigid + expression offset)
+ * and the fit vertices (they anchor the similarity and stay tracked).
+ */
 export const FOREHEAD_VERTICES: ReadonlyArray<number> = Array.from({ length: CANONICAL_FACE_VERTEX_COUNT }, (_, v) => v).filter(
-  (v) => CANONICAL_FACE_MODEL[v * 3 + 1] > FOREHEAD_MIN_Y
+  (v) => CANONICAL_FACE_MODEL[v * 3 + 1] > FOREHEAD_MIN_Y && !BROW_VERTICES.includes(v) && !RIGID_FIT_VERTICES.includes(v)
 );
 
 export interface RigidPose {

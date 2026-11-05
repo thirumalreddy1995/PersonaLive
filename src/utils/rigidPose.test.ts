@@ -34,12 +34,15 @@ function transpose(m: number[]): number[] {
 }
 
 test('vertex sets: forehead sits above the brows and never overlaps them or the fit set', () => {
-  assert.ok(FOREHEAD_VERTICES.length >= 15 && FOREHEAD_VERTICES.length <= 40, `${FOREHEAD_VERTICES.length} forehead vertices`);
+  assert.ok(FOREHEAD_VERTICES.length >= 40 && FOREHEAD_VERTICES.length <= 80, `${FOREHEAD_VERTICES.length} forehead vertices`);
   assert.ok(FOREHEAD_VERTICES.includes(10) && FOREHEAD_VERTICES.includes(151) && FOREHEAD_VERTICES.includes(338) && FOREHEAD_VERTICES.includes(109));
+  // Glabella rows are rigid too; eyelids and everything below stay tracked.
+  assert.ok(FOREHEAD_VERTICES.includes(9) && FOREHEAD_VERTICES.includes(8));
+  for (const v of [159, 386, 145, 374, 1, 13, 152]) assert.ok(!FOREHEAD_VERTICES.includes(v), `vertex ${v} must stay tracked`);
   for (const v of BROW_VERTICES) assert.ok(!FOREHEAD_VERTICES.includes(v), `brow ${v} in forehead set`);
   for (const v of RIGID_FIT_VERTICES) assert.ok(!FOREHEAD_VERTICES.includes(v) && !BROW_VERTICES.includes(v));
-  const browY = Math.max(...BROW_VERTICES.map((v) => CANONICAL_FACE_MODEL[v * 3 + 1]));
-  for (const v of FOREHEAD_VERTICES) assert.ok(CANONICAL_FACE_MODEL[v * 3 + 1] > browY);
+  const eyeY = CANONICAL_FACE_MODEL[159 * 3 + 1];
+  for (const v of FOREHEAD_VERTICES) assert.ok(CANONICAL_FACE_MODEL[v * 3 + 1] > eyeY);
 });
 
 test('decomposeTransform recovers yaw/pitch and translation from row- and column-major data', () => {
