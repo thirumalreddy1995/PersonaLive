@@ -41,6 +41,12 @@ vs ears) and sharpness, the driver's own value, the output value, the gap and wh
 `--flags r0` is a preset that reproduces the end-of-R0 behaviour whatever the current defaults are
 (see `R0_FLAG_STRING` in `src/realism/flags.ts`); later tokens override it, e.g. `--flags r0,oralCavity=0`.
 
+`--settings temporalSmoothing=20,blendStrength=100` overrides the inspector settings for the run (the
+same keys as `TransformationSettings`; `?rs=` on the page URL does the same in a browser).
+`npm run realism:compare -- <before-run> <after-run> [--clips A,E] [--md]` prints the before → after
+table per clip and, when both runs have persona grids, the median / worst-10% comparison and the
+personas that regressed beyond the measured run-to-run noise.
+
 Options: `--persona <name>` clicks a built-in persona card first; `--url http://host:port/` reuses a
 running app instead of starting `vite preview`; `--browser chromium|msedge`; `--software` forces
 SwiftShader (numbers are then not representative of GPU performance); `--headed` shows the window.
