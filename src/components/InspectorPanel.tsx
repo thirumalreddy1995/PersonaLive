@@ -262,6 +262,40 @@ export const InspectorPanel: React.FC<InspectorPanelProps> = ({
             />
           </label>
 
+          {settings.eyeGazeSync && (
+            <div className="px-2 pb-1 space-y-1">
+              <div className="flex items-center justify-between text-[10px] text-slate-500">
+                <span>Eye pass-through (lids &amp; lashes)</span>
+                <span className="text-slate-300">{settings.eyePassThroughRadius.toFixed(2)} rings</span>
+              </div>
+              <input
+                type="range"
+                min="0"
+                max="2"
+                step="0.25"
+                value={settings.eyePassThroughRadius}
+                onChange={(e) => onUpdateSettings({ eyePassThroughRadius: Number(e.target.value) })}
+                className="w-full accent-sky-500 cursor-pointer h-1.5 bg-slate-800 rounded-lg"
+              />
+            </div>
+          )}
+
+          <label className="flex items-center justify-between cursor-pointer p-2 rounded-lg bg-slate-900/60 hover:bg-slate-900 transition-colors">
+            <span className="flex items-center gap-2 text-slate-200">
+              <Smile className="w-3.5 h-3.5 text-rose-400" />
+              <span>
+                Keep My Real Mouth
+                <span className="block text-[10px] text-slate-500 font-normal">Your own lips, teeth and tongue while you talk</span>
+              </span>
+            </span>
+            <input
+              type="checkbox"
+              checked={settings.keepRealMouth}
+              onChange={(e) => onUpdateSettings({ keepRealMouth: e.target.checked })}
+              className="accent-rose-500 w-4 h-4 rounded cursor-pointer"
+            />
+          </label>
+
           <label className="flex items-center justify-between cursor-pointer p-2 rounded-lg bg-slate-900/60 hover:bg-slate-900 transition-colors">
             <span className="flex items-center gap-2 text-slate-200">
               <Sun className="w-3.5 h-3.5 text-amber-400" />

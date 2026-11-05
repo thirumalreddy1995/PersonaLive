@@ -9,10 +9,15 @@ import {
   realismFlags,
 } from './flags.ts';
 
-test('flag defaults equal the pre-realism behaviour (every stage on)', () => {
+test('flag defaults come from the registry and the R0 stages are all on in the r0 preset', () => {
   const defaults = defaultRealismFlags();
-  for (const def of REALISM_FLAG_DEFS) assert.equal(defaults[def.key], true, def.key);
+  for (const def of REALISM_FLAG_DEFS) assert.equal(defaults[def.key], def.defaultValue, def.key);
   assert.equal(describeRealismFlags(defaults), 'defaults');
+  // The stages that existed before R1 were all on at the end of R0 (the baseline run).
+  const r0 = parseRealismFlagString('r0').flags;
+  for (const key of ['speechAnatomy', 'perspectiveForeshortening', 'eyelidKinematics', 'foreheadHarmonize', 'hairlineSoften', 'oralCavity', 'catchlights', 'syntheticSuite'] as const) {
+    assert.equal(r0[key], true, key);
+  }
 });
 
 test('parseRealismFlagString accepts key=value, bare keys and negations', () => {
@@ -50,4 +55,17 @@ test('the flag store notifies listeners with only the keys that changed', () => 
     unsubscribe();
     realismFlags.reset();
   }
+});
+
+test('the r0 preset reproduces the R0 behaviour whatever the defaults are', () => {
+  const { flags, errors } = parseRealismFlagString('r0');
+  assert.deepEqual(errors, []);
+  assert.equal(flags.oralCavity, true);
+  assert.equal(flags.syntheticSuite, true);
+  assert.equal(flags.shaderSebum, true);
+  assert.equal(flags.realMouth, false);
+  assert.equal(flags.eyePassThrough, false);
+  assert.equal(Object.keys(flags).length, REALISM_FLAG_DEFS.length, 'preset covers every flag');
+  // Later tokens override the preset.
+  assert.equal(parseRealismFlagString('r0,oralCavity=0').flags.oralCavity, false);
 });

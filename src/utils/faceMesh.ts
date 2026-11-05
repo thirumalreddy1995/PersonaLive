@@ -33,6 +33,10 @@ export const LM = {
 export const LEFT_EYE_RING = [263, 249, 390, 373, 374, 380, 381, 382, 362, 398, 384, 385, 386, 387, 388, 466];
 export const RIGHT_EYE_RING = [33, 7, 163, 144, 145, 153, 154, 155, 133, 173, 157, 158, 159, 160, 161, 246];
 export const INNER_LIP_RING = [78, 95, 88, 178, 87, 14, 317, 402, 318, 324, 308, 415, 310, 311, 312, 13, 82, 81, 80, 191];
+/** Outer lip contour (vermilion border), ordered around the mouth. */
+export const OUTER_LIP_RING = [61, 185, 40, 39, 37, 0, 267, 269, 270, 409, 291, 375, 321, 405, 314, 17, 84, 181, 91, 146];
+/** Lip-band weight of the first tessellation ring outside the outer lip contour (feather ≈ 8–10% of mouth width). */
+export const LIP_FEATHER_RING1 = 0.55;
 
 /**
  * Three-cycles in the tessellation graph that are NOT mesh faces (they enclose another vertex).
@@ -50,6 +54,14 @@ export interface FaceTopology {
   eyeTriangles: Uint16Array;
   /** Per-vertex opacity in [0,1]: 0 on the face oval, rising to 1 a few rings inward (edge feathering). */
   featherWeights: Float32Array;
+  /**
+   * 1 on the lip band (inner and outer lip rings), LIP_FEATHER_RING1 one ring outside it, 0
+   * elsewhere, so the shader can fade the persona lips out as the mouth opens ("keep my real mouth")
+   * with a feather of about one tessellation ring past the persona's lip colour.
+   */
+  lipWeights: Float32Array;
+  /** BFS ring distance of every vertex from the eye rings (0 on the rings; -1 if unreachable). */
+  eyeRingDistance: Int16Array;
   /** Number of vertices referenced (468 mesh points; iris points are not part of the surface). */
   vertexCount: number;
 }
@@ -117,12 +129,68 @@ export function buildFaceTopology(
 
   const eyeTriangles = [...fanTriangles(LEFT_EYE_RING), ...fanTriangles(RIGHT_EYE_RING)];
 
+  // Lip band: 1 on the lip rings, LIP_FEATHER_RING1 one ring outside them (the persona's lip colour
+  // usually spills past the wearer's vermilion border), 0 beyond.
+  const lipRingDistance = ringDistance(adjacency, [...INNER_LIP_RING, ...OUTER_LIP_RING], vertexCount);
+  const lipWeights = new Float32Array(vertexCount);
+  for (let v = 0; v < vertexCount; v++) lipWeights[v] = lipRingDistance[v] === 0 ? 1 : lipRingDistance[v] === 1 ? LIP_FEATHER_RING1 : 0;
+
+  const eyeRingDistance = ringDistance(adjacency, [...LEFT_EYE_RING, ...RIGHT_EYE_RING], vertexCount);
+
   return {
     triangles: new Uint16Array(tris),
     eyeTriangles: new Uint16Array(eyeTriangles),
     featherWeights,
+    lipWeights,
+    eyeRingDistance,
     vertexCount,
   };
+}
+
+/** BFS hop count from a set of seed vertices over the tessellation graph (-1 when unreachable). */
+function ringDistance(adjacency: Set<number>[], seeds: number[], vertexCount: number): Int16Array {
+  const distance = new Int16Array(vertexCount).fill(-1);
+  const queue: number[] = [];
+  for (const v of seeds) {
+    if (v < vertexCount && distance[v] === -1) {
+      distance[v] = 0;
+      queue.push(v);
+    }
+  }
+  while (queue.length) {
+    const v = queue.shift()!;
+    for (const n of adjacency[v]) {
+      if (distance[n] === -1) {
+        distance[n] = distance[v] + 1;
+        queue.push(n);
+      }
+    }
+  }
+  return distance;
+}
+
+/**
+ * Eye pass-through weights: how much of the persona to remove around each eye hole so the wearer's
+ * own lids and lashes show. `radius` is in tessellation rings: 0 = nothing (the hole stays at the
+ * eye contour), 1 = the first ring outside the contour fades to zero ("just past the lash line"),
+ * 2 = two rings. Fractions interpolate.
+ */
+export function eyeFadeWeights(topology: FaceTopology, radius: number): Float32Array {
+  const out = new Float32Array(topology.vertexCount);
+  if (radius <= 0) return out;
+  for (let v = 0; v < topology.vertexCount; v++) {
+    const d = topology.eyeRingDistance[v];
+    if (d < 0) continue;
+    out[v] = clamp(radius - d, 0, 1);
+  }
+  return out;
+}
+
+/** How much of the persona lip band to fade for a given mouth openness (MAR). */
+export function lipFadeForMar(mar: number, closedFade = 0): number {
+  const t = clamp((mar - 0.02) / 0.08, 0, 1);
+  const s = t * t * (3 - 2 * t);
+  return closedFade + (1 - closedFade) * s;
 }
 
 /** Triangle fan covering a simple polygon ring. */

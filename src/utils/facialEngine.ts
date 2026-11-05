@@ -14,6 +14,8 @@ import { AuthorizedPersona, EngineStatus, FacialMetrics, HeadPose, Transformatio
 import { OneEuroFilter } from './faceMath.ts';
 import {
   applyEyelidKinematics,
+  eyeFadeWeights,
+  lipFadeForMar,
   applyGazeIrisTracking,
   applyPerspectiveForeshortening,
   applySmileBias,
@@ -169,6 +171,8 @@ export class RealtimeFacialEngine {
   private lastMetrics: FacialMetrics | null = null;
   private lastPose: HeadPose = { yaw: 0, pitch: 0, roll: 0 };
   private lastMar = 0;
+  /** Lip-band fade applied on the last frame (debug panel). */
+  private lastLipFade = 0;
   private overlayDrawnThisFrame = false;
   private syntheticTeethThisFrame = false;
   private syntheticTeethFrames = 0;
@@ -191,6 +195,7 @@ export class RealtimeFacialEngine {
     this.topology = buildFaceTopology(FACE_TESSELLATION, FACE_OVAL, 468);
     this.warp = new MeshWarpRenderer(w, h);
     this.warp.setTopology(this.topology);
+    this.warp.setEyeFade(eyeFadeWeights(this.topology, settings.eyePassThroughRadius));
     this.status.renderer = this.warp.usesWebGL ? 'webgl' : 'canvas2d';
 
     this.demoCanvas = document.createElement('canvas');
@@ -334,6 +339,9 @@ export class RealtimeFacialEngine {
       this.resetTracking();
     }
     if (prev.lightingAdaptation && !settings.lightingAdaptation) this.colorGain = [1, 1, 1];
+    if (prev.eyePassThroughRadius !== settings.eyePassThroughRadius) {
+      this.warp.setEyeFade(eyeFadeWeights(this.topology, settings.eyePassThroughRadius));
+    }
   }
 
   public setSplitPosition(position: number) {
@@ -799,6 +807,12 @@ export class RealtimeFacialEngine {
 
     const bounds = pointBounds(this.warpPositions.subarray(0, 468 * 2));
     const strength = clamp(s.blendStrength / 100, 0, 1);
+    const drawPersonaEyes = !s.eyeGazeSync || (k.earLeft < 0.18 && k.earRight < 0.18);
+    // "Keep my real mouth": fade the persona lip band as the mouth opens (R1 §2).
+    const lipFade = flags.realMouth && s.keepRealMouth ? lipFadeForMar(k.mar) : 0;
+    // Eye pass-through ring: only while the wearer's real eyes are showing (R1 §6).
+    const eyeFade = flags.eyePassThrough && !drawPersonaEyes ? 1 : 0;
+    this.lastLipFade = lipFade;
 
     this.warp.render({
       positions: this.warpPositions,
@@ -806,7 +820,10 @@ export class RealtimeFacialEngine {
       colorGain: this.colorGain,
       zoneLighting: this.zoneLighting,
       faceBounds: [bounds.minX, bounds.minY, bounds.width, bounds.height],
-      drawPersonaEyes: !s.eyeGazeSync || (k.earLeft < 0.18 && k.earRight < 0.18),
+      drawPersonaEyes,
+      lipFade,
+      eyeFade,
+      shader: { unsharp: flags.shaderUnsharp, subsurface: flags.shaderSubsurface, sebum: flags.shaderSebum },
     });
   }
 
@@ -1291,6 +1308,7 @@ export class RealtimeFacialEngine {
           faceVisible: this.faceVisible,
           faceBox: b ? { x: b.minX, y: b.minY, w: b.width, h: b.height } : null,
           mar: this.lastMar,
+          lipFade: this.lastLipFade,
           pose: { ...this.lastPose },
           isSpeaking: this.lastMetrics?.isSpeaking ?? false,
           isSmiling: this.lastMetrics?.isSmiling ?? false,

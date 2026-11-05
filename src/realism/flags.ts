@@ -14,7 +14,7 @@ export interface RealismFlagDef {
   description: string;
   defaultValue: boolean;
   /** Where in the pipeline the flag acts. */
-  group: 'mesh' | 'overlay' | 'post' | 'bank';
+  group: 'mesh' | 'overlay' | 'post' | 'bank' | 'shader' | 'mouth-eyes';
   /** Set when toggling needs the persona to be re-prepared rather than taking effect next frame. */
   appliesOn?: 'persona-reload';
 }
@@ -27,7 +27,12 @@ export type RealismFlagKey =
   | 'hairlineSoften'
   | 'oralCavity'
   | 'catchlights'
-  | 'syntheticSuite';
+  | 'syntheticSuite'
+  | 'shaderUnsharp'
+  | 'shaderSubsurface'
+  | 'shaderSebum'
+  | 'realMouth'
+  | 'eyePassThrough';
 
 export const REALISM_FLAG_DEFS: ReadonlyArray<RealismFlagDef> = [
   {
@@ -88,7 +93,52 @@ export const REALISM_FLAG_DEFS: ReadonlyArray<RealismFlagDef> = [
     group: 'bank',
     appliesOn: 'persona-reload',
   },
+  {
+    key: 'shaderUnsharp',
+    label: 'Shader unsharp mask',
+    description: 'Fixed-offset high-pass sharpening of the persona texture in the warp shader (R1 §5).',
+    defaultValue: true,
+    group: 'shader',
+  },
+  {
+    key: 'shaderSubsurface',
+    label: 'Shader subsurface tint',
+    description: 'Warm "subdermal" tint mixed into mid-tones in the warp shader (R1 §5).',
+    defaultValue: true,
+    group: 'shader',
+  },
+  {
+    key: 'shaderSebum',
+    label: 'Shader sebum sheen',
+    description: 'Synthetic specular sheen added where the lighting gain is high (R1 §5).',
+    defaultValue: true,
+    group: 'shader',
+  },
+  {
+    key: 'realMouth',
+    label: 'Keep my real mouth (lip fade)',
+    description: 'Fades the persona lip band as the mouth opens so the wearer\'s real lips show instead of stretched persona lips (R1 §2). Also needs the user setting.',
+    defaultValue: false,
+    group: 'mouth-eyes',
+  },
+  {
+    key: 'eyePassThrough',
+    label: 'Eye pass-through ring',
+    description: 'Fades the persona in a ring around the eye holes so the wearer\'s lids and lashes show (R1 §6). Radius is a user setting.',
+    defaultValue: false,
+    group: 'mouth-eyes',
+  },
 ];
+
+/**
+ * The behaviour shipped at the end of R0, as a flag string: `--flags r0` reproduces it whatever
+ * the current defaults are. Update this only when a phase report changes defaults.
+ */
+export const R0_FLAG_STRING =
+  'speechAnatomy=1,perspectiveForeshortening=1,eyelidKinematics=1,foreheadHarmonize=1,hairlineSoften=1,oralCavity=1,catchlights=1,syntheticSuite=1,shaderUnsharp=1,shaderSubsurface=1,shaderSebum=1,realMouth=0,eyePassThrough=0';
+
+/** Named flag presets accepted by parseRealismFlagString (case-insensitive). */
+export const REALISM_FLAG_PRESETS: Record<string, string> = { r0: R0_FLAG_STRING };
 
 export type RealismFlags = Record<RealismFlagKey, boolean>;
 
@@ -116,6 +166,13 @@ export function parseRealismFlagString(input: string): { flags: Partial<RealismF
   for (const raw of input.split(/[\s,;]+/)) {
     const token = raw.trim();
     if (!token) continue;
+    const preset = REALISM_FLAG_PRESETS[token.toLowerCase()];
+    if (preset !== undefined) {
+      const expanded = parseRealismFlagString(preset);
+      Object.assign(flags, expanded.flags);
+      errors.push(...expanded.errors);
+      continue;
+    }
     let key = token;
     let value: boolean | null = true;
     const eq = token.indexOf('=');

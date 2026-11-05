@@ -25,6 +25,8 @@ export interface RealismDebugState {
   /** Face oval bounds in output-canvas pixels, or null without a face. */
   faceBox: { x: number; y: number; w: number; h: number } | null;
   mar: number;
+  /** Lip-band fade applied on the last frame (0 = persona lips, 1 = wearer's lips). */
+  lipFade: number;
   pose: HeadPose;
   isSpeaking: boolean;
   isSmiling: boolean;

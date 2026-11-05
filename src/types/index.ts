@@ -82,6 +82,10 @@ export interface TransformationSettings {
   manualSmileBias: number; // -0.5 to 0.5
   audioReactiveLipSync: boolean;
   eyeGazeSync: boolean;
+  /** Fade the persona lips out as the mouth opens so the wearer's own lips show (R1). */
+  keepRealMouth: boolean;
+  /** Eye pass-through ring in tessellation rings (0 = none, 1 = just past the lash line, up to 2). */
+  eyePassThroughRadius: number;
   lightingAdaptation: boolean;
   preserveFacialHair: boolean;
   showLandmarkOverlay: boolean;

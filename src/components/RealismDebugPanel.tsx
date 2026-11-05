@@ -26,6 +26,8 @@ const GROUP_LABELS: Record<string, string> = {
   overlay: 'Overlay boundary passes',
   post: 'Painted post-pass',
   bank: 'Reference bank',
+  shader: 'Shader beautification',
+  'mouth-eyes': 'Real mouth and eyes',
 };
 
 function useFlags() {
@@ -126,7 +128,7 @@ export const RealismDebugPanel: React.FC = () => {
         <div className="px-3 pb-3 space-y-3">
           {/* Flags */}
           <div className="space-y-2">
-            {(['mesh', 'overlay', 'post', 'bank'] as const).map((group) => (
+            {(['mesh', 'overlay', 'post', 'bank', 'shader', 'mouth-eyes'] as const).map((group) => (
               <div key={group}>
                 <div className="uppercase tracking-wider text-[9px] text-slate-500 mb-1">{GROUP_LABELS[group]}</div>
                 {REALISM_FLAG_DEFS.filter((d) => d.group === group).map((def) => (
@@ -183,7 +185,7 @@ export const RealismDebugPanel: React.FC = () => {
                 </span>
                 <span className="text-slate-500">pose / mar</span>
                 <span>
-                  {state ? `${state.pose.yaw.toFixed(0)}° ${state.pose.pitch.toFixed(0)}° ${state.pose.roll.toFixed(0)}° · ${state.mar.toFixed(2)}` : '-'}
+                  {state ? `${state.pose.yaw.toFixed(0)}° ${state.pose.pitch.toFixed(0)}° ${state.pose.roll.toFixed(0)}° · ${state.mar.toFixed(2)} · lip fade ${state.lipFade.toFixed(2)}` : "-"}
                 </span>
                 <span className="text-slate-500">source</span>
                 <span>

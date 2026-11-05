@@ -9,10 +9,14 @@ import {
   applySpeechAnatomy,
   buildFaceTopology,
   computeKinematics,
+  eyeFadeWeights,
   fanTriangles,
   INNER_LIP_RING,
   LEFT_EYE_RING,
+  LIP_FEATHER_RING1,
+  lipFadeForMar,
   LM,
+  OUTER_LIP_RING,
   RIGHT_EYE_RING,
   SEPARATING_TRIANGLES,
   smoothingToFilterParams,
@@ -197,4 +201,46 @@ test('extractOralApertureMetrics correctly calculates jaw opening and mouth widt
   assert.ok(metrics !== null, 'metrics extracted');
   assert.ok(metrics!.mar > 0.3, 'mouth opening correctly measured');
   assert.equal(metrics!.mouthWidthPx, 80, 'mouth width is 80px');
+});
+
+test('lip weights cover exactly the inner and outer lip rings', () => {
+  const topo = buildFaceTopology(TESSELLATION, OVAL, 468);
+  for (const v of [...INNER_LIP_RING, ...OUTER_LIP_RING]) assert.equal(topo.lipWeights[v], 1, `vertex ${v}`);
+  const ones = topo.lipWeights.filter((w) => w === 1).length;
+  assert.equal(ones, new Set([...INNER_LIP_RING, ...OUTER_LIP_RING]).size);
+  const feather = topo.lipWeights.filter((w) => Math.abs(w - LIP_FEATHER_RING1) < 1e-6).length;
+  assert.ok(feather >= OUTER_LIP_RING.length, `feather ring has ${feather} vertices`);
+  assert.equal(topo.lipWeights[LM.NOSE_TIP], 0);
+  assert.equal(topo.lipWeights[LM.CHIN], 0);
+  // The outer ring is one hop from the inner ring, so the band is contiguous.
+  assert.ok(OUTER_LIP_RING.every((v) => topo.eyeRingDistance[v] > 2));
+});
+
+test('eyeFadeWeights grows outward from the eye rings with the radius', () => {
+  const topo = buildFaceTopology(TESSELLATION, OVAL, 468);
+  for (const v of [...LEFT_EYE_RING, ...RIGHT_EYE_RING]) assert.equal(topo.eyeRingDistance[v], 0);
+  const none = eyeFadeWeights(topo, 0);
+  assert.ok(none.every((w) => w === 0));
+  const one = eyeFadeWeights(topo, 1);
+  for (const v of LEFT_EYE_RING) assert.equal(one[v], 1);
+  const ring1 = [...topo.eyeRingDistance].map((d, v) => (d === 1 ? v : -1)).filter((v) => v >= 0);
+  assert.ok(ring1.length > 0);
+  for (const v of ring1) assert.equal(one[v], 0);
+  const two = eyeFadeWeights(topo, 2);
+  for (const v of ring1) assert.equal(two[v], 1);
+  const half = eyeFadeWeights(topo, 1.5);
+  for (const v of ring1) assert.equal(half[v], 0.5);
+  assert.equal(one[LM.NOSE_TIP], 0);
+  assert.equal(two[LM.CHIN], 0);
+});
+
+test('lipFadeForMar is 0 for a closed mouth and 1 once the mouth is clearly open', () => {
+  assert.equal(lipFadeForMar(0), 0);
+  assert.equal(lipFadeForMar(0.02), 0);
+  assert.equal(lipFadeForMar(0.1), 1);
+  assert.equal(lipFadeForMar(0.5), 1);
+  const mid = lipFadeForMar(0.06);
+  assert.ok(mid > 0.4 && mid < 0.6, `mid ${mid}`);
+  assert.equal(lipFadeForMar(0, 0.2), 0.2);
+  assert.equal(lipFadeForMar(0.3, 0.2), 1);
 });

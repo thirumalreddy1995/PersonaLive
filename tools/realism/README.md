@@ -38,6 +38,9 @@ Targets are relative to the wearer: `summary.targets` holds, for skin tone (chee
 vs ears) and sharpness, the driver's own value, the output value, the gap and whether it passes
 (±3 ΔE, ±15%).
 
+`--flags r0` is a preset that reproduces the end-of-R0 behaviour whatever the current defaults are
+(see `R0_FLAG_STRING` in `src/realism/flags.ts`); later tokens override it, e.g. `--flags r0,oralCavity=0`.
+
 Options: `--persona <name>` clicks a built-in persona card first; `--url http://host:port/` reuses a
 running app instead of starting `vite preview`; `--browser chromium|msedge`; `--software` forces
 SwiftShader (numbers are then not representative of GPU performance); `--headed` shows the window.
@@ -51,6 +54,14 @@ github.com/SelfishGene/SFHQ-T2I-dataset) into a folder, then:
 npm run realism:personas -- --source ~/Downloads/sfhq-t2i --dry-run   # show the selection and coverage
 npm run realism:personas -- --source ~/Downloads/sfhq-t2i             # copy ~24 faces + 4 degraded copies
 npm run realism:capture -- --clip all --personas all --run baseline   # every clip × every persona
+```
+
+A grid run takes about an hour for 28 personas × 5 clips. To keep editing and rebuilding while it
+runs, serve a frozen copy of the build and point the tool at it:
+
+```bash
+cp -r dist /tmp/dist-frozen && npx vite preview --outDir /tmp/dist-frozen --port 4777 --strictPort --host 127.0.0.1 &
+npm run realism:capture -- --url http://127.0.0.1:4777/ --clip all --personas all --flags r0 --run baseline-grid-r0
 ```
 
 The selection parses the prompts into attributes and covers at least 8 South Asian faces, light to

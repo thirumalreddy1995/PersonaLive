@@ -101,6 +101,8 @@ export default function App() {
     manualSmileBias: 0,
     audioReactiveLipSync: true,
     eyeGazeSync: true,
+    keepRealMouth: true,
+    eyePassThroughRadius: 1,
     lightingAdaptation: true,
     preserveFacialHair: true,
     showLandmarkOverlay: false,
