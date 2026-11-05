@@ -15,6 +15,8 @@ import { LoginPage } from './components/LoginPage.tsx';
 import { DesktopTitlebar } from './components/DesktopTitlebar.tsx';
 import { StudioViewport, RecordingResult } from './components/StudioViewport.tsx';
 import { InspectorPanel } from './components/InspectorPanel.tsx';
+import { RealismDebugPanel } from './components/RealismDebugPanel.tsx';
+import { installRealismWindowHook, isRealismDebugEnabled } from './realism/debug.ts';
 import { TelemetryBar } from './components/TelemetryBar.tsx';
 import { PersonaLibraryModal } from './components/PersonaLibraryModal.tsx';
 import { AccountAuthModal } from './components/AccountAuthModal.tsx';
@@ -113,6 +115,12 @@ export default function App() {
     inferenceEngine: 'MediaPipe Face Landmarker',
   });
   const [engineStatus, setEngineStatus] = useState<EngineStatus | null>(null);
+
+  // Dev-only realism tooling (vite dev, or ?realism on a build); see docs/REALISM_PLAN.md.
+  const realismDebug = isRealismDebugEnabled();
+  useEffect(() => {
+    if (realismDebug) installRealismWindowHook();
+  }, [realismDebug]);
 
   const [recordings, setRecordings] = useState<RecordedClip[]>([]);
 
@@ -248,6 +256,7 @@ export default function App() {
           onOpenLibrary={() => openLibrary('enroll')}
           onOpenConsentLogs={() => openLibrary('library')}
         />
+        {realismDebug && <RealismDebugPanel />}
       </main>
 
       <TelemetryBar

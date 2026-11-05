@@ -17,9 +17,11 @@ import {
   ScanFace,
   UserRound,
   X,
+  FileVideo,
 } from 'lucide-react';
 import { TransformationSettings, AuthorizedPersona, FacialMetrics, HeadPose, EngineStatus } from '../types/index.ts';
 import { RealtimeFacialEngine } from '../utils/facialEngine.ts';
+import { isRealismDebugEnabled } from '../realism/debug.ts';
 
 export interface RecordingResult {
   durationSeconds: number;
@@ -63,6 +65,11 @@ export const StudioViewport: React.FC<StudioViewportProps> = ({
   const [cameraState, setCameraState] = useState<CameraState>('off');
   const [cameraError, setCameraError] = useState<string | null>(null);
   const [demoBannerDismissed, setDemoBannerDismissed] = useState<boolean>(false);
+  // Dev-only replayable clip source (realism review); see docs/REALISM_PLAN.md.
+  const realismDebug = isRealismDebugEnabled();
+  const [clipName, setClipName] = useState<string | null>(null);
+  const clipUrlRef = useRef<string | null>(null);
+  const clipInputRef = useRef<HTMLInputElement | null>(null);
   const [isRecording, setIsRecording] = useState<boolean>(false);
   const [recordingSeconds, setRecordingSeconds] = useState<number>(0);
   const [toast, setToast] = useState<{ text: string; tone: 'info' | 'error' } | null>(null);
@@ -148,15 +155,61 @@ export const StudioViewport: React.FC<StudioViewportProps> = ({
   // ---------------------------------------------------------------------------------------
   // Camera
   // ---------------------------------------------------------------------------------------
+  const stopClip = useCallback(() => {
+    const video = videoRef.current;
+    if (clipUrlRef.current) {
+      URL.revokeObjectURL(clipUrlRef.current);
+      clipUrlRef.current = null;
+    }
+    if (video && !video.srcObject && video.src) {
+      video.pause();
+      video.removeAttribute('src');
+      video.loop = false;
+      video.load();
+    }
+    setClipName((name) => {
+      if (name) engineRef.current?.setVideoSource(null);
+      return null;
+    });
+  }, []);
+
   const stopCamera = useCallback(() => {
     const video = videoRef.current;
     if (video?.srcObject) {
       (video.srcObject as MediaStream).getTracks().forEach((t) => t.stop());
       video.srcObject = null;
+      engineRef.current?.setVideoSource(null);
     }
-    engineRef.current?.setVideoSource(null);
     setCameraState('off');
   }, []);
+
+  /** Replays a local video file through the engine, frame for frame, like a webcam. Dev-only. */
+  const loadClip = useCallback(
+    async (file: File) => {
+      const video = videoRef.current;
+      if (!video) return;
+      stopCamera();
+      stopClip();
+      const url = URL.createObjectURL(file);
+      clipUrlRef.current = url;
+      video.srcObject = null;
+      video.src = url;
+      video.loop = true;
+      video.muted = true;
+      try {
+        await video.play();
+      } catch (err) {
+        URL.revokeObjectURL(url);
+        clipUrlRef.current = null;
+        showToast(`Could not play ${file.name}: ${err instanceof Error ? err.message : 'unsupported format'}`, 'error', 4500);
+        return;
+      }
+      engineRef.current?.setVideoSource(video, 'file');
+      setClipName(file.name);
+      setDemoBannerDismissed(true);
+    },
+    [showToast, stopCamera, stopClip]
+  );
 
   const startCamera = useCallback(async () => {
     if (!navigator.mediaDevices?.getUserMedia) {
@@ -166,6 +219,7 @@ export const StudioViewport: React.FC<StudioViewportProps> = ({
     }
     setCameraState('starting');
     setCameraError(null);
+    stopClip();
     try {
       const stream = await navigator.mediaDevices.getUserMedia({
         video: { width: { ideal: 1280 }, height: { ideal: 720 }, frameRate: { ideal: 30 }, facingMode: 'user' },
@@ -193,9 +247,15 @@ export const StudioViewport: React.FC<StudioViewportProps> = ({
       setCameraError(message);
       showToast(message, 'error', 4500);
     }
-  }, [showToast, stopCamera]);
+  }, [showToast, stopCamera, stopClip]);
 
-  useEffect(() => () => stopCamera(), [stopCamera]);
+  useEffect(
+    () => () => {
+      stopCamera();
+      stopClip();
+    },
+    [stopCamera, stopClip]
+  );
 
   // ---------------------------------------------------------------------------------------
   // Split handle drag
@@ -291,7 +351,7 @@ export const StudioViewport: React.FC<StudioViewportProps> = ({
   const modelLoading = !status || status.model === 'idle' || status.model === 'loading';
   const modelError = status?.model === 'error';
   const trackingReady = status?.model === 'ready';
-  const hasSource = status?.source === 'webcam' || status?.source === 'demo';
+  const hasSource = status?.source === 'webcam' || status?.source === 'demo' || status?.source === 'file';
   const showDemoBanner = trackingReady && status?.source === 'demo' && cameraState !== 'on' && !demoBannerDismissed;
   const faceMissing = trackingReady && hasSource && !status?.faceDetected;
   const personaNotice =
@@ -361,10 +421,46 @@ export const StudioViewport: React.FC<StudioViewportProps> = ({
             </span>
           </button>
 
+          {/* Dev-only replayable clip source for the realism review */}
+          {realismDebug && (
+            <>
+              <input
+                ref={clipInputRef}
+                type="file"
+                accept="video/*"
+                data-realism-clip=""
+                className="hidden"
+                onChange={(e) => {
+                  const file = e.target.files?.[0];
+                  e.target.value = '';
+                  if (file) void loadClip(file);
+                }}
+              />
+              <button
+                onClick={() => (clipName ? stopClip() : clipInputRef.current?.click())}
+                className={`px-3 py-1 rounded border text-xs flex items-center gap-1.5 transition-colors font-medium ${
+                  clipName
+                    ? 'bg-amber-950 text-amber-300 border-amber-700 hover:bg-amber-900'
+                    : 'bg-slate-900 text-slate-300 border-slate-700 hover:border-slate-500'
+                }`}
+                title={clipName ? `Replaying ${clipName}. Click to stop.` : 'Replay a recorded clip through the engine (dev only)'}
+              >
+                <FileVideo className="w-3.5 h-3.5" />
+                <span className="max-w-[160px] truncate">{clipName ? `Clip: ${clipName} · Stop` : 'Video File'}</span>
+              </button>
+            </>
+          )}
+
           {/* Source indicator */}
           <span className="hidden lg:inline-flex items-center gap-1.5 px-2 py-1 rounded border border-slate-800 bg-slate-900 text-slate-400">
             <UserRound className="w-3.5 h-3.5" />
-            {status?.source === 'webcam' ? 'Source: Your Webcam' : status?.source === 'demo' ? 'Source: Demo Subject' : 'No Source'}
+            {status?.source === 'webcam'
+              ? 'Source: Your Webcam'
+              : status?.source === 'file'
+                ? 'Source: Video File'
+                : status?.source === 'demo'
+                  ? 'Source: Demo Subject'
+                  : 'No Source'}
           </span>
 
           {/* Landmark mesh toggle */}

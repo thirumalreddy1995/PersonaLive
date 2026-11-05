@@ -40,6 +40,17 @@ import { OralCavityRenderer, extractOralApertureMetrics } from './oralCavityRend
 import { MultiReferenceBank } from './multiReferenceBank.ts';
 import { CranialBoundaryBlender } from './cranialBoundaryBlender.ts';
 import { WATERMARK_TEXT, watermarkMetrics } from './watermark.ts';
+import { realismFlags } from '../realism/flags.ts';
+import { FrameProfiler } from '../realism/profiler.ts';
+import {
+  isRealismDebugEnabled,
+  RealismBurst,
+  RealismBufferName,
+  RealismDebugState,
+  RealismEngineDebugApi,
+  RealismFrameCapture,
+  setRealismEngine,
+} from '../realism/debug.ts';
 
 export type MetricsCallback = (metrics: FacialMetrics, pose: HeadPose, fps: number, latency: number) => void;
 export type StatusCallback = (status: EngineStatus) => void;
@@ -77,6 +88,7 @@ export class RealtimeFacialEngine {
 
   // Sources
   private videoElement: HTMLVideoElement | null = null;
+  private videoKind: 'webcam' | 'file' = 'webcam';
   private demoImage: HTMLImageElement | null = null;
   private demoFailed = false;
   private demoCanvas: HTMLCanvasElement;
@@ -149,6 +161,20 @@ export class RealtimeFacialEngine {
   private onMetricsUpdate?: MetricsCallback;
   private onStatusUpdate?: StatusCallback;
 
+  // Realism review instrumentation (stage timings always; captures only when the debug hook asks)
+  private profiler = new FrameProfiler();
+  private flagsUnsubscribe: (() => void) | null = null;
+  private lastMetrics: FacialMetrics | null = null;
+  private lastPose: HeadPose = { yaw: 0, pitch: 0, roll: 0 };
+  private lastMar = 0;
+  private overlayDrawnThisFrame = false;
+  private syntheticTeethThisFrame = false;
+  private syntheticTeethFrames = 0;
+  private captureTimes: number[] = [];
+  private captures: RealismFrameCapture[] = [];
+  private burstPlan: { start: number; count: number; scale: number } | null = null;
+  private burst: RealismBurst | null = null;
+
   constructor(canvas: HTMLCanvasElement, settings: TransformationSettings) {
     this.canvas = canvas;
     const context = canvas.getContext('2d', { alpha: false });
@@ -186,6 +212,15 @@ export class RealtimeFacialEngine {
     for (let i = 0; i < LANDMARK_COUNT * 2; i++) {
       this.filters.push(new OneEuroFilter(params.minCutoff, params.beta, 1.0));
     }
+
+    // Flags that change how the persona is prepared take effect by re-preparing it.
+    this.flagsUnsubscribe = realismFlags.subscribe((_flags, changed) => {
+      if (changed.includes('syntheticSuite') && this.personaImage) void this.preparePersona();
+    });
+    if (isRealismDebugEnabled()) {
+      this.profiler.measure = true;
+      setRealismEngine(this.createDebugApi());
+    }
   }
 
   // ---------------------------------------------------------------------------------------------
@@ -220,10 +255,17 @@ export class RealtimeFacialEngine {
     }
   }
 
-  public setVideoSource(video: HTMLVideoElement | null) {
+  /**
+   * Uses a video element as the driver. `kind` is 'webcam' for a live camera stream or 'file' for a
+   * replayable clip (dev-only realism review); both are shown mirrored like a webcam preview.
+   */
+  public setVideoSource(video: HTMLVideoElement | null, kind: 'webcam' | 'file' = 'webcam') {
     this.videoElement = video;
+    this.videoKind = kind;
     this.resetTracking();
-    this.patchStatus({ source: video ? 'webcam' : this.demoImage ? 'demo' : 'none' });
+    this.captureTimes = [];
+    this.burstPlan = null;
+    this.patchStatus({ source: video ? kind : this.demoImage ? 'demo' : 'none' });
   }
 
   /** Loads the demo subject portrait used when no webcam is active. */
@@ -316,6 +358,9 @@ export class RealtimeFacialEngine {
     this.disposed = true;
     this.personaPrepareToken++;
     this.stop();
+    this.flagsUnsubscribe?.();
+    this.flagsUnsubscribe = null;
+    if (isRealismDebugEnabled()) setRealismEngine(null);
     this.tracker.dispose();
     this.warp.dispose();
   }
@@ -349,11 +394,14 @@ export class RealtimeFacialEngine {
       this.currentKeyframeId = null;
       this.personaMean = this.sampleMeanColor(img, face.landmarks, img.naturalWidth, img.naturalHeight, false);
 
-      // Synthesize calibrated multi-angle, multi-expression identity suite for Person A
+      // Synthesize calibrated multi-angle, multi-expression identity suite for Person A.
+      // With the syntheticSuite flag off the bank stays empty and the warp uses the one real photo.
       this.referenceBank.clear();
-      const suite = MultiReferenceBank.synthesizeSuiteFromMaster(img, face.landmarks, this.personaMean);
-      for (const kf of suite) {
-        this.referenceBank.addKeyframe(kf);
+      if (realismFlags.get().syntheticSuite) {
+        const suite = MultiReferenceBank.synthesizeSuiteFromMaster(img, face.landmarks, this.personaMean);
+        for (const kf of suite) {
+          this.referenceBank.addKeyframe(kf);
+        }
       }
 
       this.patchStatus({
@@ -384,6 +432,7 @@ export class RealtimeFacialEngine {
       console.error('Render frame failed', err);
     }
     const frameEnd = performance.now();
+    this.profiler.frame(frameEnd - frameStart, frameEnd);
 
     this.latencyHistory.push(frameEnd - frameStart);
     if (this.latencyHistory.length > 30) this.latencyHistory.shift();
@@ -437,12 +486,17 @@ export class RealtimeFacialEngine {
 
     const src = this.getSource();
     const layout: SourceLayout | null = src ? coverLayout(src.width, src.height, W, H, src.mirror) : null;
+    const profiler = this.profiler;
+    this.overlayDrawnThisFrame = false;
+    this.syntheticTeethThisFrame = false;
 
     // --- 1. Track ---------------------------------------------------------------------------
+    profiler.begin('track');
     let tracked: TrackedFace | null = null;
     if (src && this.tracker.ready) {
       tracked = this.tracker.detectVideo(src.source, timestamp);
     }
+    profiler.end('track');
     if (tracked && layout) {
       this.ingestLandmarks(tracked.landmarks, layout, timestamp);
       this.lastFace = tracked;
@@ -460,8 +514,13 @@ export class RealtimeFacialEngine {
 
     // --- 2. Kinematics & metrics -------------------------------------------------------------
     // Derived once per frame and shared by the metrics and the persona overlay.
+    profiler.begin('kinematics');
     const kinematics = this.faceVisible && this.lastFace ? computeKinematics(this.smoothed, this.neutralMouthWidth) : null;
     const { metrics, pose } = this.computeMetrics(kinematics);
+    profiler.end('kinematics');
+    this.lastMetrics = metrics;
+    this.lastPose = pose;
+    this.lastMar = kinematics?.mar ?? 0;
 
     // --- 3. Compose base frame --------------------------------------------------------------
     ctx.fillStyle = '#0b1220';
@@ -474,14 +533,22 @@ export class RealtimeFacialEngine {
 
     const overlayReady = !!(kinematics && this.faceVisible && this.lastFace && this.warp.hasPersona && this.status.persona === 'ready');
     if (overlayReady && kinematics && src && layout) {
+      profiler.begin('warp');
       this.renderPersonaOverlay(layout, src.source, src.width, src.height, kinematics);
+      profiler.end('warp');
+      profiler.begin('overlay');
       this.composeOverlayLayer();
+      profiler.end('overlay');
+      this.overlayDrawnThisFrame = true;
     }
     const drawOverlay = (x: number, y: number, w: number, h: number) => {
       if (!overlayReady) return;
       ctx.drawImage(this.overlayLayer, 0, 0, W, H, x, y, w, h);
+      profiler.begin('post');
       this.drawRealisticPostPass(ctx, x, y, w, h, metrics);
+      profiler.end('post');
     };
+    profiler.begin('composite');
 
     const splitPx = Math.max(20, Math.min(W - 20, (this.splitPosition / 100) * W));
 
@@ -537,6 +604,7 @@ export class RealtimeFacialEngine {
       this.drawLabel(ctx, 'ORIGINAL', pipX + 8, pipY + 8, '#94a3b8');
     }
     if (settings.viewMode !== 'side-by-side') this.paneTransform = { x: 0, y: 0, scale: 1 };
+    profiler.end('composite');
 
     // --- 4. Overlays --------------------------------------------------------------------------
     if (settings.showLandmarkOverlay && this.faceVisible) {
@@ -546,7 +614,12 @@ export class RealtimeFacialEngine {
     }
 
     // Guardrail: the watermark is unconditional and always the last thing drawn.
+    profiler.begin('watermark');
     this.drawMandatoryWatermark(ctx, W, H);
+    profiler.end('watermark');
+
+    if (this.syntheticTeethThisFrame) this.syntheticTeethFrames++;
+    if (src && layout && (this.captureTimes.length || this.burstPlan)) this.handleCaptures(src, layout);
 
     // --- 5. Telemetry ---------------------------------------------------------------------------
     const avgLatency = this.latencyHistory.length
@@ -661,28 +734,34 @@ export class RealtimeFacialEngine {
       applySmileBias(this.warpPositions, s.manualSmileBias, k.faceWidth);
     }
 
+    const flags = realismFlags.get();
+
     // 2. Anatomical speech constraints: stabilizes upper lip and mustache structure
-    applySpeechAnatomy(this.warpPositions, k.mar, k.faceHeight);
+    if (flags.speechAnatomy) applySpeechAnatomy(this.warpPositions, k.mar, k.faceHeight);
 
     // 3. 3D perspective foreshortening & multi-angle head pose compensation
-    applyPerspectiveForeshortening(
-      this.warpPositions,
-      k.yaw,
-      k.pitch,
-      k.faceWidth,
-      k.faceHeight,
-      k.center
-    );
+    if (flags.perspectiveForeshortening) {
+      applyPerspectiveForeshortening(
+        this.warpPositions,
+        k.yaw,
+        k.pitch,
+        k.faceWidth,
+        k.faceHeight,
+        k.center
+      );
+    }
 
     // 4. Eyelid kinematic blinking: folds persona's real eyelid skin down smoothly when blinking
     const bs = this.lastFace?.blendshapes ?? {};
-    applyEyelidKinematics(
-      this.warpPositions,
-      k.earLeft,
-      k.earRight,
-      bs.eyeBlinkLeft ?? 0,
-      bs.eyeBlinkRight ?? 0
-    );
+    if (flags.eyelidKinematics) {
+      applyEyelidKinematics(
+        this.warpPositions,
+        k.earLeft,
+        k.earRight,
+        bs.eyeBlinkLeft ?? 0,
+        bs.eyeBlinkRight ?? 0
+      );
+    }
 
     // 5. Neural gaze tracking: translates iris landmarks according to real-time gaze
     if (s.eyeGazeSync) {
@@ -740,8 +819,9 @@ export class RealtimeFacialEngine {
     const H = this.overlayLayer.height;
     octx.clearRect(0, 0, W, H);
     octx.drawImage(this.warp.canvas, 0, 0, W, H);
-    CranialBoundaryBlender.harmonizeForeheadBoundary(octx, this.warpPositions);
-    CranialBoundaryBlender.softenHairlineEdges(octx, this.warpPositions);
+    const flags = realismFlags.get();
+    if (flags.foreheadHarmonize) CranialBoundaryBlender.harmonizeForeheadBoundary(octx, this.warpPositions);
+    if (flags.hairlineSoften) CranialBoundaryBlender.softenHairlineEdges(octx, this.warpPositions);
   }
 
   /** Estimates the wearer's facial skin tone across 5 spatial zones and derives lighting gains. */
@@ -894,19 +974,22 @@ export class RealtimeFacialEngine {
 
     // Forehead/hairline harmonization runs on the transparent overlay layer (composeOverlayLayer).
 
+    const flags = realismFlags.get();
+
     // 1. Anatomical Intra-Oral Dental & Depth Synthesis Engine
-    const apertureMetrics = extractOralApertureMetrics(pts);
+    const apertureMetrics = flags.oralCavity ? extractOralApertureMetrics(pts) : null;
     if (apertureMetrics) {
-      OralCavityRenderer.renderOralCavity(ctx, pts, {
+      const teeth = OralCavityRenderer.renderOralCavity(ctx, pts, {
         metrics: apertureMetrics,
         lightingGain: this.colorGain,
         isSpeaking: metrics.isSpeaking,
         isSmiling: metrics.isSmiling,
       });
+      if (teeth) this.syntheticTeethThisFrame = true;
     }
 
     // 2. Corneal specular catchlights (natural moisture & vitality in eyes)
-    if (!metrics.isBlinking && pts.length >= 478 * 2) {
+    if (flags.catchlights && !metrics.isBlinking && pts.length >= 478 * 2) {
       const leftIrisX = pts[LM.LEFT_IRIS_CENTER * 2];
       const leftIrisY = pts[LM.LEFT_IRIS_CENTER * 2 + 1];
       const rightIrisX = pts[LM.RIGHT_IRIS_CENTER * 2];
@@ -1125,6 +1208,154 @@ export class RealtimeFacialEngine {
     ctx.fillStyle = '#f8fafc';
     ctx.fillText(WATERMARK_TEXT, x + m.padX + m.dot * 2 + m.gap, cy);
     ctx.restore();
+  }
+
+  // ---------------------------------------------------------------------------------------------
+  // Realism review instrumentation (dev-only; see src/realism/debug.ts)
+  // ---------------------------------------------------------------------------------------------
+
+  /** Current position on the capture timeline: video seconds for a clip, frame index otherwise. */
+  private captureClock(): number {
+    return this.videoKind === 'file' && this.videoElement ? this.videoElement.currentTime : this.frameIndex;
+  }
+
+  private handleCaptures(src: NonNullable<ReturnType<RealtimeFacialEngine['getSource']>>, layout: SourceLayout) {
+    const t = this.captureClock();
+    while (this.captureTimes.length && t >= this.captureTimes[0]) {
+      const target = this.captureTimes.shift()!;
+      const snap = this.snapshot(1, src, layout);
+      this.captures.push({
+        t: target,
+        frameIndex: this.frameIndex,
+        output: snap.output,
+        driver: snap.driver,
+        overlay: this.overlayDrawnThisFrame ? snap.overlay : null,
+        landmarks: snap.landmarks,
+        warpPositions: Float32Array.from(this.warpPositions),
+        outputLandmarks: null,
+        mar: this.lastMar,
+        pose: { ...this.lastPose },
+        isSpeaking: this.lastMetrics?.isSpeaking ?? false,
+        isSmiling: this.lastMetrics?.isSmiling ?? false,
+        syntheticTeeth: this.syntheticTeethThisFrame,
+        keyframeId: this.currentKeyframeId,
+      });
+    }
+    const plan = this.burstPlan;
+    if (plan && t >= plan.start) {
+      if (!this.burst) this.burst = { start: plan.start, scale: plan.scale, frames: [] };
+      const snap = this.snapshot(plan.scale, src, layout);
+      this.burst.frames.push({ t, frameIndex: this.frameIndex, output: snap.output, driver: snap.driver, landmarks: snap.landmarks });
+      if (this.burst.frames.length >= plan.count) this.burstPlan = null;
+    }
+  }
+
+  /** Copies the output, the driver frame (as composited, mirrored) and the persona layer at `scale`. */
+  private snapshot(scale: number, src: NonNullable<ReturnType<RealtimeFacialEngine['getSource']>>, layout: SourceLayout) {
+    const W = this.canvas.width;
+    const H = this.canvas.height;
+    const w = Math.max(1, Math.round(W * scale));
+    const h = Math.max(1, Math.round(H * scale));
+    const make = () => {
+      const c = document.createElement('canvas');
+      c.width = w;
+      c.height = h;
+      return c;
+    };
+    const output = make();
+    output.getContext('2d')!.drawImage(this.canvas, 0, 0, w, h);
+    const driver = make();
+    const dctx = driver.getContext('2d')!;
+    dctx.fillStyle = '#0b1220';
+    dctx.fillRect(0, 0, w, h);
+    this.drawSource(dctx, src.source, layout, 0, 0, w, h);
+    const overlay = make();
+    overlay.getContext('2d')!.drawImage(this.overlayLayer, 0, 0, w, h);
+    const landmarks = new Float32Array(this.smoothed.length);
+    for (let i = 0; i < landmarks.length; i++) landmarks[i] = this.smoothed[i] * scale;
+    return { output, driver, overlay, landmarks };
+  }
+
+  private createDebugApi(): RealismEngineDebugApi {
+    return {
+      getState: (): RealismDebugState => {
+        const v = this.videoKind === 'file' ? this.videoElement : null;
+        const b = this.faceVisible ? pointBounds(this.smoothed.subarray(0, 468 * 2)) : null;
+        return {
+          source: this.status.source,
+          canvasWidth: this.canvas.width,
+          canvasHeight: this.canvas.height,
+          faceVisible: this.faceVisible,
+          faceBox: b ? { x: b.minX, y: b.minY, w: b.width, h: b.height } : null,
+          mar: this.lastMar,
+          pose: { ...this.lastPose },
+          isSpeaking: this.lastMetrics?.isSpeaking ?? false,
+          isSmiling: this.lastMetrics?.isSmiling ?? false,
+          keyframeId: this.currentKeyframeId,
+          keyframeCount: this.referenceBank.getKeyframes().length,
+          personaStatus: this.status.persona,
+          framesRendered: this.frameIndex,
+          syntheticTeethFrames: this.syntheticTeethFrames,
+          videoTime: v ? v.currentTime : null,
+          videoDuration: v && Number.isFinite(v.duration) ? v.duration : null,
+          videoEnded: v ? v.ended : false,
+          profile: this.profiler.summary(),
+          flags: realismFlags.get(),
+        };
+      },
+      scheduleCaptures: (times) => {
+        this.captureTimes = [...times].sort((a, b) => a - b);
+      },
+      scheduleBurst: (start, count, scale) => {
+        this.burst = null;
+        this.burstPlan = { start, count: Math.max(1, Math.floor(count)), scale: clamp(scale, 0.05, 1) };
+      },
+      pending: () => ({ captures: this.captureTimes.length, burst: this.burstPlan ? this.burstPlan.count - (this.burst?.frames.length ?? 0) : 0 }),
+      drainCaptures: async () => {
+        const out = this.captures;
+        this.captures = [];
+        for (const c of out) {
+          try {
+            const { faces } = await this.tracker.detectImage(c.output);
+            const face = faces[0];
+            if (face) {
+              const px = new Float32Array(face.landmarks.length);
+              for (let i = 0; i < face.landmarks.length; i += 2) {
+                px[i] = face.landmarks[i] * c.output.width;
+                px[i + 1] = face.landmarks[i + 1] * c.output.height;
+              }
+              c.outputLandmarks = px;
+            }
+          } catch (err) {
+            console.warn('Output landmark detection failed for a captured frame', err);
+          }
+        }
+        return out;
+      },
+      drainBurst: () => {
+        const b = this.burst;
+        this.burst = null;
+        this.burstPlan = null;
+        return b;
+      },
+      getBuffer: (name: RealismBufferName) => {
+        switch (name) {
+          case 'output':
+            return this.canvas;
+          case 'overlay':
+            return this.overlayLayer;
+          case 'warp':
+            return this.warp.canvas;
+          case 'driver':
+            return this.videoElement ? null : this.demoCanvas;
+        }
+      },
+      getVideo: () => this.videoElement,
+      resetPerf: () => {
+        this.profiler.reset();
+        this.syntheticTeethFrames = 0;
+      },
+    };
   }
 
   // ---------------------------------------------------------------------------------------------

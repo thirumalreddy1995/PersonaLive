@@ -68,7 +68,7 @@ export interface EngineStatus {
   modelMessage: string;
   backend: 'GPU' | 'CPU' | '-';
   renderer: 'webgl' | 'canvas2d';
-  source: 'none' | 'webcam' | 'demo';
+  source: 'none' | 'webcam' | 'demo' | 'file';
   faceDetected: boolean;
   persona: 'none' | 'preparing' | 'ready' | 'no-face' | 'error';
   personaMessage?: string;

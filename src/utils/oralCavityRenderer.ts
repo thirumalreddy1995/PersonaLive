@@ -106,16 +106,17 @@ export function buildSmoothAperturePath(ctx: CanvasRenderingContext2D, points: P
 export class OralCavityRenderer {
   /**
    * Renders the complete photorealistic oral cavity into the canvas context.
+   * Returns true when a synthetic dental arch was painted (the realism review counts these frames).
    */
   public static renderOralCavity(
     ctx: CanvasRenderingContext2D,
     points: Float32Array,
     opts: DentalSynthesisOptions
-  ): void {
+  ): boolean {
     const { metrics, lightingGain, isSpeaking, isSmiling } = opts;
     const mar = metrics.mar;
     // Only synthesize when mouth is open enough to reveal oral anatomy
-    if (mar < 0.038 && !isSpeaking && !isSmiling) return;
+    if (mar < 0.038 && !isSpeaking && !isSmiling) return false;
 
     const p = (idx: number): Point2D => ({ x: points[idx * 2], y: points[idx * 2 + 1] });
 
@@ -124,7 +125,8 @@ export class OralCavityRenderer {
     for (const idx of UPPER_INNER_LIP_INDICES) orderedAperture.push(p(idx));
     for (const idx of LOWER_INNER_LIP_INDICES.slice(1, -1)) orderedAperture.push(p(idx));
 
-    if (orderedAperture.length < 4) return;
+    if (orderedAperture.length < 4) return false;
+    let teethDrawn = false;
 
     ctx.save();
 
@@ -182,6 +184,7 @@ export class OralCavityRenderer {
 
     if (toothHeight > 1.8) {
       this.renderMaxillaryDentalArch(ctx, dentalWidth, archY, toothHeight, lightingGain);
+      teethDrawn = true;
     }
 
     // 5. Mandibular dental arch (Lower teeth visible when wide open or smiling)
@@ -190,6 +193,7 @@ export class OralCavityRenderer {
       const lowerToothHeight = Math.min(jawOpenPx * 0.38, mouthWidthPx * 0.08);
       if (lowerToothHeight > 1.5) {
         this.renderMandibularDentalArch(ctx, dentalWidth * 0.76, lowerArchY, lowerToothHeight, lightingGain);
+        teethDrawn = true;
       }
     }
 
@@ -228,6 +232,7 @@ export class OralCavityRenderer {
     ctx.lineWidth = 1.0;
     ctx.stroke();
     ctx.restore();
+    return teethDrawn;
   }
 
   /**
