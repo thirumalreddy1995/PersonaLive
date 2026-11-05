@@ -228,6 +228,12 @@ In the shader:
 - Sharpness ratio within ±15% of the driver's own face/ring ratio on the same frames, on clips A and B (median persona and worst 10%, no persona regressing).
 - Visibly less "pasted" in the contact sheet.
 
+### R2 additions (R1 review, 2026-11-05)
+- Controls for two more metrics: the slide metric also runs on the raw driver video and the seam ratio on the driver frame; both report driver, output and gap (slide passes when the gap is ≤ 0.5 px/frame).
+- If the controlled slide gap on clip C or E is still > 0.5 px/frame, rigid-pose stabilisation lands in R2, before the texture work and before R4b: `outputFacialTransformationMatrixes` on, landmarks split into rigid head pose + per-landmark expression offsets, rigid pose smoothed with a One Euro filter, forehead and upper-face vertices driven from the rigid pose plus brow offsets only (flag `rigidForehead`).
+- Closed-lip outline: with the mouth closed, persona lips are limited to the intersection of the persona and wearer lip rings, feathered (flag `closedLipMask`).
+- The R1 persona-grid regressions on neck gap and slide are accepted as measurement shifts from removing the mesh offsets.
+
 ---
 
 ## Phase R3 — Lighting and skin tone from the real frame (biggest realism lever)
@@ -260,6 +266,7 @@ out      = detail * rebuild(shadeLum, tone)
 
 ### Acceptance
 - Cheek-vs-neck and cheek-vs-ears ΔE within ±3 of the driver's own values on the same frames (median persona and worst 10%, no persona regressing).
+- Neck gap median and worst 10% across the persona grid must beat the R0 grid values (3.1 and 10.3 ΔE).
 - On clip D (lamp on/off), the persona's shading changes in step with the real face.
 - On clip B (head turns), the shadowed side of the face is dark like the real one.
 - No flicker regression.
