@@ -12,15 +12,18 @@ test('stepCameraMatch blurs a persona that is sharper than the camera and sharpe
   assert.ok(s.lodBias > 1 && s.lodBias <= CAMERA_MATCH_LIMITS.lodBias[1], `lodBias ${s.lodBias}`);
   assert.equal(s.sharpen, 0);
   assert.ok(s.noiseSigma > 0, 'noise added to match the camera');
-  // Output now softer than the camera: the bias comes back down and sharpen rises.
-  for (let i = 0; i < 12; i++) s = stepCameraMatch(s, stats(400, 1), stats(50, 1));
-  assert.ok(s.lodBias < 0.5, `lodBias ${s.lodBias}`);
+  // Output now softer than the camera: the bias comes back down to 0 first, then sharpen rises.
+  for (let i = 0; i < 16; i++) s = stepCameraMatch(s, stats(400, 1), stats(50, 1));
+  assert.equal(s.lodBias, 0, `lodBias ${s.lodBias}`);
   assert.ok(s.sharpen > 0.2, `sharpen ${s.sharpen}`);
-  // Matched: nothing moves.
+  // Only one of the two opposing controls is ever away from zero.
+  assert.ok(s.lodBias === 0 || s.sharpen === 0);
+  // Matched for a while: the smoothed error decays and the controls settle.
+  for (let i = 0; i < 8; i++) s = stepCameraMatch(s, stats(100, 1.5), stats(100, 1.5));
   const before = { ...s };
   s = stepCameraMatch(s, stats(100, 1.5), stats(100, 1.5));
-  assert.ok(Math.abs(s.lodBias - before.lodBias) < 1e-9 && Math.abs(s.sharpen - before.sharpen) < 1e-9 && Math.abs(s.noiseSigma - before.noiseSigma) < 1e-9);
-  assert.equal(s.updates, 18);
+  assert.ok(Math.abs(s.sharpen - before.sharpen) < 0.01 && Math.abs(s.noiseSigma - before.noiseSigma) < 1e-9);
+  assert.equal(s.updates, 30);
   // Too few samples: measurements recorded, controls untouched.
   const few = stepCameraMatch(s, stats(1, 1, 10), stats(1000, 1, 10));
   assert.equal(few.lodBias, s.lodBias);

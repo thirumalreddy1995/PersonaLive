@@ -16,6 +16,8 @@ export interface CameraMatchState {
   driverNoise: number | null;
   outputNoise: number | null;
   updates: number;
+  /** Smoothed log sharpness ratio (output / driver) the controls follow. */
+  errEma: number;
 }
 
 export const CAMERA_MATCH_LIMITS = {
@@ -25,7 +27,7 @@ export const CAMERA_MATCH_LIMITS = {
 };
 
 export function initialCameraMatch(): CameraMatchState {
-  return { lodBias: 0, sharpen: 0, noiseSigma: 0, driverLaplacian: null, outputLaplacian: null, driverNoise: null, outputNoise: null, updates: 0 };
+  return { lodBias: 0, sharpen: 0, noiseSigma: 0, driverLaplacian: null, outputLaplacian: null, driverNoise: null, outputNoise: null, updates: 0, errEma: 0 };
 }
 
 function clamp(v: number, lo: number, hi: number): number {
@@ -41,13 +43,17 @@ export function stepCameraMatch(state: CameraMatchState, driver: FaceStats, outp
   if (driver.samples < 64 || output.samples < 64) return next;
   const eps = 1e-3;
   // Sharpness: positive error = output sharper than the camera → blur (LOD bias); negative → sharpen.
-  const err = Math.log((output.laplacianVariance + eps) / (driver.laplacianVariance + eps));
+  // The raw log ratio jumps with motion blur on head turns, so it is smoothed before it drives
+  // anything, and only one of the two opposing controls moves away from zero at a time.
+  const raw = Math.log((output.laplacianVariance + eps) / (driver.laplacianVariance + eps));
+  const err = state.updates === 0 ? raw : state.errEma + (raw - state.errEma) * 0.5;
+  next.errEma = err;
   if (err > 0) {
-    next.lodBias = clamp(state.lodBias + gain * err, ...CAMERA_MATCH_LIMITS.lodBias);
-    next.sharpen = clamp(state.sharpen - gain * err * 0.5, ...CAMERA_MATCH_LIMITS.sharpen);
+    if (state.sharpen > 0) next.sharpen = clamp(state.sharpen - gain * err, ...CAMERA_MATCH_LIMITS.sharpen);
+    else next.lodBias = clamp(state.lodBias + gain * err, ...CAMERA_MATCH_LIMITS.lodBias);
   } else {
-    next.sharpen = clamp(state.sharpen - gain * err * 0.5, ...CAMERA_MATCH_LIMITS.sharpen);
-    next.lodBias = clamp(state.lodBias + gain * err, ...CAMERA_MATCH_LIMITS.lodBias);
+    if (state.lodBias > 0) next.lodBias = clamp(state.lodBias + gain * err, ...CAMERA_MATCH_LIMITS.lodBias);
+    else next.sharpen = clamp(state.sharpen - gain * err * 0.5, ...CAMERA_MATCH_LIMITS.sharpen);
   }
   // Noise: match the camera's high-pass sigma (0..255 → 0..1 units).
   const noiseErr = (driver.noiseMad - output.noiseMad) / 255;
