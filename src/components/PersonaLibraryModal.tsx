@@ -12,48 +12,18 @@ import {
   FileCheck,
 } from 'lucide-react';
 import { AuthorizedPersona, CATEGORY_LABEL, PersonaCategory } from '../types/index.ts';
-import { evaluateImageQuality, generateConsentHash, QualityAssessmentResult } from '../utils/faceMath.ts';
-import { publicAssetUrl } from '../utils/assetUrl.ts';
-import { measureImageStatistics } from '../utils/imageStatistics.ts';
+import { generateConsentHash, QualityAssessmentResult } from '../utils/faceMath.ts';
+import { localPersonas } from '../utils/localPersonas.ts';
+import { assessPhoto } from '../utils/photoAssessment.ts';
 
-/** Bundled sample portrait (lives in public/, so it must be resolved against the Vite base path). */
-const SAMPLE_PRESET_IMAGE = publicAssetUrl('assets/aistudio/WhatsApp_Image_2026-11-03_at_4.39.43_PM_bff2bf8c.jpeg');
+/** First local persona (references/personas.json), offered as a quick preset when one exists. */
+const LOCAL_PRESET = localPersonas()[0] ?? null;
 
 const ACCEPTED_IMAGE_TYPES = ['image/jpeg', 'image/png', 'image/webp'];
 /** Uploads are held in memory as data URLs; cap them so a stray RAW/scan cannot freeze the UI. */
 const MAX_UPLOAD_BYTES = 25 * 1024 * 1024;
 /** Usage recorded on the consent entry of every enrolled face. */
 const DEFAULT_AUTHORIZED_USAGE = 'Commercial Streaming & Virtual Presentation';
-
-function loadImage(src: string, crossOrigin: boolean): Promise<HTMLImageElement> {
-  return new Promise((resolve, reject) => {
-    const img = new Image();
-    if (crossOrigin) img.crossOrigin = 'anonymous';
-    img.onload = () => resolve(img);
-    img.onerror = () => reject(new Error('The photo could not be decoded. Try a different JPG, PNG or WebP file.'));
-    img.src = src;
-  });
-}
-
-/**
- * Decodes the photo and scores it from measured luminance, contrast and sharpness. If the pixels
- * cannot be read (cross-origin image without CORS headers), the resolution-only score is returned
- * with an explicit warning rather than fabricated lighting/sharpness values.
- */
-async function assessPhoto(src: string, crossOrigin: boolean): Promise<QualityAssessmentResult> {
-  const img = await loadImage(src, crossOrigin);
-  const width = img.naturalWidth;
-  const height = img.naturalHeight;
-  try {
-    const stats = measureImageStatistics(img);
-    return evaluateImageQuality(width, height, stats.averageLuminance, stats.contrastStdDev, stats.estimatedSharpness);
-  } catch (err) {
-    console.warn('Photo statistics unavailable, scoring resolution only.', err);
-    const result = evaluateImageQuality(width, height);
-    result.warnings.push('Lighting and sharpness could not be measured for this image.');
-    return result;
-  }
-}
 
 interface PersonaLibraryModalProps {
   isOpen: boolean;
@@ -417,24 +387,19 @@ export const PersonaLibraryModal: React.FC<PersonaLibraryModalProps> = ({
               <div className="space-y-2">
                 <label className="text-xs text-slate-400 font-medium">Or try a sample face</label>
                 <div className="grid grid-cols-3 gap-2">
-                  <button
-                    type="button"
-                    onClick={() =>
-                      handleSelectPreset(
-                        SAMPLE_PRESET_IMAGE,
-                        'Arshad',
-                        'Verified Presenter',
-                        'men'
-                      )
-                    }
-                    className="p-2 rounded bg-slate-950 border border-slate-800 hover:border-sky-500 text-left flex items-center gap-2"
-                  >
-                    <img src={SAMPLE_PRESET_IMAGE} alt="Arshad" className="w-8 h-8 rounded object-cover" />
-                    <div className="text-[11px] truncate">
-                      <p className="font-medium text-slate-200">Arshad</p>
-                      <p className="text-slate-500">Presenter</p>
-                    </div>
-                  </button>
+                  {LOCAL_PRESET && (
+                    <button
+                      type="button"
+                      onClick={() => handleSelectPreset(LOCAL_PRESET.imageUrl, LOCAL_PRESET.name, LOCAL_PRESET.role, LOCAL_PRESET.category)}
+                      className="p-2 rounded bg-slate-950 border border-slate-800 hover:border-sky-500 text-left flex items-center gap-2"
+                    >
+                      <img src={LOCAL_PRESET.imageUrl} alt={LOCAL_PRESET.name} className="w-8 h-8 rounded object-cover" />
+                      <div className="text-[11px] truncate">
+                        <p className="font-medium text-slate-200">{LOCAL_PRESET.name}</p>
+                        <p className="text-slate-500">{LOCAL_PRESET.role}</p>
+                      </div>
+                    </button>
+                  )}
 
                   <button
                     type="button"

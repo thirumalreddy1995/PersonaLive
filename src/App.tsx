@@ -11,6 +11,7 @@ import {
   UserAccount,
 } from './types/index.ts';
 import { INITIAL_PERSONAS } from './utils/mockPersonas.ts';
+import { localPersonas, measureLocalPersona } from './utils/localPersonas.ts';
 import { LoginPage } from './components/LoginPage.tsx';
 import { DesktopTitlebar } from './components/DesktopTitlebar.tsx';
 import { StudioViewport, RecordingResult } from './components/StudioViewport.tsx';
@@ -43,7 +44,8 @@ export default function App() {
     isAuthenticated: true,
   });
 
-  const [personas, setPersonas] = useState<AuthorizedPersona[]>(INITIAL_PERSONAS);
+  // Local photos (references/personas.json, never shipped to Pages) come first, then the samples.
+  const [personas, setPersonas] = useState<AuthorizedPersona[]>(() => [...localPersonas(), ...INITIAL_PERSONAS]);
 
   // Who is sitting at the camera. Faces are only ever mapped onto a person of the same group.
   const [subjectCategory, setSubjectCategory] = useState<PersonaCategory>(() => {
@@ -51,8 +53,25 @@ export default function App() {
     return saved === 'women' || saved === 'men' ? saved : 'men';
   });
   const [activePersona, setActivePersonaState] = useState<AuthorizedPersona | null>(
-    () => INITIAL_PERSONAS.find((p) => p.category === subjectCategory) ?? null
+    () => personas.find((p) => p.category === subjectCategory) ?? null
   );
+
+  // Quality metrics of local personas are measured from the image, not typed into the manifest.
+  useEffect(() => {
+    let cancelled = false;
+    for (const persona of localPersonas()) {
+      measureLocalPersona(persona)
+        .then((measured) => {
+          if (cancelled) return;
+          setPersonas((prev) => prev.map((p) => (p.id === measured.id ? { ...p, qualityScore: measured.qualityScore, metrics: measured.metrics } : p)));
+          setActivePersonaState((prev) => (prev && prev.id === measured.id ? { ...prev, qualityScore: measured.qualityScore, metrics: measured.metrics } : prev));
+        })
+        .catch((err) => console.warn(`Could not measure local persona ${persona.name}`, err));
+    }
+    return () => {
+      cancelled = true;
+    };
+  }, []);
 
   /** Activates a face only when it matches the person at the camera. */
   const setActivePersona = useCallback(
@@ -119,7 +138,15 @@ export default function App() {
   // Dev-only realism tooling (vite dev, or ?realism on a build); see docs/REALISM_PLAN.md.
   const realismDebug = isRealismDebugEnabled();
   useEffect(() => {
-    if (realismDebug) installRealismWindowHook();
+    if (!realismDebug) return;
+    installRealismWindowHook({
+      addPersona: (persona) => setPersonas((prev) => [persona, ...prev.filter((p) => p.id !== persona.id)]),
+      activatePersona: (persona) => setActivePersonaState(persona),
+      setSubjectCategory: (category) => {
+        setSubjectCategory(category);
+        localStorage.setItem('pl_subject_category', category);
+      },
+    });
   }, [realismDebug]);
 
   const [recordings, setRecordings] = useState<RecordedClip[]>([]);

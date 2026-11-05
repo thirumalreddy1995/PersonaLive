@@ -4,3 +4,5 @@
 declare const __PL_BUILD_ID__: string;
 /** App version injected by vite.config.ts from package.json. */
 declare const __PL_APP_VERSION__: string;
+/** Local personas (references/personas.json) injected by vite.config.ts; absent on GitHub Pages. */
+declare const __PL_LOCAL_PERSONAS__: import('./utils/localPersonas.ts').LocalPersonaManifestEntry[] | undefined;

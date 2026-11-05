@@ -48,6 +48,66 @@ function mediapipeWasm(): Plugin {
 }
 
 /**
+ * Local personas: photos of consenting people live in the gitignored `references/` folder with a
+ * `personas.json` manifest (see references/README.md). This plugin injects the manifest as
+ * `__PL_LOCAL_PERSONAS__`, serves the listed files under /references/ in the dev server and copies
+ * them into dist/references/ for local production and desktop builds. CI never has the folder, and
+ * PERSONALIVE_LOCAL_PERSONAS=0 or GITHUB_ACTIONS skip it explicitly, so the Pages build ships only
+ * the sample personas.
+ */
+interface LocalPersonaFile {
+  id: string;
+  name: string;
+  role?: string;
+  category: string;
+  file: string;
+  consent: Record<string, unknown>;
+}
+
+function readLocalPersonas(): { dir: string; entries: LocalPersonaFile[] } {
+  const dir = path.resolve(projectRoot, 'references');
+  const manifest = path.join(dir, 'personas.json');
+  if (process.env.PERSONALIVE_LOCAL_PERSONAS === '0' || process.env.GITHUB_ACTIONS === 'true' || !fs.existsSync(manifest)) {
+    return { dir, entries: [] };
+  }
+  const parsed = JSON.parse(fs.readFileSync(manifest, 'utf8')) as { personas?: LocalPersonaFile[] };
+  const entries = (parsed.personas ?? []).filter((p) => {
+    const ok = typeof p.file === 'string' && !p.file.includes('..') && fs.existsSync(path.join(dir, p.file));
+    if (!ok) console.warn(`[local-personas] skipping ${p.id ?? '?'}: file ${p.file} not found in references/`);
+    return ok;
+  });
+  return { dir, entries };
+}
+
+function localPersonas(): Plugin {
+  const { dir, entries } = readLocalPersonas();
+  const served = new Map(entries.map((p) => [path.basename(p.file), path.join(dir, p.file)]));
+  const mime = (file: string) =>
+    file.endsWith('.png') ? 'image/png' : file.endsWith('.webp') ? 'image/webp' : 'image/jpeg';
+  return {
+    name: 'personalive-local-personas',
+    config() {
+      const manifest = entries.map((p) => ({ ...p, file: `references/${path.basename(p.file)}` }));
+      return { define: { __PL_LOCAL_PERSONAS__: JSON.stringify(manifest) } };
+    },
+    configureServer(server) {
+      server.middlewares.use('/references', (req, res, next) => {
+        const name = path.basename(decodeURIComponent((req.url ?? '').split('?')[0]));
+        const file = served.get(name);
+        if (!file) return next();
+        res.setHeader('Content-Type', mime(file));
+        fs.createReadStream(file).pipe(res);
+      });
+    },
+    generateBundle() {
+      for (const [name, file] of served) {
+        this.emitFile({ type: 'asset', fileName: `references/${name}`, source: fs.readFileSync(file) });
+      }
+    },
+  };
+}
+
+/**
  * Stamps the service worker with a per-build id. A byte-different sw.js makes browsers install
  * the new worker, which is what triggers the in-app "Update Ready — Restart" prompt after a deploy.
  */
@@ -71,7 +131,7 @@ export default defineConfig(() => {
   return {
     base: BASE_PATH,
     define: { __PL_BUILD_ID__: JSON.stringify(BUILD_ID), __PL_APP_VERSION__: JSON.stringify(APP_VERSION) },
-    plugins: [react(), tailwindcss(), mediapipeWasm(), stampServiceWorker()],
+    plugins: [react(), tailwindcss(), mediapipeWasm(), localPersonas(), stampServiceWorker()],
     resolve: {
       alias: {
         '@': projectRoot,

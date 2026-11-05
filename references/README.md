@@ -1,9 +1,23 @@
-# Reference media for the Python research pipeline
+# Reference media (local only)
 
-Input photos and a driving video for `main_stream.py` / `identity_bank.py`
-(`--ref_dir ./references`). Nothing in this folder is part of the web or desktop
-build; the single photo the studio ships as its default persona lives in
-`public/assets/aistudio/`.
+Everything in this folder except this README and `personas.example.json` is gitignored. It holds
+photos and clips of real people who have given explicit consent to have their likeness used as a
+persona reference, plus the inputs of the Python research pipeline (`main_stream.py` /
+`identity_bank.py --ref_dir ./references`).
 
-Only add media here for people who have given explicit consent to have their
-likeness used as a persona reference.
+## Local personas for the studio
+
+The web app never bundles a real person's photo. Instead, `personas.json` (copy
+`personas.example.json`) lists local photos with the consent record of each pictured person:
+
+```json
+{ "personas": [ { "id": "persona-x", "name": "X", "category": "men", "file": "x.jpeg", "consent": { ... } } ] }
+```
+
+`vite.config.ts` reads that manifest and serves the listed files under `references/` for the dev
+server, copies them into `dist/references/` for a local production build (which is what the
+desktop installer packages), and injects the entries as `__PL_LOCAL_PERSONAS__`. Their quality
+metrics (resolution, sharpness, lighting) are measured from the image when the app loads.
+
+The GitHub Pages build runs in CI, where this folder does not exist, so it ships only the stock
+sample personas. `PERSONALIVE_LOCAL_PERSONAS=0 npm run build` reproduces that locally.
