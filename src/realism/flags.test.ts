@@ -45,10 +45,13 @@ test('the flag store notifies listeners with only the keys that changed', () => 
   const seen: string[][] = [];
   const unsubscribe = realismFlags.subscribe((_flags, changed) => seen.push([...changed]));
   try {
-    assert.deepEqual(realismFlags.set({ oralCavity: false, catchlights: true }), ['oralCavity']);
-    assert.deepEqual(realismFlags.set({ oralCavity: false }), []);
-    assert.equal(realismFlags.get().oralCavity, false);
-    assert.equal(describeRealismFlags(realismFlags.get()), 'oralCavity=off');
+    // Flip oralCavity away from its default and leave catchlights at its default.
+    const defaults = defaultRealismFlags();
+    const flipped = !defaults.oralCavity;
+    assert.deepEqual(realismFlags.set({ oralCavity: flipped, catchlights: defaults.catchlights }), ['oralCavity']);
+    assert.deepEqual(realismFlags.set({ oralCavity: flipped }), []);
+    assert.equal(realismFlags.get().oralCavity, flipped);
+    assert.equal(describeRealismFlags(realismFlags.get()), `oralCavity=${flipped ? 'on' : 'off'}`);
     assert.deepEqual(realismFlags.reset(), ['oralCavity']);
     assert.deepEqual(seen, [['oralCavity'], ['oralCavity']]);
   } finally {

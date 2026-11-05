@@ -3,7 +3,9 @@
  *
  * Every visual stage of the persona pipeline that the realism pass touches sits behind one of
  * these flags so before/after can be compared live (debug panel) and headlessly (capture tool).
- * Defaults equal the behaviour shipped before the realism pass; a default changes only after a
+ * Defaults are the behaviour of the latest finished phase (R1: no painted mouth or glints, warp on
+ * the tracked landmarks, one real keyframe, no shader beautification, real mouth and eye
+ * pass-through on). `--flags r0` restores the pre-R1 behaviour; a default changes only after a
  * phase report shows the comparison.
  *
  * This module is pure (no DOM, no Vite env) so the capture tool and the unit tests can import it.
@@ -39,21 +41,21 @@ export const REALISM_FLAG_DEFS: ReadonlyArray<RealismFlagDef> = [
     key: 'speechAnatomy',
     label: 'Speech anatomy offsets',
     description: 'applySpeechAnatomy moves upper-lip vertices away from the tracked lips while talking.',
-    defaultValue: true,
+    defaultValue: false,
     group: 'mesh',
   },
   {
     key: 'perspectiveForeshortening',
     label: 'Perspective foreshortening',
     description: 'applyPerspectiveForeshortening shifts vertices by yaw/pitch instead of using the tracked points.',
-    defaultValue: true,
+    defaultValue: false,
     group: 'mesh',
   },
   {
     key: 'eyelidKinematics',
     label: 'Eyelid kinematics',
     description: 'applyEyelidKinematics folds persona eyelid vertices down on blinks.',
-    defaultValue: true,
+    defaultValue: false,
     group: 'mesh',
   },
   {
@@ -74,14 +76,14 @@ export const REALISM_FLAG_DEFS: ReadonlyArray<RealismFlagDef> = [
     key: 'oralCavity',
     label: 'Procedural oral cavity',
     description: 'OralCavityRenderer paints synthetic teeth, tongue and mouth shadows over the real mouth.',
-    defaultValue: true,
+    defaultValue: false,
     group: 'post',
   },
   {
     key: 'catchlights',
     label: 'Painted eye catchlights',
     description: 'A fixed white glint is drawn on each iris regardless of the real lighting.',
-    defaultValue: true,
+    defaultValue: false,
     group: 'post',
   },
   {
@@ -89,7 +91,7 @@ export const REALISM_FLAG_DEFS: ReadonlyArray<RealismFlagDef> = [
     label: 'Synthesised keyframe suite',
     description:
       'MultiReferenceBank.synthesizeSuiteFromMaster builds yaw/pitch/viseme/smile keyframes by shifting the one photo.',
-    defaultValue: true,
+    defaultValue: false,
     group: 'bank',
     appliesOn: 'persona-reload',
   },
@@ -97,35 +99,35 @@ export const REALISM_FLAG_DEFS: ReadonlyArray<RealismFlagDef> = [
     key: 'shaderUnsharp',
     label: 'Shader unsharp mask',
     description: 'Fixed-offset high-pass sharpening of the persona texture in the warp shader (R1 §5).',
-    defaultValue: true,
+    defaultValue: false,
     group: 'shader',
   },
   {
     key: 'shaderSubsurface',
     label: 'Shader subsurface tint',
     description: 'Warm "subdermal" tint mixed into mid-tones in the warp shader (R1 §5).',
-    defaultValue: true,
+    defaultValue: false,
     group: 'shader',
   },
   {
     key: 'shaderSebum',
     label: 'Shader sebum sheen',
     description: 'Synthetic specular sheen added where the lighting gain is high (R1 §5).',
-    defaultValue: true,
+    defaultValue: false,
     group: 'shader',
   },
   {
     key: 'realMouth',
     label: 'Keep my real mouth (lip fade)',
     description: 'Fades the persona lip band as the mouth opens so the wearer\'s real lips show instead of stretched persona lips (R1 §2). Also needs the user setting.',
-    defaultValue: false,
+    defaultValue: true,
     group: 'mouth-eyes',
   },
   {
     key: 'eyePassThrough',
     label: 'Eye pass-through ring',
     description: 'Fades the persona in a ring around the eye holes so the wearer\'s lids and lashes show (R1 §6). Radius is a user setting.',
-    defaultValue: false,
+    defaultValue: true,
     group: 'mouth-eyes',
   },
 ];
