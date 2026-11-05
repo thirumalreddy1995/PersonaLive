@@ -1,6 +1,12 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { computeImageStatistics, sharpnessScoreFromLaplacianVariance, SHARPNESS_REFERENCE_VARIANCE } from './imageStatistics.ts';
+import {
+  computeImageStatistics,
+  sharpnessScoreFromLaplacianVariance,
+  SHARPNESS_REFERENCE_VARIANCE,
+  jpegBlockiness,
+  leftRightLuminanceRatio,
+} from './imageStatistics.ts';
 import { evaluateImageQuality } from './faceMath.ts';
 
 function rgba(width: number, height: number, pixel: (x: number, y: number) => number): Uint8ClampedArray {
@@ -64,4 +70,43 @@ test('evaluateImageQuality penalises flat, low-contrast photos', () => {
   assert.ok(flat.score < normal.score);
   assert.equal(flat.lightingCategory, 'Acceptable');
   assert.ok(flat.warnings.some((w) => /contrast/i.test(w)));
+});
+
+test('jpegBlockiness is ~1 on smooth noise and rises when 8×8 block edges are present', () => {
+  const w = 96, h = 96;
+  let seed = 5;
+  const rnd = () => ((seed = (Math.imul(seed, 1664525) + 1013904223) >>> 0) / 4294967296);
+  const smooth = new Uint8ClampedArray(w * h * 4);
+  const blocky = new Uint8ClampedArray(w * h * 4);
+  for (let y = 0; y < h; y++) {
+    for (let x = 0; x < w; x++) {
+      const o = (y * w + x) * 4;
+      const v = 128 + Math.round((rnd() - 0.5) * 20);
+      smooth[o] = smooth[o + 1] = smooth[o + 2] = v;
+      smooth[o + 3] = 255;
+      // Each 8×8 block gets its own flat level: steps only at block boundaries.
+      const level = 100 + ((Math.floor(x / 8) * 7 + Math.floor(y / 8) * 13) % 6) * 12;
+      blocky[o] = blocky[o + 1] = blocky[o + 2] = level;
+      blocky[o + 3] = 255;
+    }
+  }
+  const s = jpegBlockiness(smooth, w, h);
+  const b = jpegBlockiness(blocky, w, h);
+  assert.ok(s > 0.8 && s < 1.25, `smooth ${s}`);
+  assert.ok(b > 5, `blocky ${b}`);
+});
+
+test('leftRightLuminanceRatio compares the two halves of a rectangle', () => {
+  const w = 40, h = 20;
+  const data = new Uint8ClampedArray(w * h * 4);
+  for (let y = 0; y < h; y++) {
+    for (let x = 0; x < w; x++) {
+      const o = (y * w + x) * 4;
+      const v = x < 20 ? 200 : 100;
+      data[o] = data[o + 1] = data[o + 2] = v;
+      data[o + 3] = 255;
+    }
+  }
+  assert.ok(Math.abs(leftRightLuminanceRatio(data, w, { x: 0, y: 0, w: 40, h: 20 }) - 2) < 1e-9);
+  assert.equal(leftRightLuminanceRatio(data, w, { x: 0, y: 0, w: 20, h: 20 }), 1);
 });

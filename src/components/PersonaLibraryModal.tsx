@@ -14,7 +14,7 @@ import {
 import { AuthorizedPersona, CATEGORY_LABEL, PersonaCategory } from '../types/index.ts';
 import { generateConsentHash, QualityAssessmentResult } from '../utils/faceMath.ts';
 import { localPersonas } from '../utils/localPersonas.ts';
-import { assessPhoto } from '../utils/photoAssessment.ts';
+import { assessReference, FACE_HEIGHT_RECOMMENDED_PX, ReferenceGate } from '../utils/photoAssessment.ts';
 
 /** First local persona (references/personas.json), offered as a quick preset when one exists. */
 const LOCAL_PRESET = localPersonas()[0] ?? null;
@@ -58,6 +58,7 @@ export const PersonaLibraryModal: React.FC<PersonaLibraryModalProps> = ({
   const [category, setCategory] = useState<PersonaCategory | null>(null);
   const [previewImage, setPreviewImage] = useState<string | null>(null);
   const [qualityResult, setQualityResult] = useState<QualityAssessmentResult | null>(null);
+  const [gate, setGate] = useState<ReferenceGate | null>(null);
   const [signerName, setSignerName] = useState('');
   const [consentAgreed, setConsentAgreed] = useState(false);
   const [errorMessage, setErrorMessage] = useState<string | null>(null);
@@ -73,10 +74,12 @@ export const PersonaLibraryModal: React.FC<PersonaLibraryModalProps> = ({
   const startAssessment = (src: string, crossOrigin: boolean) => {
     const token = ++assessmentToken.current;
     setQualityResult(null);
-    void assessPhoto(src, crossOrigin)
-      .then((result) => {
+    setGate(null);
+    void assessReference(src, crossOrigin)
+      .then(({ quality, gate: g }) => {
         if (token !== assessmentToken.current) return;
-        setQualityResult(result);
+        setQualityResult(quality);
+        setGate(g);
         setErrorMessage(null);
       })
       .catch((err: unknown) => {
@@ -475,8 +478,31 @@ export const PersonaLibraryModal: React.FC<PersonaLibraryModalProps> = ({
                         <div>Lighting: <span className="text-slate-200">{qualityResult.lightingCategory}</span></div>
                         <div>Orientation: <span className="text-slate-200">{qualityResult.orientation}</span></div>
                         <div>Sharpness: <span className="text-slate-200">{qualityResult.sharpnessScore}/100</span></div>
+                        {gate && (
+                          <>
+                            <div>
+                              Face height:{' '}
+                              <span className={gate.faceHeightPx !== null && gate.faceHeightPx < FACE_HEIGHT_RECOMMENDED_PX ? 'text-amber-300' : 'text-slate-200'}>
+                                {gate.faceHeightPx === null ? 'no face found' : `${Math.round(gate.faceHeightPx)} px`}
+                              </span>
+                            </div>
+                            <div>
+                              Compression: <span className={gate.forwardedCopy ? 'text-amber-300' : 'text-slate-200'}>{gate.forwardedCopy ? 'forwarded copy' : gate.blockiness > 1.3 ? 'blocky' : 'clean'}</span>
+                            </div>
+                            <div>
+                              Lighting balance:{' '}
+                              <span className="text-slate-200">{gate.lightingRatio === null ? '-' : `${gate.lightingRatio.toFixed(2)} L/R`}</span>
+                            </div>
+                            <div>
+                              Expression:{' '}
+                              <span className="text-slate-200">
+                                {gate.eyesOpen === null ? '-' : `${gate.eyesOpen ? 'eyes open' : 'eyes closed'}, ${gate.mouthClosed ? 'mouth closed' : 'mouth open'}, ${gate.neutral === false ? 'not neutral' : 'neutral'}`}
+                              </span>
+                            </div>
+                          </>
+                        )}
                         <div className="col-span-2 text-slate-500">
-                          Face landmarks are mapped when you activate this face.
+                          {gate ? 'Measured from this photo; warnings explain, they never block.' : 'Face landmarks are mapped when you activate this face.'}
                         </div>
                       </div>
                       {qualityResult.warnings.length > 0 && (
