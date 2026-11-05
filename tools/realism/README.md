@@ -38,8 +38,12 @@ Targets are relative to the wearer: `summary.targets` holds, for skin tone (chee
 vs ears) and sharpness, the driver's own value, the output value, the gap and whether it passes
 (±3 ΔE, ±15%).
 
-`--flags r0` is a preset that reproduces the end-of-R0 behaviour whatever the current defaults are
-(see `R0_FLAG_STRING` in `src/realism/flags.ts`); later tokens override it, e.g. `--flags r0,oralCavity=0`.
+`--flags r0` and `--flags r1` are presets that reproduce the end-of-R0 / end-of-R1 behaviour whatever
+the current defaults are (see `R0_FLAG_STRING` / `R1_FLAG_STRING` in `src/realism/flags.ts`); later
+tokens override them, e.g. `--flags r1,rigidForehead=1`. R2 flags: `closedLipMask`, `rigidForehead`,
+`webgl2` (engine-restart), `personaCrop` (persona-reload, size from `--settings personaTextureSize=1024`),
+`cameraMatch` (needs `webgl2`). `--regions` writes `t<sec>-regions.png` with the metric patches drawn on
+driver and output next to the measured values.
 
 `--settings temporalSmoothing=20,blendStrength=100` overrides the inspector settings for the run (the
 same keys as `TransformationSettings`; `?rs=` on the page URL does the same in a browser).
@@ -75,6 +79,9 @@ dark skin, men and women, ages 20s–60s, beard / moustache / clean-shaven, glas
 hairline and a fringe. It writes `realism-review/personas/manifest.json` (source, image id, prompt,
 attributes, licence note) and `<id>-degraded.jpg` copies (700 px, JPEG q55 twice) for the R2
 quality gate. `--personas p01,p05` runs a subset; `--personas <folder>` runs any folder of images.
+`npm run realism:personas -- --source <download> --replace p05,p09` swaps named faces for new ones of the
+same gender and ethnicity (plan run first, fetch the listed Kaggle paths, run again); swapped-out images
+are listed in `excluded.json` and never picked again.
 
 Grid runs write one contact sheet per persona × clip under `personas/<id>/<clip>/` (add `--frames`
 for the PNGs), `grid.png` (rows = personas, columns = clips) and `report.grid` with per-persona
