@@ -928,6 +928,8 @@ export class RealtimeFacialEngine {
             faceWidthPx: k.faceWidth,
             toneMatch: clamp(s.skinToneMatch, 0, 1),
             radiusShare: clamp(s.relightRadius, 0.02, 0.2),
+            globalTone: flags.relightGlobalTone,
+            shadowGuard: flags.relightShadowGuard,
           }
         : undefined,
       motionBlurPx: flags.motionBlur ? [this.headVelocity.x * MOTION_BLUR_EXPOSURE, -this.headVelocity.y * MOTION_BLUR_EXPOSURE] : undefined,

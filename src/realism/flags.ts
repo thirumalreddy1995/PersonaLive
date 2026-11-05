@@ -44,7 +44,9 @@ export type RealismFlagKey =
   | 'restMouth'
   | 'softHoles'
   | 'steadyCameraMatch'
-  | 'motionBlur';
+  | 'motionBlur'
+  | 'relightGlobalTone'
+  | 'relightShadowGuard';
 
 export const REALISM_FLAG_DEFS: ReadonlyArray<RealismFlagDef> = [
   {
@@ -180,6 +182,21 @@ export const REALISM_FLAG_DEFS: ReadonlyArray<RealismFlagDef> = [
     group: 'shader',
   },
   {
+    key: 'relightGlobalTone',
+    label: 'Relight: global persona tone',
+    description:
+      'The relit chroma is the wearer\'s local chroma shifted by the persona\'s mean skin tone over the wearer\'s (raised to 1 - tone weight), instead of the persona\'s local low-pass chroma: the persona\'s own light colour (warm key, cold fill) no longer leaks into the output (R3).',
+    defaultValue: true,
+    group: 'shader',
+  },
+  {
+    key: 'relightShadowGuard',
+    label: 'Relight: shadow guard',
+    description: 'Where the persona low pass is nearly black (deep shadow in the photo) the detail term fades to 1 so the divided-out noise is not amplified (R3).',
+    defaultValue: true,
+    group: 'shader',
+  },
+  {
     key: 'steadyCameraMatch',
     label: 'Steady camera match',
     description: 'Camera-match estimates go through a slow EMA with a dead band and hold during fast head motion, so the blur tracks the camera\'s steady softness rather than per-frame motion blur (R3 item 3).',
@@ -221,15 +238,15 @@ export const REALISM_FLAG_DEFS: ReadonlyArray<RealismFlagDef> = [
  * the current defaults are. Update this only when a phase report changes defaults.
  */
 export const R0_FLAG_STRING =
-  'speechAnatomy=1,perspectiveForeshortening=1,eyelidKinematics=1,foreheadHarmonize=1,hairlineSoften=1,oralCavity=1,catchlights=1,syntheticSuite=1,shaderUnsharp=1,shaderSubsurface=1,shaderSebum=1,realMouth=0,eyePassThrough=0,closedLipMask=0,rigidForehead=0,webgl2=0,personaCrop=0,cameraMatch=0,relight=0,restMouth=0,softHoles=0,steadyCameraMatch=0,motionBlur=0';
+  'speechAnatomy=1,perspectiveForeshortening=1,eyelidKinematics=1,foreheadHarmonize=1,hairlineSoften=1,oralCavity=1,catchlights=1,syntheticSuite=1,shaderUnsharp=1,shaderSubsurface=1,shaderSebum=1,realMouth=0,eyePassThrough=0,closedLipMask=0,rigidForehead=0,webgl2=0,personaCrop=0,cameraMatch=0,relight=0,restMouth=0,softHoles=0,steadyCameraMatch=0,motionBlur=0,relightGlobalTone=0,relightShadowGuard=0';
 
 /** The R1 defaults, as a flag string: `--flags r1` reproduces the end-of-R1 behaviour. */
 export const R1_FLAG_STRING =
-  'speechAnatomy=0,perspectiveForeshortening=0,eyelidKinematics=0,foreheadHarmonize=1,hairlineSoften=1,oralCavity=0,catchlights=0,syntheticSuite=0,shaderUnsharp=0,shaderSubsurface=0,shaderSebum=0,realMouth=1,eyePassThrough=1,closedLipMask=0,rigidForehead=0,webgl2=0,personaCrop=0,cameraMatch=0,relight=0,restMouth=0,softHoles=0,steadyCameraMatch=0,motionBlur=0';
+  'speechAnatomy=0,perspectiveForeshortening=0,eyelidKinematics=0,foreheadHarmonize=1,hairlineSoften=1,oralCavity=0,catchlights=0,syntheticSuite=0,shaderUnsharp=0,shaderSubsurface=0,shaderSebum=0,realMouth=1,eyePassThrough=1,closedLipMask=0,rigidForehead=0,webgl2=0,personaCrop=0,cameraMatch=0,relight=0,restMouth=0,softHoles=0,steadyCameraMatch=0,motionBlur=0,relightGlobalTone=0,relightShadowGuard=0';
 
 /** The R2 defaults, as a flag string: `--flags r2` reproduces the end-of-R2 behaviour. */
 export const R2_FLAG_STRING =
-  'speechAnatomy=0,perspectiveForeshortening=0,eyelidKinematics=0,foreheadHarmonize=1,hairlineSoften=1,oralCavity=0,catchlights=0,syntheticSuite=0,shaderUnsharp=0,shaderSubsurface=0,shaderSebum=0,realMouth=1,eyePassThrough=1,closedLipMask=1,rigidForehead=1,webgl2=1,personaCrop=1,cameraMatch=1,relight=0,restMouth=0,softHoles=0,steadyCameraMatch=0,motionBlur=0';
+  'speechAnatomy=0,perspectiveForeshortening=0,eyelidKinematics=0,foreheadHarmonize=1,hairlineSoften=1,oralCavity=0,catchlights=0,syntheticSuite=0,shaderUnsharp=0,shaderSubsurface=0,shaderSebum=0,realMouth=1,eyePassThrough=1,closedLipMask=1,rigidForehead=1,webgl2=1,personaCrop=1,cameraMatch=1,relight=0,restMouth=0,softHoles=0,steadyCameraMatch=0,motionBlur=0,relightGlobalTone=0,relightShadowGuard=0';
 
 /** Named flag presets accepted by parseRealismFlagString (case-insensitive). */
 export const REALISM_FLAG_PRESETS: Record<string, string> = { r0: R0_FLAG_STRING, r1: R1_FLAG_STRING, r2: R2_FLAG_STRING };

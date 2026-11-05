@@ -1,7 +1,7 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import { CAMERA_MATCH_LIMITS, STEADY_DEADBAND, initialCameraMatch, stepCameraMatch } from './cameraMatch.ts';
-import { blurTaps, derivativesPreamble, faceStatsFromPixels, lowPassSigma, softHoleRadiusPx, toGlslEs3, uvWidth } from './meshWarpRenderer.ts';
+import { RELIGHT_RADIUS_SHARE, blendMean, blurTaps, derivativesPreamble, faceStatsFromPixels, lowPassSigma, meanChroma, softHoleRadiusPx, toGlslEs3, uvWidth } from './meshWarpRenderer.ts';
 
 const stats = (laplacianVariance: number, noiseMad: number, samples = 5000) => ({ laplacianVariance, noiseMad, samples });
 
@@ -85,9 +85,9 @@ test('steady camera match follows a slow EMA, ignores small errors and holds dur
 });
 
 test('R3 relight helpers: low-pass sigma, blur taps, soft-hole radius, UV width and the derivatives preamble', () => {
-  // 8% of a 300 px face at 1/8 scale is 3 texels; tiny and huge faces are clamped.
-  assert.ok(Math.abs(lowPassSigma(300, 0.08) - 3) < 1e-9);
-  assert.ok(Math.abs(lowPassSigma(480) - 3) < 1e-9, 'the default share is 5%');
+  // 8% of a 300 px face at 1/4 scale is 6 texels; tiny and huge faces are clamped.
+  assert.ok(Math.abs(lowPassSigma(300, 0.08) - 6) < 1e-9);
+  assert.ok(Math.abs(lowPassSigma(480) - (RELIGHT_RADIUS_SHARE * 480) / 4) < 1e-9, 'the default share at 1/4 scale');
   assert.equal(lowPassSigma(10), 1);
   assert.equal(lowPassSigma(100000), 40);
   // Small sigmas sample every texel; larger ones spread the 15 taps so ±7 taps still cover ~2.8 sigma.
@@ -108,4 +108,36 @@ test('R3 relight helpers: low-pass sigma, blur taps, soft-hole radius, UV width 
   // The ES3 conversion keeps the version line first and the defines right after it.
   const es3 = toGlslEs3('precision highp float;\nvoid main() {}', 'fragment', '#define HAS_DERIVATIVES 1\n');
   assert.ok(es3.startsWith('#version 300 es\n#define HAS_DERIVATIVES 1\n'));
+});
+
+test('meanChroma averages the painted (premultiplied) low pass and normalises by luma', () => {
+  const w = 8, h = 4;
+  const px = new Uint8Array(w * h * 4);
+  // Left half: warm skin at full coverage; right half: unpainted (alpha 0) with garbage colour.
+  for (let i = 0; i < w * h; i++) {
+    const painted = i % w < 4;
+    px[i * 4] = painted ? 200 : 255;
+    px[i * 4 + 1] = painted ? 120 : 255;
+    px[i * 4 + 2] = painted ? 80 : 255;
+    px[i * 4 + 3] = painted ? 255 : 0;
+  }
+  const m = meanChroma(px, w, h)!;
+  const lum = 0.2126 * m[0] + 0.7152 * m[1] + 0.0722 * m[2];
+  assert.ok(Math.abs(lum - 1) < 1e-9, `luma ${lum}`);
+  assert.ok(Math.abs(m[0] / m[2] - 200 / 80) < 1e-9, 'channel ratios survive the normalisation');
+  // Half coverage with premultiplied colour gives the same chroma.
+  const half = new Uint8Array(w * h * 4);
+  for (let i = 0; i < w * h; i++) {
+    const painted = i % w < 4;
+    half[i * 4] = painted ? 100 : 255;
+    half[i * 4 + 1] = painted ? 60 : 255;
+    half[i * 4 + 2] = painted ? 40 : 255;
+    half[i * 4 + 3] = painted ? 128 : 0;
+  }
+  const m2 = meanChroma(half, w, h)!;
+  assert.ok(Math.abs(m2[0] - m[0]) < 0.02 && Math.abs(m2[2] - m[2]) < 0.02);
+  assert.equal(meanChroma(new Uint8Array(w * h * 4), w, h), null, 'nothing painted');
+  assert.deepEqual(blendMean(null, [1, 2, 3], 0.3), [1, 2, 3]);
+  const b = blendMean([1, 1, 1], [2, 1, 0], 0.5);
+  assert.deepEqual(b, [1.5, 1, 0.5]);
 });

@@ -50,17 +50,26 @@ export interface RelightOptions {
   toneMatch: number;
   /** Low-pass sigma as a share of face width (setting relightRadius; RELIGHT_RADIUS_SHARE by default). */
   radiusShare?: number;
+  /** Flag relightGlobalTone: chroma from the wearer's local low pass shifted by the persona's mean tone. */
+  globalTone?: boolean;
+  /** Flag relightShadowGuard: no detail amplification where the persona low pass is nearly black. */
+  shadowGuard?: boolean;
 }
 
+/** Frames between driver mean-tone readbacks (a small synchronous readPixels of the 1/RELIGHT_SCALE-scale low pass). */
+export const MEAN_TONE_EVERY = 3;
+/** EMA weight of each new driver mean-tone sample. */
+export const MEAN_TONE_ALPHA = 0.3;
+
 /** The low-pass framebuffers run at 1/RELIGHT_SCALE of the canvas (and of the persona texture). */
-export const RELIGHT_SCALE = 8;
+export const RELIGHT_SCALE = 4;
 /**
  * Gaussian sigma of the low pass as a share of face width (setting relightRadius). The plan said
  * 6–10%; measured on clips A, D and E the persona cheeks came out 4.8 / 3.8 / 3.1 L darker than the
  * wearer's at 8 / 6 / 5% (the low pass averages the cheek highlight away), and 5% is where the
  * cheek-vs-neck gap sits inside ±3 ΔE of the wearer's own on all three clips.
  */
-export const RELIGHT_RADIUS_SHARE = 0.05;
+export const RELIGHT_RADIUS_SHARE = 0.02;
 /** Soft pass-through edges: the fade spans this many camera-blur radii (R3 item 4), clamped to 1..12 px. */
 export const SOFT_HOLE_RADII = 1.5;
 
@@ -183,6 +192,10 @@ uniform float uNoiseSigma;
 uniform float uFrame;
 uniform float uRelight;
 uniform float uToneMatch;
+uniform float uGlobalTone;
+uniform float uShadowGuard;
+uniform vec3 uMeanChromaP;
+uniform vec3 uMeanChromaD;
 uniform vec2 uMotionBlur;
 uniform float uSoftHolesPx;
 
@@ -259,11 +272,22 @@ void main() {
       vec3 PL = pl.rgb / pl.a;  // the low passes are stored in linear light (see PAINT_FRAGMENT_ES1)
       vec3 DL = dl.rgb / dl.a;
       vec3 detail = clamp(P / max(PL, vec3(0.002)), 0.0, 4.0);
+      // Shadow guard (flag relightShadowGuard): a nearly black persona low pass divides out noise, not detail.
+      if (uShadowGuard > 0.5) detail = mix(vec3(1.0), detail, smoothstep(0.002, 0.02, luma(PL)));
       float shade = luma(DL);
       vec3 chromaP = PL / max(luma(PL), 0.002);
       vec3 chromaD = DL / max(luma(DL), 0.002);
       float tw = clamp(uToneMatch * vToneWeight * min(1.0, dl.a / 0.3), 0.0, 1.0);
-      vec3 tone = mix(chromaP, chromaD, tw);
+      vec3 tone;
+      if (uGlobalTone > 0.5) {
+        // Global tone (flag relightGlobalTone): the wearer's local chroma carries the light colour;
+        // the persona's identity is one mean skin-tone ratio, fading out toward the boundary.
+        vec3 ratio = max(uMeanChromaP, vec3(0.002)) / max(uMeanChromaD, vec3(0.002));
+        tone = chromaD * pow(clamp(ratio, vec3(0.25), vec3(4.0)), vec3(1.0 - tw));
+        tone /= max(luma(tone), 0.002);
+      } else {
+        tone = mix(chromaP, chromaD, tw);
+      }
       base = linearToSrgb(clamp(detail * shade * tone, 0.0, 1.0));
       gain = vec3(1.0);
     }
@@ -431,6 +455,10 @@ interface GLResources {
     uPersonaLow: WebGLUniformLocation | null;
     uRelight: WebGLUniformLocation | null;
     uToneMatch: WebGLUniformLocation | null;
+    uGlobalTone: WebGLUniformLocation | null;
+    uShadowGuard: WebGLUniformLocation | null;
+    uMeanChromaP: WebGLUniformLocation | null;
+    uMeanChromaD: WebGLUniformLocation | null;
     uMotionBlur: WebGLUniformLocation | null;
     uSoftHolesPx: WebGLUniformLocation | null;
   };
@@ -476,6 +504,8 @@ interface LowPassTarget {
   tex: [WebGLTexture, WebGLTexture];
   width: number;
   height: number;
+  /** Readback scratch for meanChroma (allocated on first use). */
+  pixels?: Uint8Array;
 }
 
 interface RelightResources {
@@ -501,6 +531,35 @@ interface RelightResources {
   driverTexture: WebGLTexture;
   driver: LowPassTarget | null;
   persona: LowPassTarget | null;
+  /** Mean chroma (luma-normalised linear RGB) of the persona low pass over the mesh; null until read. */
+  personaMean: [number, number, number] | null;
+  /** EMA of the driver low pass's mean chroma. */
+  driverMean: [number, number, number] | null;
+  frames: number;
+}
+
+/**
+ * Mean chroma of a premultiplied RGBA8 low-pass target (linear light): the alpha-weighted mean colour
+ * over the painted mesh, divided by its luma. Null when (almost) nothing was painted.
+ */
+export function meanChroma(pixels: ArrayLike<number>, width: number, height: number): [number, number, number] | null {
+  let r = 0, g = 0, b = 0, a = 0;
+  const n = width * height * 4;
+  for (let i = 0; i < n; i += 4) {
+    const w = pixels[i + 3];
+    if (w < 8) continue;
+    r += pixels[i]; g += pixels[i + 1]; b += pixels[i + 2]; a += w;
+  }
+  if (a < 8 * 16) return null;
+  const lum = (0.2126 * r + 0.7152 * g + 0.0722 * b) / a;
+  if (lum < 1e-6) return null;
+  return [r / a / lum, g / a / lum, b / a / lum];
+}
+
+/** EMA step on a mean-chroma triple. */
+export function blendMean(prev: [number, number, number] | null, next: [number, number, number], alpha: number): [number, number, number] {
+  if (!prev) return next;
+  return [prev[0] + (next[0] - prev[0]) * alpha, prev[1] + (next[1] - prev[1]) * alpha, prev[2] + (next[2] - prev[2]) * alpha];
 }
 
 /** Gaussian sigma (in low-pass texels) for a face this wide (in the source's own pixels). */
@@ -810,6 +869,10 @@ export class MeshWarpRenderer {
         uPersonaLow: u('uPersonaLow'),
         uRelight: u('uRelight'),
         uToneMatch: u('uToneMatch'),
+        uGlobalTone: u('uGlobalTone'),
+        uShadowGuard: u('uShadowGuard'),
+        uMeanChromaP: u('uMeanChromaP'),
+        uMeanChromaD: u('uMeanChromaD'),
         uMotionBlur: u('uMotionBlur'),
         uSoftHolesPx: u('uSoftHolesPx'),
       },
@@ -851,6 +914,9 @@ export class MeshWarpRenderer {
         driverTexture,
         driver: null,
         persona: null,
+        personaMean: null,
+        driverMean: null,
+        frames: 0,
       };
       this.personaLowDirty = true;
       return r.relight;
@@ -902,7 +968,7 @@ export class MeshWarpRenderer {
     const W = this._canvas.width;
     const H = this._canvas.height;
 
-    // Driver frame → texture (mipmapped on WebGL2 so the 1/8 paint is a box prefilter, not a point sample).
+    // Driver frame → texture (mipmapped on WebGL2 so the 1/RELIGHT_SCALE paint is a box prefilter, not a point sample).
     gl.activeTexture(gl.TEXTURE0);
     gl.bindTexture(gl.TEXTURE_2D, rl.driverTexture);
     gl.pixelStorei(gl.UNPACK_FLIP_Y_WEBGL, false);
@@ -931,14 +997,32 @@ export class MeshWarpRenderer {
       this.blurTarget(gl, rl, rl.persona, lowPassSigma(this.personaUvWidth * this.personaSize.width, share));
       this.personaLowDirty = false;
       this.personaLowShare = share;
+      rl.personaMean = o.globalTone ? this.readMean(gl, rl.persona) : null;
     }
     this.paintMesh(gl, r, rl, rl.driver, 0, o);
     this.blurTarget(gl, rl, rl.driver, lowPassSigma(o.faceWidthPx, share));
+    rl.frames++;
+    if (o.globalTone) {
+      if (!rl.personaMean) rl.personaMean = this.readMean(gl, rl.persona);
+      if (!rl.driverMean || rl.frames % MEAN_TONE_EVERY === 0) {
+        const m = this.readMean(gl, rl.driver);
+        if (m) rl.driverMean = blendMean(rl.driverMean, m, MEAN_TONE_ALPHA);
+      }
+    }
 
     gl.bindFramebuffer(gl.FRAMEBUFFER, null);
     gl.viewport(0, 0, W, H);
     gl.enable(gl.BLEND);
     return true;
+  }
+
+  /** Reads a low-pass target back (small: 1/RELIGHT_SCALE scale) and returns its mean chroma. */
+  private readMean(gl: WebGLRenderingContext, target: LowPassTarget): [number, number, number] | null {
+    const size = target.width * target.height * 4;
+    if (!target.pixels || target.pixels.length !== size) target.pixels = new Uint8Array(size);
+    gl.bindFramebuffer(gl.FRAMEBUFFER, target.fbo[0]);
+    gl.readPixels(0, 0, target.width, target.height, gl.RGBA, gl.UNSIGNED_BYTE, target.pixels);
+    return meanChroma(target.pixels, target.width, target.height);
   }
 
   private paintMesh(gl: WebGLRenderingContext, r: GLResources, rl: RelightResources, target: LowPassTarget, mode: 0 | 1, o: RelightOptions) {
@@ -1229,6 +1313,13 @@ export class MeshWarpRenderer {
     const rl = r.relight;
     gl.uniform1f(loc.uRelight, relit && rl?.driver && rl.persona ? 1 : 0);
     gl.uniform1f(loc.uToneMatch, opts.relight?.toneMatch ?? 0);
+    const globalTone = !!opts.relight?.globalTone && !!rl?.personaMean && !!rl.driverMean;
+    gl.uniform1f(loc.uGlobalTone, globalTone ? 1 : 0);
+    gl.uniform1f(loc.uShadowGuard, opts.relight?.shadowGuard ? 1 : 0);
+    const mp = (globalTone && rl?.personaMean) || [1, 1, 1];
+    const md = (globalTone && rl?.driverMean) || [1, 1, 1];
+    gl.uniform3f(loc.uMeanChromaP, mp[0], mp[1], mp[2]);
+    gl.uniform3f(loc.uMeanChromaD, md[0], md[1], md[2]);
     if (relit && rl?.driver && rl.persona) {
       gl.activeTexture(gl.TEXTURE1);
       gl.bindTexture(gl.TEXTURE_2D, rl.driver.tex[0]);

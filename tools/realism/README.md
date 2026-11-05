@@ -55,10 +55,13 @@ defaults. R2 flags: `closedLipMask`, `rigidForehead`, `webgl2` (engine-restart),
 (persona-reload, size from `--settings personaTextureSize=1024`), `cameraMatch` (needs `webgl2`).
 R3 flags: `relight` (frequency-separation relighting from the real frame; the tone match toward
 the wearer at the face boundary is `--settings skinToneMatch=0..1` and the low-pass radius as a
-share of face width `relightRadius=0.05`), `restMouth` (lip-fade
+share of face width `relightRadius=0.02`), `restMouth` (lip-fade
 thresholds relative to the learned resting aperture), `softHoles` (pass-through fades widened to
 the camera-match blur radius), `steadyCameraMatch` (slow EMA, dead band, hold during fast motion)
-and `motionBlur` (directional blur along the head velocity). `--regions` writes `t<sec>-regions.png`
+and `motionBlur` (directional blur along the head velocity); `relightGlobalTone` (one mean
+persona-over-wearer skin-tone ratio on the wearer's local chroma instead of the persona's local
+chroma) and `relightShadowGuard` (no detail amplification where the persona low pass is nearly
+black) are the grid fixes. `--regions` writes `t<sec>-regions.png`
 with the metric patches and the seam-step bands (magenta inside, white outside) drawn on driver
 and output next to the measured values.
 
