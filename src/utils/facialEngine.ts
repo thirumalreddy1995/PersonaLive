@@ -1233,6 +1233,7 @@ export class RealtimeFacialEngine {
         landmarks: snap.landmarks,
         warpPositions: Float32Array.from(this.warpPositions),
         outputLandmarks: null,
+        mirror: layout.mirror,
         mar: this.lastMar,
         pose: { ...this.lastPose },
         isSpeaking: this.lastMetrics?.isSpeaking ?? false,
@@ -1316,12 +1317,25 @@ export class RealtimeFacialEngine {
         this.captures = [];
         for (const c of out) {
           try {
-            const { faces } = await this.tracker.detectImage(c.output);
+            // The driver is drawn mirrored, which swaps the landmarker's left/right indices. Detecting
+            // on an un-mirrored copy and flipping x back keeps index i on the same feature as the driver's.
+            let target = c.output;
+            if (c.mirror) {
+              target = document.createElement('canvas');
+              target.width = c.output.width;
+              target.height = c.output.height;
+              const tctx = target.getContext('2d')!;
+              tctx.translate(target.width, 0);
+              tctx.scale(-1, 1);
+              tctx.drawImage(c.output, 0, 0);
+            }
+            const { faces } = await this.tracker.detectImage(target);
             const face = faces[0];
             if (face) {
               const px = new Float32Array(face.landmarks.length);
               for (let i = 0; i < face.landmarks.length; i += 2) {
-                px[i] = face.landmarks[i] * c.output.width;
+                const x = face.landmarks[i] * c.output.width;
+                px[i] = c.mirror ? c.output.width - x : x;
                 px[i + 1] = face.landmarks[i + 1] * c.output.height;
               }
               c.outputLandmarks = px;

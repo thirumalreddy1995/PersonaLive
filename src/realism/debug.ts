@@ -55,6 +55,8 @@ export interface RealismFrameCapture {
   warpPositions: Float32Array;
   /** Landmarks re-detected on the output frame, in output-canvas pixels; null if none found. */
   outputLandmarks: Float32Array | null;
+  /** True when the driver was drawn mirrored (webcam/clip); output detection un-mirrors to match. */
+  mirror: boolean;
   mar: number;
   pose: HeadPose;
   isSpeaking: boolean;

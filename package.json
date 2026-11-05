@@ -10,12 +10,13 @@
     "dev": "vite --port=3000 --host=0.0.0.0",
     "build": "vite build",
     "preview": "vite preview",
-    "test": "npx tsx --test src/utils/faceMath.test.ts src/utils/faceMesh.test.ts src/utils/neuralPipelineAudit.test.ts src/utils/assetUrl.test.ts src/utils/imageStatistics.test.ts src/utils/watermark.test.ts src/realism/flags.test.ts src/realism/profiler.test.ts electron/resolveDistFile.test.cjs",
+    "test": "npx tsx --test src/utils/faceMath.test.ts src/utils/faceMesh.test.ts src/utils/neuralPipelineAudit.test.ts src/utils/assetUrl.test.ts src/utils/imageStatistics.test.ts src/utils/watermark.test.ts src/realism/flags.test.ts src/realism/profiler.test.ts tools/realism/metrics.test.ts electron/resolveDistFile.test.cjs",
     "clean": "rm -rf dist",
     "lint": "tsc --noEmit",
     "desktop:run": "electron .",
     "desktop:dev": "node electron/dev.cjs",
-    "desktop:build": "npm run build && electron-builder --publish never"
+    "desktop:build": "npm run build && electron-builder --publish never",
+    "realism:capture": "tsx tools/realism/capture.ts"
   },
   "dependencies": {
     "@mediapipe/tasks-vision": "^1.2.0",
@@ -27,11 +28,14 @@
   "devDependencies": {
     "@tailwindcss/vite": "^4.3.3",
     "@types/node": "^22.14.0",
+    "@types/pngjs": "^6.0.5",
     "@types/react": "^19.3.0",
     "@types/react-dom": "^19.3.0",
     "@vitejs/plugin-react": "^6.1.1",
     "electron": "^45.2.2",
     "electron-builder": "^26.18.0",
+    "playwright": "^1.64.1",
+    "pngjs": "^7.0.0",
     "tailwindcss": "^4.3.3",
     "tsx": "^4.21.0",
     "typescript": "^7.0.2",
