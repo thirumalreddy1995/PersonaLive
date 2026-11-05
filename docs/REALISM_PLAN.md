@@ -55,6 +55,8 @@ Line references are for commit `cbdca42`; search for the quoted code if they've 
    ```
 
    Then the realism review below.
+7. **Metric targets are relative to the wearer, not absolute.** Sharpness and skin tone pass when they sit within a tolerance of the driver's own value on the same frames (see the metrics table). Report the driver value, the output value and the gap.
+8. **Phase acceptance criteria apply to the median and the worst 10% of personas in the persona test set, and no persona may regress** (R0 review, 2026-11-05). My webcam clips stay the driver set; the personas vary.
 
 ### Guardrails — unchanged by this pass, enforce them
 
@@ -101,15 +103,22 @@ Line references are for commit `cbdca42`; search for the quoted code if they've 
 
 | Metric | How to compute it |
 |---|---|
-| Skin-tone match | CIEDE2000 ΔE between a persona cheek patch and the wearer's neck and ear patches. Lower is better. |
-| Sharpness match | Laplacian variance inside the face divided by Laplacian variance in a ring just outside it (hair, ears, collar). Target ≈ 1.0. |
+| Skin-tone match | CIEDE2000 ΔE between a persona cheek patch (output) and the wearer's neck and ear patches (driver), reported next to the wearer's own cheek-vs-neck and cheek-vs-ears ΔE on the same frames. **Passes when both output values are within ±3 ΔE of the driver's own values**; report driver value, output value and gap. Not "lower is better": a real face differs from its own neck and ears. |
+| Sharpness match | Laplacian variance inside the face divided by Laplacian variance in a ring just outside it (hair, ears, collar), reported next to the same ratio on the driver frame. **Passes when the output ratio is within ±15% of the driver's own ratio on the same frames**; report driver value, output value and gap. Not ≈ 1.0: a soft webcam frame makes the wearer's own face/ring ratio well below 1. |
 | Seam score | Gradient magnitude along the blend boundary versus a band just inside it. Lower is better. |
 | Mouth fidelity | Re-run FaceLandmarker on the output and measure lip-landmark error against the driver. Also count frames with synthetic teeth drawn; should be 0. |
 | Flicker | Mean frame-to-frame difference inside the face minus the same on the driver. |
-| Forehead tone step | ΔE between an upper-forehead patch and a lower-forehead patch on the output, minus the same on the driver. Should approach 0; a real forehead has no band. |
+| Forehead tone step | ΔE between a band on the wearer's real forehead just above landmark 10 (the top of the warped mesh; trimmed where hair starts, hair-like dark pixels excluded) and a band between the brows and landmark 10 on the output, minus the same on the driver. Should approach 0; a real forehead has no band. Validated on the "before" screenshots with `npm run realism:still` (output-only ΔE 13–15 on the four screenshots where the band is visible). |
 | Hairline alignment | Mean pixel distance between the top edge of the persona layer and the wearer's hair-mask boundary, per column across the forehead. Also its frame-to-frame jitter, measured on clip E. |
 | Texture slide | Optical-flow residual of the persona forehead texture relative to the wearer's head motion on clip E. Should be ~0; the texture must move with the head, not inside it. |
 | Performance | FPS, p50/p95 frame time, per-stage `performance.measure` timings. |
+
+**Persona test set** (photos only; the webcam clips stay as they are)
+- Synthetic faces only (people who don't exist): SFHQ-T2I (github.com/SelfishGene/SFHQ-T2I-dataset) or SFHQ, downloaded only as needed. Never photos of real people from the web.
+- ~24 frontal, neutral faces in gitignored `realism-review/personas/`, with `manifest.json` recording source, image id, prompt/attributes and licence note. Coverage: at least 8 South Asian faces plus the full range from light to dark skin; men and women; ages from 20s to 60s; beard, moustache and clean-shaven; glasses; a receding hairline and a fringe over the forehead. `npm run realism:personas -- --source <download>` selects them.
+- Degraded copies of 4 of them (downscaled to ~700 px and JPEG-compressed like a WhatsApp forward) test low-quality references and the R2 quality gate.
+- `npm run realism:capture -- --clip all --personas all` runs every clip × every persona: per-persona metrics, a grid contact sheet (rows = personas, columns = clips), and the median and the worst 3 personas per metric in `report.json`.
+- Acceptance criteria apply to the median and the worst 10% of personas; no persona may regress.
 
 **Debug panel**
 - Add a dev-only "Realism debug" panel.
@@ -119,9 +128,10 @@ Line references are for commit `cbdca42`; search for the quoted code if they've 
 
 ## Phase R0 — Tooling and guardrail fixes
 
-- Build the review tooling above.
+- Build the review tooling above, including the persona test set tooling.
 - Make the watermark unconditional and legible.
-- Untrack `references/`.
+- Untrack `references/`. Move the one bundled real-person portrait out of `public/`: desktop and dev builds load it from the gitignored `references/` folder (with its consent record) or through the upload flow; the Pages build ships only the sample personas. Persona quality metrics are measured from the image, never hard-coded.
+- Validate the forehead tone-step metric on the "before" screenshots; fix the patch placement if it does not flag the visible band.
 - Record a **baseline** run of clips A–E with the current defaults.
 - Commit only `report.json`, never frames.
 
@@ -208,14 +218,14 @@ Every ~15 frames:
 - Never use the synchronous `getImageData` path.
 
 In the shader:
-- Blur or sharpen the persona (texel-size-aware kernel, strength from the estimate) so the sharpness ratio converges to ~1.0.
+- Blur or sharpen the persona (texel-size-aware kernel, strength from the estimate) so the sharpness ratio converges to the wearer's own face/ring ratio.
 - Add per-frame, temporally varying luminance noise with matching sigma: a hash of pixel coordinate and frame index, plus a small chroma component.
 
 ### 5. Default output resolution
 - Once R5's performance work lands, default back to 720p. Note in the report whether 540p is still needed on this machine.
 
 ### Acceptance
-- Sharpness ratio within 0.85–1.15 on clips A and B.
+- Sharpness ratio within ±15% of the driver's own face/ring ratio on the same frames, on clips A and B (median persona and worst 10%, no persona regressing).
 - Visibly less "pasted" in the contact sheet.
 
 ---
@@ -249,7 +259,7 @@ out      = detail * rebuild(shadeLum, tone)
 - Delete `updateLightingGain`'s `getImageData` path entirely, and its 5-zone uniforms.
 
 ### Acceptance
-- ΔE to neck and ears improves.
+- Cheek-vs-neck and cheek-vs-ears ΔE within ±3 of the driver's own values on the same frames (median persona and worst 10%, no persona regressing).
 - On clip D (lamp on/off), the persona's shading changes in step with the real face.
 - On clip B (head turns), the shadowed side of the face is dark like the real one.
 - No flicker regression.
@@ -441,7 +451,8 @@ out      = detail * rebuild(shadeLum, tone)
 Branch / commits:
 What changed (file paths):
 Flags/settings added and their defaults:
-Metrics, baseline → now (clips A–E):
+Metrics, baseline → now (clips A–E; driver value, output value, gap):
+Persona grid: median / worst 10% / worst 3 per metric, personas that regressed:
 Contact sheets: realism-review/out/<run>/ (paths)
 What still looks fake, ranked:
 Deviations from plan and why:
