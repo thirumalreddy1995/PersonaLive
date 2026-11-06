@@ -131,14 +131,14 @@ function main() {
       rows.push(sweepRow(persona, setting, picked));
       const tiles: SheetRow['tiles'] = [];
       const photo = persona === 'default' ? null : report.grid?.personas[persona]?.file;
-      if (photo && fs.existsSync(path.join(ROOT, photo))) tiles.push({ label: 'persona photo', image: fitHeight(decodeImageFile(path.join(ROOT, photo)), TILE_H) });
+      if (photo && fs.existsSync(path.join(ROOT, photo))) tiles.push({ label: setting, image: fitHeight(decodeImageFile(path.join(ROOT, photo)), TILE_H) });
       for (const clip of args.clips) {
         const dir = persona === 'default' ? path.join(OUT, run, clip) : path.join(OUT, run, 'personas', persona, clip);
         const crops = identityCrops(dir, 2);
         crops.forEach((img, i) => tiles.push({ label: `${clip} ${i + 1}`, image: img }));
       }
       const r = rows[rows.length - 1];
-      sheetRows.push({ label: `${setting}  id ${fmt(r.identityMargin)}`, tiles });
+      sheetRows.push({ label: `${persona === 'default' ? setting.replace(' / de-light ', ' dl ') : 'id'} ${fmt(r.identityMargin)}`, tiles });
     }
     if (sheetRows.length) {
       const sheet = contactSheet(`${persona}  identity-vs-lighting sweep (rows = settings; label = identity margin)`, sheetRows);
