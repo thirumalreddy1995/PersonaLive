@@ -3,8 +3,8 @@
  * strands over the face skin) from the surrounding skin so they never enter the persona texture.
  *
  * Pull-push: a pyramid of weighted averages is built from the valid pixels (pull), then each
- * level fills its invalid pixels from the coarser one (push); a few Jacobi smoothing passes
- * over the masked region remove the block structure. Pure and unit-testable.
+ * level fills its invalid pixels by bilinear interpolation of the coarser one (push); a few Jacobi
+ * smoothing passes over the masked region polish the result. Pure and unit-testable.
  */
 
 export interface InpaintResult {
@@ -51,19 +51,45 @@ export function inpaintMasked(data: Uint8ClampedArray | Uint8Array, width: numbe
     for (let i = 0; i < w * h; i++) if (lvl.wt[i] === 0) { allCovered = false; break; }
     if (allCovered) break;
   }
-  // Push: fill empty cells of each level from the coarser level (nearest cell; coarse averages are already smooth).
+  // Push: every empty cell takes the coarser level's colour, sampled bilinearly (nearest-cell
+  // filling shows the pyramid's blocks inside large holes). Cells with any valid pixels keep their
+  // own average. Processed coarse to fine, so each coarse level is complete when it is sampled.
   for (let li = levels.length - 2; li >= 0; li--) {
     const fine = levels[li], coarse = levels[li + 1];
+    const colourAt = (cx: number, cy: number, ch: number): [number, number] => {
+      const c = cy * coarse.w + cx;
+      const cw = coarse.wt[c];
+      return cw > 0 ? [coarse.rgb[c * 3 + ch] / cw, 1] : [0, 0];
+    };
     for (let y = 0; y < fine.h; y++) {
+      const fy = Math.min(Math.max((y + 0.5) / 2 - 0.5, 0), coarse.h - 1);
+      const y0 = Math.floor(fy), y1 = Math.min(y0 + 1, coarse.h - 1), ty = fy - y0;
       for (let x = 0; x < fine.w; x++) {
         const i = y * fine.w + x;
         if (fine.wt[i] > 0) continue;
-        const c = (y >> 1) * coarse.w + (x >> 1);
-        const cw = coarse.wt[c];
-        if (cw <= 0) continue;
-        fine.rgb[i * 3] = coarse.rgb[c * 3] / cw;
-        fine.rgb[i * 3 + 1] = coarse.rgb[c * 3 + 1] / cw;
-        fine.rgb[i * 3 + 2] = coarse.rgb[c * 3 + 2] / cw;
+        const fx = Math.min(Math.max((x + 0.5) / 2 - 0.5, 0), coarse.w - 1);
+        const x0 = Math.floor(fx), x1 = Math.min(x0 + 1, coarse.w - 1), tx = fx - x0;
+        const taps: Array<[number, number, number]> = [
+          [x0, y0, (1 - tx) * (1 - ty)],
+          [x1, y0, tx * (1 - ty)],
+          [x0, y1, (1 - tx) * ty],
+          [x1, y1, tx * ty],
+        ];
+        let wsum = 0;
+        const acc = [0, 0, 0];
+        for (const [cx, cy, w] of taps) {
+          if (w <= 0) continue;
+          for (let ch = 0; ch < 3; ch++) {
+            const [v, ok] = colourAt(cx, cy, ch);
+            if (!ok) continue;
+            acc[ch] += v * w;
+            if (ch === 0) wsum += w;
+          }
+        }
+        if (wsum <= 0) continue;
+        fine.rgb[i * 3] = acc[0] / wsum;
+        fine.rgb[i * 3 + 1] = acc[1] / wsum;
+        fine.rgb[i * 3 + 2] = acc[2] / wsum;
         fine.wt[i] = 1;
       }
     }

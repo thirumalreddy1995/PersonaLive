@@ -151,3 +151,26 @@ test('face crops: square in pixels, clamped, stable under small moves; masks sam
   setMaskRect(m, [0.4, 0, 0.5, 1]);
   assert.equal(m.updates, 1, 'the same crop keeps the EMA');
 });
+
+test('inpaintMasked fills a large hole in a gradient smoothly (no pyramid blocks)', () => {
+  const w = 96, h = 96;
+  const data = new Uint8ClampedArray(w * h * 4);
+  for (let y = 0; y < h; y++) for (let x = 0; x < w; x++) {
+    const p = (y * w + x) * 4;
+    data[p] = Math.round((x / (w - 1)) * 200) + 20; // horizontal gradient
+    data[p + 1] = Math.round((y / (h - 1)) * 120) + 60; // vertical gradient
+    data[p + 2] = 100;
+    data[p + 3] = 255;
+  }
+  const mask = new Uint8Array(w * h);
+  for (let y = 30; y < 66; y++) for (let x = 25; x < 71; x++) { mask[y * w + x] = 1; const p = (y * w + x) * 4; data[p] = data[p + 1] = data[p + 2] = 0; }
+  inpaintMasked(data, w, h, mask);
+  let maxStep = 0, maxErr = 0;
+  for (let y = 30; y < 66; y++) for (let x = 25; x < 70; x++) {
+    const p = (y * w + x) * 4, q = p + 4;
+    maxStep = Math.max(maxStep, Math.abs(data[q] - data[p]), Math.abs(data[q + 1] - data[p + 1]));
+    maxErr = Math.max(maxErr, Math.abs(data[p] - (Math.round((x / (w - 1)) * 200) + 20)));
+  }
+  assert.ok(maxStep <= 8, `no blocks: largest neighbour step ${maxStep}`);
+  assert.ok(maxErr <= 40, `follows the gradient: largest error ${maxErr}`);
+});
