@@ -486,7 +486,7 @@ async function captureClip(page: Page, args: Args, o: CaptureOptions): Promise<C
       mouth: M.mouthFidelity(outputLms, lms),
       foreheadToneStep: M.foreheadToneStep(output, driver, lms),
       identity: null,
-      occlusion: overlay && masks && c.layout ? M.occlusionLeak(overlay, masks, c.layout, c.mirror, lms) : null,
+      occlusion: overlay && masks && c.layout ? M.occlusionLeak(overlay, masks, c.layout, c.mirror, lms, c.masksRect ?? [0, 0, 1, 1]) : null,
       files,
     });
 

@@ -98,7 +98,7 @@ export interface RealismFrameCapture {
   /** Where the source frame sits on the canvas (for mapping the masks). */
   layout: { offsetX: number; offsetY: number; drawWidth: number; drawHeight: number };
   /** R4 segmentation masks at capture time (packed RGBA, source-normalised), null when off. */
-  masks: { width: number; height: number; data: Uint8ClampedArray } | null;
+  masks: { width: number; height: number; data: Uint8ClampedArray; rect: [number, number, number, number] } | null;
   /** True when the driver was drawn mirrored (webcam/clip); output detection un-mirrors to match. */
   mirror: boolean;
   mar: number;
@@ -213,6 +213,8 @@ export interface SerializedCapture {
   layout: { offsetX: number; offsetY: number; drawWidth: number; drawHeight: number };
   /** PNG of the packed segmentation masks (R hair, G body skin, B face skin, A accessories), null when off. */
   masksPng: string | null;
+  /** The crop the masks cover (normalised source coordinates). */
+  masksRect: [number, number, number, number] | null;
   landmarks: number[];
   warpPositions: number[];
   outputLandmarks: number[] | null;
@@ -361,6 +363,7 @@ export function installRealismWindowHook(app?: RealismAppHooks): RealismWindowHo
         mirror: c.mirror,
         layout: c.layout,
         masksPng: c.masks ? masksPng(c.masks) : null,
+        masksRect: c.masks ? c.masks.rect : null,
         landmarks: Array.from(c.landmarks),
         warpPositions: Array.from(c.warpPositions),
         outputLandmarks: c.outputLandmarks ? Array.from(c.outputLandmarks) : null,

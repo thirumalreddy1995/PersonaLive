@@ -218,6 +218,7 @@ uniform sampler2D uSegMask;
 uniform float uSegOn;
 uniform vec4 uSegSrcMap;
 uniform float uSegMirror;
+uniform vec4 uSegRect;
 uniform float uTwoBand;
 uniform float uForeshortenOn;
 uniform float uSegStrength;
@@ -357,7 +358,10 @@ void main() {
     float sx = uSegMirror > 0.5 ? uResolution.x - gl_FragCoord.x : gl_FragCoord.x;
     float sy = uResolution.y - gl_FragCoord.y;
     vec2 su = vec2((sx - uSegSrcMap.x) / uSegSrcMap.z, (sy - uSegSrcMap.y) / uSegSrcMap.w);
-    vec4 m = texture2D(uSegMask, clamp(su, 0.0, 1.0));
+    // The masks cover a face crop (uSegRect, normalised source coordinates); outside it nothing is removed.
+    vec2 mu = (su - uSegRect.xy) / uSegRect.zw;
+    float inCrop = step(0.0, mu.x) * step(mu.x, 1.0) * step(0.0, mu.y) * step(mu.y, 1.0);
+    vec4 m = texture2D(uSegMask, clamp(mu, 0.0, 1.0)) * inCrop + vec4(0.0, 0.0, 1.0, 0.0) * (1.0 - inCrop);
     // Face-skin limits the persona only in the outer band (the interior is face by construction);
     // confident hair, hand (body skin) and accessory pixels remove it everywhere.
     float faceSkin = mix(1.0, smoothstep(0.05, 0.3, m.b), 1.0 - clamp(vFeatherBands.x, 0.0, 1.0));
@@ -532,6 +536,7 @@ interface GLResources {
     uSegOn: WebGLUniformLocation | null;
     uSegSrcMap: WebGLUniformLocation | null;
     uSegMirror: WebGLUniformLocation | null;
+    uSegRect: WebGLUniformLocation | null;
     uTwoBand: WebGLUniformLocation | null;
     uForeshortenOn: WebGLUniformLocation | null;
     uSegStrength: WebGLUniformLocation | null;
@@ -962,6 +967,7 @@ export class MeshWarpRenderer {
         uSegOn: u('uSegOn'),
         uSegSrcMap: u('uSegSrcMap'),
         uSegMirror: u('uSegMirror'),
+        uSegRect: u('uSegRect'),
         uTwoBand: u('uTwoBand'),
         uForeshortenOn: u('uForeshortenOn'),
         uSegStrength: u('uSegStrength'),
@@ -1489,6 +1495,8 @@ export class MeshWarpRenderer {
       }
       gl.uniform4f(loc.uSegSrcMap, seg.srcMap[0], seg.srcMap[1], Math.max(1, seg.srcMap[2]), Math.max(1, seg.srcMap[3]));
       gl.uniform1f(loc.uSegMirror, seg.mirror ? 1 : 0);
+      const sr = seg.masks?.rect ?? [0, 0, 1, 1];
+      gl.uniform4f(loc.uSegRect, sr[0], sr[1], Math.max(1e-4, sr[2]), Math.max(1e-4, sr[3]));
       gl.uniform1f(loc.uSegStrength, seg.strength ?? 1);
     }
     gl.uniform1i(loc.uSegMask, 3);

@@ -18,7 +18,7 @@ import { delightPersona } from './personaDelight.ts';
 import { AUTO_RADIUS_EVERY, AutoRadiusState, initialAutoRadius, measureShading, shadingPatches, stepAutoRadius } from './autoRadius.ts';
 import { lumaAtScale, symmetricDelightGains, vertexBandLuma } from './faceSymmetry.ts';
 import { FaceSegmenter } from './segmenter.ts';
-import { PackedMasks, emptyMasks, sampleMask } from './segmentation.ts';
+import { NormRect, PackedMasks, emptyMasks, faceCropRect, sampleMask, stableCrop } from './segmentation.ts';
 import { dilateMask, inpaintMasked } from './inpaint.ts';
 import { foreshortenWeights } from './foreshorten.ts';
 import { FACE_OVAL_RING } from './personaDelight.ts';
@@ -225,6 +225,8 @@ export class RealtimeFacialEngine {
   private masksDirty = false;
   private segActive = false;
   private segUpdates = 0;
+  /** Current segmentation crop (normalised source coordinates), kept stable with hysteresis. */
+  private segCrop: NormRect | null = null;
   /** R4 §4 per-vertex foreshortening weights (reused buffer). */
   private foreshorten: Float32Array | null = null;
   /** Share of the persona's face oval that was inpainted at load (flag personaInpaint). */
@@ -673,9 +675,27 @@ export class RealtimeFacialEngine {
     // R4 §1: segment the source every N frames into the EMA masks.
     const segFlags = realismFlags.get();
     const segEvery = Math.max(1, Math.round(settings.segmentEvery ?? 2));
-    if (segFlags.segmentation && src && this.segmenter.idle && this.frameIndex % segEvery === 0) {
+    if (segFlags.segmentation && src && layout && this.segmenter.idle && this.frameIndex % segEvery === 0) {
       profiler.begin('segment');
-      this.segmenter.submitVideo(src.source, timestamp);
+      // Face crop (R4): the face gets the model's full 256 × 256 instead of ~100 px of a full frame.
+      let crop: NormRect = [0, 0, 1, 1];
+      if (this.faceVisible) {
+        const fb = pointBounds(this.smoothed.subarray(0, 468 * 2));
+        let u0 = (fb.minX - layout.offsetX) / layout.drawWidth;
+        let u1 = (fb.minX + fb.width - layout.offsetX) / layout.drawWidth;
+        if (layout.mirror) {
+          const m0 = 1 - u1;
+          u1 = 1 - u0;
+          u0 = m0;
+        }
+        const v0 = (fb.minY - layout.offsetY) / layout.drawHeight;
+        const v1 = (fb.minY + fb.height - layout.offsetY) / layout.drawHeight;
+        this.segCrop = stableCrop(this.segCrop, faceCropRect([u0, v0, u1 - u0, v1 - v0], src.width / src.height));
+        crop = this.segCrop;
+      } else {
+        this.segCrop = null;
+      }
+      this.segmenter.submitVideo(src.source, timestamp, crop, src.width, src.height);
       profiler.end('segment');
     }
     this.segActive = segFlags.segmentation && this.segmenter.ready && this.masks.updates > 0;
@@ -1120,7 +1140,10 @@ export class RealtimeFacialEngine {
     // The worker takes ~10 s to start on this laptop (model, WASM, GPU graph); persona preparation can wait for it.
     for (let i = 0; i < 60 && !this.segmenter.ready && !this.segmenter.error; i++) await new Promise((r) => setTimeout(r, 500));
     if (!this.segmenter.ready) return null;
-    const masks = await this.segmenter.segmentImage(texture);
+    const tw0 = texture instanceof HTMLImageElement ? texture.naturalWidth : texture.width;
+    const th0 = texture instanceof HTMLImageElement ? texture.naturalHeight : texture.height;
+    const ub = pointBounds(uv.subarray(0, 468 * 2));
+    const masks = await this.segmenter.segmentImage(texture, faceCropRect([ub.minX, ub.minY, ub.width, ub.height], tw0 / th0, 1.5));
     if (!masks) return null;
     const tw = texture instanceof HTMLImageElement ? texture.naturalWidth : texture.width;
     const th = texture instanceof HTMLImageElement ? texture.naturalHeight : texture.height;
@@ -1158,7 +1181,8 @@ export class RealtimeFacialEngine {
       }
     }
     if (!masked) return { canvas: c, share: 0 };
-    const grownMask = dilateMask(mask, tw, th, Math.max(1, Math.round(tw / 256)));
+    // Grow by 1.5 mask pixels so the soft, blurred edge of a frame or strand goes with it.
+    const grownMask = dilateMask(mask, tw, th, Math.max(2, Math.round((1.5 * masks.rect[2] * tw) / masks.width)));
     inpaintMasked(px.data, tw, th, grownMask);
     cctx.putImageData(px, 0, 0);
     return { canvas: c, share: inside ? masked / inside : 0 };
@@ -1642,7 +1666,7 @@ export class RealtimeFacialEngine {
         outputLandmarks: null,
         mirror: layout.mirror,
         layout: { offsetX: layout.offsetX, offsetY: layout.offsetY, drawWidth: layout.drawWidth, drawHeight: layout.drawHeight },
-        masks: this.segActive ? { width: this.masks.width, height: this.masks.height, data: Uint8ClampedArray.from(this.masks.data) } : null,
+        masks: this.segActive ? { width: this.masks.width, height: this.masks.height, data: Uint8ClampedArray.from(this.masks.data), rect: [...this.masks.rect] as NormRect } : null,
         mar: this.lastMar,
         pose: { ...this.lastPose },
         isSpeaking: this.lastMetrics?.isSpeaking ?? false,

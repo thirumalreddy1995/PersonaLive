@@ -16,17 +16,60 @@ export const SEG_CATEGORY = { background: 0, hair: 1, bodySkin: 2, faceSkin: 3, 
 /** EMA weight of each new segmentation (the segmenter runs every `segmentEvery` frames). */
 export const SEG_EMA = 0.5;
 
+export type NormRect = [number, number, number, number];
+
 export interface PackedMasks {
-  /** RGBA8, SEG_SIZE × SEG_SIZE, row 0 = top of the source frame. */
+  /** RGBA8, SEG_SIZE × SEG_SIZE, row 0 = top of the crop. */
   data: Uint8ClampedArray;
   width: number;
   height: number;
   /** Updates applied so far (0 = never segmented). */
   updates: number;
+  /** The crop the masks cover, in normalised source coordinates (x, y, w, h); [0, 0, 1, 1] = whole frame. */
+  rect: NormRect;
 }
 
 export function emptyMasks(width = SEG_SIZE, height = SEG_SIZE): PackedMasks {
-  return { data: new Uint8ClampedArray(width * height * 4), width, height, updates: 0 };
+  return { data: new Uint8ClampedArray(width * height * 4), width, height, updates: 0, rect: [0, 0, 1, 1] };
+}
+
+/** Points the masks at a new crop; a different crop restarts the EMA (old pixels no longer line up). */
+export function setMaskRect(m: PackedMasks, rect: NormRect): void {
+  const same = rect.every((v, i) => Math.abs(v - m.rect[i]) < 1e-6);
+  if (!same) {
+    m.rect = [rect[0], rect[1], rect[2], rect[3]];
+    m.updates = 0;
+  }
+}
+
+/**
+ * Square-ish face crop for the segmenter (R4): the face box expanded to cover hair and hands
+ * around it, in normalised source coordinates, clamped to the frame. `face` is the face box in
+ * normalised source coordinates; `aspect` is source width / height.
+ */
+export function faceCropRect(face: NormRect, aspect: number, expand = 2.1): NormRect {
+  const cx = face[0] + face[2] / 2;
+  const cy = face[1] + face[3] / 2 - face[3] * 0.12; // a little up: hair above the forehead
+  // Square in pixels: side = expand × the larger face side (in pixels).
+  const sidePx = expand * Math.max(face[2] * aspect, face[3]);
+  let w = Math.min(1, sidePx / aspect);
+  let h = Math.min(1, sidePx);
+  let x = Math.min(Math.max(cx - w / 2, 0), 1 - w);
+  let y = Math.min(Math.max(cy - h / 2, 0), 1 - h);
+  if (!Number.isFinite(x + y + w + h) || w <= 0 || h <= 0) return [0, 0, 1, 1];
+  return [x, y, w, h];
+}
+
+/**
+ * Keeps the current crop while the new one is close (centre within 8% of the crop size, size
+ * within 12%), so the EMA is not restarted by every small head movement.
+ */
+export function stableCrop(current: NormRect | null, next: NormRect): NormRect {
+  if (!current) return next;
+  const dc = Math.hypot(current[0] + current[2] / 2 - (next[0] + next[2] / 2), current[1] + current[3] / 2 - (next[1] + next[3] / 2));
+  const size = Math.max(current[2], current[3]);
+  const ratio = next[2] / current[2];
+  return dc < 0.08 * size && ratio > 0.88 && ratio < 1.12 ? current : next;
 }
 
 /**
@@ -76,8 +119,12 @@ export function packCategory(target: PackedMasks, category: ArrayLike<number>, a
 
 /** Bilinear sample of one packed channel (0 hair, 1 body-skin, 2 face-skin, 3 accessories) at normalised source coordinates. */
 export function sampleMask(m: PackedMasks, channel: 0 | 1 | 2 | 3, u: number, v: number): number {
-  const x = Math.min(Math.max(u * m.width - 0.5, 0), m.width - 1);
-  const y = Math.min(Math.max(v * m.height - 0.5, 0), m.height - 1);
+  // u, v are normalised source coordinates; outside the crop nothing is known (0).
+  const cu = (u - m.rect[0]) / m.rect[2];
+  const cv = (v - m.rect[1]) / m.rect[3];
+  if (cu < 0 || cu > 1 || cv < 0 || cv > 1) return 0;
+  const x = Math.min(Math.max(cu * m.width - 0.5, 0), m.width - 1);
+  const y = Math.min(Math.max(cv * m.height - 0.5, 0), m.height - 1);
   const x0 = Math.floor(x), y0 = Math.floor(y);
   const x1 = Math.min(x0 + 1, m.width - 1), y1 = Math.min(y0 + 1, m.height - 1);
   const fx = x - x0, fy = y - y0;

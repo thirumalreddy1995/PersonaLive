@@ -7,7 +7,7 @@
  * landmarker's; the worker's own GPU readback never blocks the render loop.
  */
 import { fetchModel } from './faceTracker.ts';
-import { PackedMasks, SEG_SIZE, emptyMasks, packCategory } from './segmentation.ts';
+import { NormRect, PackedMasks, SEG_SIZE, emptyMasks, packCategory, setMaskRect } from './segmentation.ts';
 import type { SegWorkerRequest, SegWorkerResponse } from './segmentWorker.ts';
 
 const DEFAULT_SEGMENTER_URL =
@@ -35,6 +35,9 @@ export class FaceSegmenter {
   public roundTripMs = 0;
   public submits = 0;
   private submittedAt = 0;
+  /** Crop of the frame in flight (normalised source coordinates). */
+  private pendingRect: NormRect = [0, 0, 1, 1];
+  private imageRects = new Map<number, NormRect>();
 
   constructor(private modelUrl: string = (import.meta.env?.VITE_SEGMENTER_MODEL_URL as string | undefined) || DEFAULT_SEGMENTER_URL) {}
 
@@ -61,6 +64,7 @@ export class FaceSegmenter {
           if (m.kind === 'video') {
             this.inflight = false;
             const t0 = performance.now();
+            setMaskRect(target, this.pendingRect);
             packCategory(target, m.category);
             this.lastPackMs = performance.now() - t0;
             this.lastMs = m.ms;
@@ -74,6 +78,8 @@ export class FaceSegmenter {
             const waiter = this.imageWaiters.get(m.id);
             this.imageWaiters.delete(m.id);
             const out = emptyMasks(m.width, m.height);
+            out.rect = this.imageRects.get(m.id) ?? [0, 0, 1, 1];
+            this.imageRects.delete(m.id);
             packCategory(out, m.category);
             waiter?.(out);
           }
@@ -98,14 +104,24 @@ export class FaceSegmenter {
     return this.ready && !this.inflight && !!this.worker;
   }
 
-  /** Submits a live frame (downscaled to SEG_SIZE²). Returns false when skipped. */
-  submitVideo(source: HTMLVideoElement | HTMLCanvasElement, timestampMs: number): boolean {
+  /**
+   * Submits a live frame, or the `rect` crop of it (normalised source coordinates), downscaled to
+   * SEG_SIZE². `srcW` × `srcH` is the source's pixel size. Returns false when skipped.
+   */
+  submitVideo(source: HTMLVideoElement | HTMLCanvasElement, timestampMs: number, rect: NormRect = [0, 0, 1, 1], srcW = 0, srcH = 0): boolean {
     if (!this.idle) return false;
     this.inflight = true;
     this.submits++;
     const id = this.nextId++;
     this.submittedAt = performance.now();
-    createImageBitmap(source, { resizeWidth: SEG_SIZE, resizeHeight: SEG_SIZE, resizeQuality: 'low' })
+    this.pendingRect = rect;
+    const opts: ImageBitmapOptions = { resizeWidth: SEG_SIZE, resizeHeight: SEG_SIZE, resizeQuality: 'low' };
+    const whole = rect[0] === 0 && rect[1] === 0 && rect[2] === 1 && rect[3] === 1;
+    const bitmapPromise = whole || !srcW || !srcH
+      ? createImageBitmap(source, opts)
+      : createImageBitmap(source, Math.round(rect[0] * srcW), Math.round(rect[1] * srcH), Math.max(1, Math.round(rect[2] * srcW)), Math.max(1, Math.round(rect[3] * srcH)), opts);
+    if (!(whole || !srcW || !srcH)) this.pendingRect = [Math.round(rect[0] * srcW) / srcW, Math.round(rect[1] * srcH) / srcH, Math.max(1, Math.round(rect[2] * srcW)) / srcW, Math.max(1, Math.round(rect[3] * srcH)) / srcH];
+    bitmapPromise
       .then((bitmap) => {
         this.bitmapMs = performance.now() - this.submittedAt;
         if (this.disposed || !this.worker) {
@@ -123,15 +139,19 @@ export class FaceSegmenter {
     return true;
   }
 
-  /** Segments a still (persona photo) into fresh masks at SEG_SIZE; null when unavailable. */
-  async segmentImage(image: HTMLImageElement | HTMLCanvasElement): Promise<PackedMasks | null> {
+  /** Segments a still (persona photo), or its `rect` crop (normalised), into fresh masks at SEG_SIZE; null when unavailable. */
+  async segmentImage(image: HTMLImageElement | HTMLCanvasElement, rect: NormRect = [0, 0, 1, 1]): Promise<PackedMasks | null> {
     if (!this.ready || !this.worker) return null;
-    const bitmap = await createImageBitmap(image, { resizeWidth: SEG_SIZE, resizeHeight: SEG_SIZE, resizeQuality: 'high' });
+    const iw = image instanceof HTMLImageElement ? image.naturalWidth : image.width;
+    const ih = image instanceof HTMLImageElement ? image.naturalHeight : image.height;
+    const px = [Math.round(rect[0] * iw), Math.round(rect[1] * ih), Math.max(1, Math.round(rect[2] * iw)), Math.max(1, Math.round(rect[3] * ih))];
+    const bitmap = await createImageBitmap(image, px[0], px[1], px[2], px[3], { resizeWidth: SEG_SIZE, resizeHeight: SEG_SIZE, resizeQuality: 'high' });
     if (this.disposed || !this.worker) {
       bitmap.close();
       return null;
     }
     const id = this.nextId++;
+    this.imageRects.set(id, [px[0] / iw, px[1] / ih, px[2] / iw, px[3] / ih]);
     return new Promise<PackedMasks | null>((resolve) => {
       this.imageWaiters.set(id, resolve);
       const msg: SegWorkerRequest = { type: 'image', id, bitmap, timestamp: 0 };

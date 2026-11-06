@@ -1249,13 +1249,17 @@ export function occlusionLeak(
   masks: RgbaImage,
   layout: { offsetX: number; offsetY: number; drawWidth: number; drawHeight: number },
   mirror: boolean,
-  points: Landmarks
+  points: Landmarks,
+  rect: [number, number, number, number] = [0, 0, 1, 1]
 ): OcclusionLeak | null {
   const regions = faceRegions(points, overlay.width, overlay.height);
   const box = clampRect(expandRect(regions.ovalBox, 1.3, 1.3), overlay.width, overlay.height);
   const x0 = Math.floor(box.x), y0 = Math.floor(box.y), x1 = Math.ceil(box.x + box.w), y1 = Math.ceil(box.y + box.h);
   let n = 0, hair = 0, hand = 0, glasses = 0;
-  const sample = (ch: number, u: number, v: number) => {
+  const sample = (ch: number, su: number, sv: number) => {
+    const u = (su - rect[0]) / rect[2];
+    const v = (sv - rect[1]) / rect[3];
+    if (u < 0 || u > 1 || v < 0 || v > 1) return 0;
     const mx = Math.min(masks.width - 1, Math.max(0, Math.round(u * masks.width - 0.5)));
     const my = Math.min(masks.height - 1, Math.max(0, Math.round(v * masks.height - 0.5)));
     return masks.data[(my * masks.width + mx) * 4 + ch] / 255;

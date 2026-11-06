@@ -1,6 +1,6 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { SEG_CATEGORY, emptyMasks, maskedShareInPolygon, packCategory, packMasks, sampleMask } from './segmentation.ts';
+import { SEG_CATEGORY, emptyMasks, faceCropRect, maskedShareInPolygon, packCategory, packMasks, sampleMask, setMaskRect, stableCrop } from './segmentation.ts';
 import { dilateMask, inpaintMasked } from './inpaint.ts';
 import { FORESHORTEN_FADE_END, foreshortenWeights } from './foreshorten.ts';
 
@@ -65,21 +65,89 @@ test('inpaintMasked fills a masked patch from the surrounding skin and dilateMas
 });
 
 test('foreshortenWeights fades compressed and back-facing triangles only', () => {
-  // Two triangles sharing an edge: vertices 0,1,2 and 1,3,2 in UV space (unit squares halves).
-  const uv = new Float32Array([0, 0, 1, 0, 0, 1, 1, 1]);
-  const tris = new Uint16Array([0, 1, 2, 1, 3, 2]);
-  // Screen = UV × 100: both flat, all weights 1.
-  const flat = new Float32Array(uv.map((v) => v * 100));
-  assert.deepEqual(Array.from(foreshortenWeights(flat, uv, tris, 4)), [1, 1, 1, 1]);
-  // Second triangle squashed: vertex 3 pulled almost onto the shared edge → its triangle is a sliver.
-  const squashed = new Float32Array([0, 0, 100, 0, 0, 100, 50.8, 50.8]);
-  const w = foreshortenWeights(squashed, uv, tris, 4);
-  assert.ok(w[3] < 0.5 && w[0] === 1, `sliver vertex faded (${Array.from(w)})`);
+  // Four triangles: a unit square (0,1,2 / 1,3,2) plus a second square to its left (4,0,5 / 0,2,5), so a
+  // single bad triangle is a minority of the mesh area (the front-facing orientation is the majority).
+  const uv = new Float32Array([0, 0, 1, 0, 0, 1, 1, 1, -1, 0, -1, 1]);
+  const tris = new Uint16Array([0, 1, 2, 1, 3, 2, 4, 0, 5, 0, 2, 5]);
+  // Screen = UV × 100 (+100 in x so it stays positive): all flat, all weights 1.
+  const flat = new Float32Array(uv.map((v, i) => (i % 2 === 0 ? v * 100 + 100 : v * 100)));
+  assert.deepEqual(Array.from(foreshortenWeights(flat, uv, tris, 6)), [1, 1, 1, 1, 1, 1]);
+  // Triangle 1,3,2 squashed: vertex 3 pulled almost onto the shared edge 1–2 → its triangle is a sliver.
+  const squashed = Float32Array.from(flat);
+  squashed[3 * 2] = 151;
+  squashed[3 * 2 + 1] = 51;
+  const w = foreshortenWeights(squashed, uv, tris, 6);
+  assert.ok(w[3] < 0.5 && w[4] === 1, `sliver vertex faded (${Array.from(w)})`);
   // Vertex 3 flipped across the edge: back-facing triangle → weight 0 on its vertices (shared ones take the min).
-  const flipped = new Float32Array([0, 0, 100, 0, 0, 100, 20, 20]);
-  const wf = foreshortenWeights(flipped, uv, tris, 4);
+  const flipped = Float32Array.from(flat);
+  flipped[3 * 2] = 120;
+  flipped[3 * 2 + 1] = 20;
+  const wf = foreshortenWeights(flipped, uv, tris, 6);
   assert.equal(wf[3], 0);
   assert.equal(wf[1], 0);
-  assert.equal(wf[0], 1);
+  assert.equal(wf[4], 1);
   assert.ok(FORESHORTEN_FADE_END > 0);
+});
+
+test('foreshortenWeights is independent of triangle winding and of a mirrored display', () => {
+  // A 6 × 6 vertex grid in UV space, two triangles per cell, with alternating (arbitrary) windings.
+  const n = 6;
+  const uv = new Float32Array(n * n * 2);
+  for (let y = 0; y < n; y++) for (let x = 0; x < n; x++) { uv[(y * n + x) * 2] = x / (n - 1); uv[(y * n + x) * 2 + 1] = y / (n - 1); }
+  const tris: number[] = [];
+  let k = 0;
+  for (let y = 0; y < n - 1; y++) for (let x = 0; x < n - 1; x++) {
+    const a = y * n + x, b = a + 1, c = a + n, d = c + 1;
+    tris.push(...(k++ % 2 ? [a, b, c] : [a, c, b]), ...(k++ % 3 ? [b, d, c] : [b, c, d]));
+  }
+  const T = new Uint16Array(tris);
+  const V = n * n;
+  // Mirrored display (x flipped) at 300 px: every triangle front-facing, all weights 1.
+  const mirrored = new Float32Array(V * 2);
+  for (let v = 0; v < V; v++) { mirrored[v * 2] = 300 - uv[v * 2] * 300; mirrored[v * 2 + 1] = uv[v * 2 + 1] * 300; }
+  assert.ok(Array.from(foreshortenWeights(mirrored, uv, T, V)).every((x) => x === 1), 'mirrored flat mesh untouched');
+  // Turn: columns compress toward the right edge (far side); the rightmost column becomes a sliver.
+  const turned = new Float32Array(V * 2);
+  const xs = [0, 90, 170, 235, 280, 284];
+  for (let v = 0; v < V; v++) { turned[v * 2] = xs[v % n]; turned[v * 2 + 1] = uv[v * 2 + 1] * 300; }
+  const w = foreshortenWeights(turned, uv, T, V);
+  assert.equal(w[0], 1, 'near side untouched');
+  assert.ok(w[n - 1] < 0.2, `far sliver faded (${w[n - 1]})`);
+  assert.ok(w[2] === 1, 'mid face untouched');
+  // The same turn on a mirrored display gives the same weights.
+  const turnedMirror = new Float32Array(V * 2);
+  for (let v = 0; v < V; v++) { turnedMirror[v * 2] = 300 - turned[v * 2]; turnedMirror[v * 2 + 1] = turned[v * 2 + 1]; }
+  const wm = foreshortenWeights(turnedMirror, uv, T, V);
+  for (let v = 0; v < V; v++) assert.ok(Math.abs(wm[v] - w[v]) < 1e-6, `mirror invariant at ${v}`);
+});
+
+test('face crops: square in pixels, clamped, stable under small moves; masks sampled through the crop and reset on a new one', () => {
+  // A 16:9 frame with a face box in the middle (normalised).
+  const crop = faceCropRect([0.45, 0.35, 0.1, 0.3], 16 / 9);
+  const wPx = crop[2] * 16, hPx = crop[3] * 9;
+  assert.ok(Math.abs(wPx - hPx) < 1e-9, `square in pixels (${wPx} vs ${hPx})`);
+  assert.ok(crop[0] >= 0 && crop[1] >= 0 && crop[0] + crop[2] <= 1 + 1e-9 && crop[1] + crop[3] <= 1 + 1e-9, 'inside the frame');
+  assert.ok(crop[0] < 0.45 && crop[0] + crop[2] > 0.55, 'covers the face');
+  // A face near the top-left edge is clamped, not shifted out of frame.
+  const edge = faceCropRect([0.0, 0.0, 0.1, 0.3], 16 / 9);
+  assert.equal(edge[0], 0);
+  assert.equal(edge[1], 0);
+  // Hysteresis: a 1% nudge keeps the crop, a big move replaces it.
+  const nudged = faceCropRect([0.455, 0.352, 0.1, 0.3], 16 / 9);
+  assert.equal(stableCrop(crop, nudged), crop);
+  const moved = faceCropRect([0.6, 0.35, 0.1, 0.3], 16 / 9);
+  assert.equal(stableCrop(crop, moved), moved);
+  // Sampling through the crop: the mask covers the right half of the frame only.
+  const m = emptyMasks(2, 1);
+  setMaskRect(m, [0.5, 0, 0.5, 1]);
+  packCategory(m, [SEG_CATEGORY.hair, SEG_CATEGORY.hair]);
+  assert.ok(sampleMask(m, 0, 0.75, 0.5) > 0.99, 'inside the crop');
+  assert.equal(sampleMask(m, 0, 0.25, 0.5), 0, 'outside the crop nothing is known');
+  // A new crop restarts the EMA: the next pack copies instead of blending.
+  setMaskRect(m, [0.4, 0, 0.5, 1]);
+  assert.equal(m.updates, 0);
+  packCategory(m, [SEG_CATEGORY.background, SEG_CATEGORY.background]);
+  assert.equal(m.data[0], 0);
+  setMaskRect(m, [0.4, 0, 0.5, 1]);
+  assert.equal(m.updates, 1, 'the same crop keeps the EMA');
 });

@@ -571,6 +571,9 @@ test('occlusionLeak counts persona pixels over the hair, hand and glasses masks 
   assert.ok(Math.abs(r.ghostHairShare - 0.5) < 0.08, `hair ${r.ghostHairShare}`);
   assert.ok(Math.abs(r.handLeakShare - 0.25) < 0.08, `hand ${r.handLeakShare}`);
   assert.equal(r.glassesLeakShare, 0);
+  // Masks covering only the right half of the source (a crop): the left-half hair is outside it.
+  const cropped = occlusionLeak(overlay, masks, layout, false, pts, [0.5, 0, 0.5, 1])!;
+  assert.ok(cropped.ghostHairShare > 0.15 && cropped.ghostHairShare < 0.4, `cropped hair ${cropped.ghostHairShare} (source x 0.5–0.75 only)`);
   // Mirrored display: the same masks, the hair is now on the display's right; the share is unchanged.
   const m = occlusionLeak(overlay, masks, layout, true, pts)!;
   assert.ok(Math.abs(m.ghostHairShare - r.ghostHairShare) < 0.05);

@@ -25,19 +25,36 @@ function signedArea(p: ArrayLike<number>, a: number, b: number, c: number): numb
 export function foreshortenWeights(screen: ArrayLike<number>, uv: ArrayLike<number>, tris: ArrayLike<number>, vertexCount: number, out?: Float32Array): Float32Array {
   const w = out && out.length === vertexCount ? out : new Float32Array(vertexCount);
   w.fill(1);
-  // Global screen/UV area ratio (sign tells which winding the front-facing mesh has).
-  let sumS = 0, sumU = 0;
+  // The tessellation's triangles have arbitrary winding (they are rebuilt from the edge graph), so
+  // signed areas must never be summed across triangles. Per triangle, screen/uv area keeps its
+  // sign regardless of winding: positive when the triangle is not flipped, unless the display is
+  // mirrored, in which case every front-facing triangle is negative. The front-facing sign is the
+  // area-weighted majority; the magnitude scale is Σ|screen| / Σ|uv| over front-facing triangles.
+  let vote = 0;
   for (let i = 0; i < tris.length; i += 3) {
-    sumS += signedArea(screen, tris[i], tris[i + 1], tris[i + 2]);
-    sumU += signedArea(uv, tris[i], tris[i + 1], tris[i + 2]);
+    const u = signedArea(uv, tris[i], tris[i + 1], tris[i + 2]);
+    const s = signedArea(screen, tris[i], tris[i + 1], tris[i + 2]);
+    if (u !== 0 && s !== 0) vote += Math.sign(s * u) * Math.abs(u);
   }
-  if (sumU === 0 || sumS === 0) return w;
-  const scale = sumS / sumU;
+  if (vote === 0) return w;
+  const front = Math.sign(vote);
+  let absS = 0, absU = 0;
+  for (let i = 0; i < tris.length; i += 3) {
+    const u = signedArea(uv, tris[i], tris[i + 1], tris[i + 2]);
+    const s = signedArea(screen, tris[i], tris[i + 1], tris[i + 2]);
+    if (Math.sign(s * u) === front) {
+      absS += Math.abs(s);
+      absU += Math.abs(u);
+    }
+  }
+  if (absU === 0 || absS === 0) return w;
+  const scale = absS / absU;
   for (let i = 0; i < tris.length; i += 3) {
     const a = tris[i], b = tris[i + 1], c = tris[i + 2];
-    const rest = signedArea(uv, a, b, c) * scale;
-    if (rest === 0) continue;
-    const ratio = signedArea(screen, a, b, c) / rest;
+    const u = signedArea(uv, a, b, c);
+    if (u === 0) continue;
+    // > 0 front-facing (1 = rest size), < 0 flipped (back-facing).
+    const ratio = (front * signedArea(screen, a, b, c)) / (u * scale);
     const t = (ratio - FORESHORTEN_FADE_END) / (FORESHORTEN_FADE_START - FORESHORTEN_FADE_END);
     const f = t <= 0 ? 0 : t >= 1 ? 1 : t * t * (3 - 2 * t);
     if (f < w[a]) w[a] = f;
