@@ -14,7 +14,8 @@ import { AuthorizedPersona, EngineStatus, FacialMetrics, HeadPose, Transformatio
 import { OneEuroFilter } from './faceMath.ts';
 import { RigidPoseStabilizer, StabilizerOptions, poseAngles } from './rigidPose.ts';
 import { cropUvs, planCrop } from './personaCrop.ts';
-import { CameraMatchState, initialCameraMatch, stepCameraMatch } from './cameraMatch.ts';
+import { delightPersona } from './personaDelight.ts';
+import { CameraMatchState, initialCameraMatch, stepCameraMatch, CAMERA_MATCH_WARM_UPDATES, cameraMatchDue } from './cameraMatch.ts';
 import { RestMouthCalibrator, lipFadeWindow } from './restMouth.ts';
 import {
   applyEyelidKinematics,
@@ -195,6 +196,12 @@ export class RealtimeFacialEngine {
   private cameraMatchPending = false;
   /** Blur bias after each loop update, for the review tool's trace (R3 item 3). */
   private cameraMatchTrace: number[] = [];
+  /** Warm-start updates still to run on consecutive frames (R3b). */
+  private cameraMatchWarm = 0;
+  /** How often the 5-zone CPU lighting gain ran (0 with the default flags on a WebGL machine). */
+  private lightingGainUpdates = 0;
+  /** Max/min of the de-light shading field fitted on the current persona (flag personaDelight). */
+  private personaDelightRange: number | null = null;
   /** Resting mouth aperture learned from frontal frames (realism flag restMouth, R3 item 1). */
   private restMouth = new RestMouthCalibrator();
   /** Smoothed screen velocity of the face (canvas px per frame) for motion blur and the steady camera match. */
@@ -252,7 +259,7 @@ export class RealtimeFacialEngine {
 
     // Flags that change how the persona is prepared take effect by re-preparing it.
     this.flagsUnsubscribe = realismFlags.subscribe((_flags, changed) => {
-      if ((changed.includes('syntheticSuite') || changed.includes('personaCrop')) && this.personaImage) void this.preparePersona();
+      if ((changed.includes('syntheticSuite') || changed.includes('personaCrop') || changed.includes('personaDelight')) && this.personaImage) void this.preparePersona();
       if (changed.includes('cameraMatch')) {
         this.cameraMatch = initialCameraMatch();
         this.cameraMatchTrace = [];
@@ -304,6 +311,10 @@ export class RealtimeFacialEngine {
     this.videoElement = video;
     this.videoKind = kind;
     this.resetTracking();
+    // R3b: a new source gets a neutral camera match that re-measures on the first frames.
+    this.cameraMatch = initialCameraMatch();
+    this.cameraMatchPending = false;
+    this.cameraMatchWarm = CAMERA_MATCH_WARM_UPDATES;
     this.captureTimes = [];
     this.burstPlan = null;
     this.patchStatus({ source: video ? kind : this.demoImage ? 'demo' : 'none' });
@@ -458,11 +469,34 @@ export class RealtimeFacialEngine {
         texture = crop;
         uv = cropUvs(face.landmarks, img.naturalWidth, img.naturalHeight, plan);
       }
+      // R3b (flag personaDelight): divide the photo's smooth shading field out of the skin.
+      this.personaDelightRange = null;
+      if (realismFlags.get().personaDelight) {
+        const lit = document.createElement('canvas');
+        lit.width = texture instanceof HTMLImageElement ? texture.naturalWidth : texture.width;
+        lit.height = texture instanceof HTMLImageElement ? texture.naturalHeight : texture.height;
+        const lctx = lit.getContext('2d', { willReadFrequently: true })!;
+        lctx.drawImage(texture, 0, 0, lit.width, lit.height);
+        const pixels = lctx.getImageData(0, 0, lit.width, lit.height);
+        const pts = new Float32Array(468 * 2);
+        for (let i = 0; i < 468; i++) {
+          pts[i * 2] = uv[i * 2] * lit.width;
+          pts[i * 2 + 1] = uv[i * 2 + 1] * lit.height;
+        }
+        const res = delightPersona(pixels.data, lit.width, lit.height, pts);
+        if (res) {
+          lctx.putImageData(pixels, 0, 0);
+          texture = lit;
+          this.personaDelightRange = res.range;
+        }
+      }
       this.warp.setPersona(texture, uv);
       this.currentKeyframeSource = texture;
       this.currentKeyframeId = null;
       this.cameraMatch = initialCameraMatch();
       this.cameraMatchTrace = [];
+      this.cameraMatchPending = false;
+      this.cameraMatchWarm = CAMERA_MATCH_WARM_UPDATES;
       this.personaMean = this.sampleMeanColor(img, face.landmarks, img.naturalWidth, img.naturalHeight, false);
 
       // Synthesize calibrated multi-angle, multi-expression identity suite for Person A.
@@ -938,7 +972,7 @@ export class RealtimeFacialEngine {
 
     // R2 §4: every 15 frames read the wearer's and the persona's face-region statistics back
     // asynchronously and step the control loop when both have arrived.
-    if (cameraMatchOn && !this.cameraMatchPending && this.frameIndex % 15 === 0) {
+    if (cameraMatchOn && !this.cameraMatchPending && cameraMatchDue(this.frameIndex, this.cameraMatchWarm)) {
       this.cameraMatchPending = true;
       const faceRect: [number, number, number, number] = [bounds.minX, bounds.minY, bounds.width, bounds.height];
       // The same face box in normalized source coordinates (un-mirrored).
@@ -965,6 +999,7 @@ export class RealtimeFacialEngine {
         this.cameraMatchPending = false;
         if (this.disposed || token !== this.personaPrepareToken || !d || !o) return;
         this.cameraMatch = stepCameraMatch(this.cameraMatch, d, o, 0.35, { steady, hold });
+        if (this.cameraMatchWarm > 0) this.cameraMatchWarm--;
         if (this.cameraMatchTrace.length >= 1024) this.cameraMatchTrace.shift();
         this.cameraMatchTrace.push(this.cameraMatch.lodBias);
       });
@@ -989,6 +1024,7 @@ export class RealtimeFacialEngine {
 
   /** Estimates the wearer's facial skin tone across 5 spatial zones and derives lighting gains. */
   private updateLightingGain(layout: SourceLayout, source: CanvasImageSource, srcW: number, srcH: number) {
+    this.lightingGainUpdates++;
     const n = 468;
     const srcPts = new Float32Array(n * 2);
     for (let i = 0; i < n; i++) {
@@ -1457,6 +1493,8 @@ export class RealtimeFacialEngine {
           cameraMatch: realismFlags.get().cameraMatch ? { ...this.cameraMatch } : null,
           cameraMatchTrace: [...this.cameraMatchTrace],
           restMar: this.restMouth.rest,
+          lightingGainUpdates: this.lightingGainUpdates,
+          personaDelightRange: this.personaDelightRange,
           renderer: this.status.renderer,
           pose: { ...this.lastPose },
           isSpeaking: this.lastMetrics?.isSpeaking ?? false,

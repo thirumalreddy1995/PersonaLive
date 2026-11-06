@@ -45,6 +45,10 @@ export interface RealismDebugState {
   cameraMatchTrace: number[];
   /** Learned resting mouth aperture (flag restMouth), or null until the first frontal window completes. */
   restMar: number | null;
+  /** Times the 5-zone CPU lighting gain ran since the engine was created (R3b item 4). */
+  lightingGainUpdates: number;
+  /** Max/min of the de-light field fitted on the persona (flag personaDelight), null when off. */
+  personaDelightRange: number | null;
   renderer: 'webgl2' | 'webgl' | 'canvas2d';
   pose: HeadPose;
   isSpeaking: boolean;
@@ -183,6 +187,8 @@ export interface SerializedCapture {
   outputPng: string;
   driverPng: string;
   overlayPng: string | null;
+  /** True when the canvases are shown mirrored (webcam-style). */
+  mirror: boolean;
   landmarks: number[];
   warpPositions: number[];
   outputLandmarks: number[] | null;
@@ -307,6 +313,7 @@ export function installRealismWindowHook(app?: RealismAppHooks): RealismWindowHo
         outputPng: png(c.output),
         driverPng: png(c.driver),
         overlayPng: c.overlay ? png(c.overlay) : null,
+        mirror: c.mirror,
         landmarks: Array.from(c.landmarks),
         warpPositions: Array.from(c.warpPositions),
         outputLandmarks: c.outputLandmarks ? Array.from(c.outputLandmarks) : null,

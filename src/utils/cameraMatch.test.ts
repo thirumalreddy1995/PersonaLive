@@ -1,6 +1,6 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { CAMERA_MATCH_LIMITS, STEADY_DEADBAND, initialCameraMatch, stepCameraMatch } from './cameraMatch.ts';
+import { CAMERA_MATCH_EVERY, CAMERA_MATCH_LIMITS, CAMERA_MATCH_WARM_UPDATES, STEADY_DEADBAND, cameraMatchDue, initialCameraMatch, stepCameraMatch } from './cameraMatch.ts';
 import { RELIGHT_RADIUS_SHARE, blendMean, blurTaps, derivativesPreamble, faceStatsFromPixels, lowPassSigma, meanChroma, softHoleRadiusPx, toGlslEs3, uvWidth } from './meshWarpRenderer.ts';
 
 const stats = (laplacianVariance: number, noiseMad: number, samples = 5000) => ({ laplacianVariance, noiseMad, samples });
@@ -140,4 +140,12 @@ test('meanChroma averages the painted (premultiplied) low pass and normalises by
   assert.deepEqual(blendMean(null, [1, 2, 3], 0.3), [1, 2, 3]);
   const b = blendMean([1, 1, 1], [2, 1, 0], 0.5);
   assert.deepEqual(b, [1.5, 1, 0.5]);
+});
+
+test('cameraMatchDue runs the warm-start updates on consecutive frames, then every 15th frame', () => {
+  assert.ok(CAMERA_MATCH_WARM_UPDATES >= 3 && CAMERA_MATCH_EVERY === 15);
+  for (let f = 1; f <= 4; f++) assert.ok(cameraMatchDue(f, 2), `frame ${f} is due while warm`);
+  assert.ok(!cameraMatchDue(1, 0) && !cameraMatchDue(14, 0));
+  assert.ok(cameraMatchDue(15, 0) && cameraMatchDue(0, 0));
+  assert.ok(cameraMatchDue(7, 0, 7));
 });

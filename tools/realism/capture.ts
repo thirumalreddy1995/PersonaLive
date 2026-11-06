@@ -29,6 +29,8 @@
  *   --burst <start:count>     consecutive-frame burst for flicker/texture slide (default: 45% of clip, 16 frames)
  *   --persona <name>          click a built-in persona card by (partial) name before capturing
  *   --url <http://...>        use an already running app instead of starting `vite preview`
+ *   --personaPhoto <file>     the default persona's photo for the identity guard (default: first entry of references/personas.json)
+ *   --no-identity             skip the identity guard (OpenCV Zoo YuNet + SFace via realism-review/.venv)
  *   --browser <chrome|chromium|msedge>   browser channel (default chrome: it has H.264)
  *   --software                force SwiftShader instead of the GPU
  *   --headed                  show the browser window
@@ -45,11 +47,14 @@ import { SheetRow, blank, blit, compositeOnChecker, contactSheet, crop, decodeIm
 import { REVIEW_DIR, ROOT, driveAppShell, hookState, launchBrowser, sleep, startPreview, waitForHookState } from './session.ts';
 import { regionsSheet } from './regions.ts';
 import { PersonaEntry, loadPersonaSet } from './personaSet.ts';
+import { IdentityFrame, IdentitySummary, flipHorizontal, identityAvailable, runIdentity, summarizeIdentity } from './identity.ts';
 
 const CLIP_EXTENSIONS = ['.webm', '.mp4', '.mov', '.mkv', '.y4m'];
 const CLIP_LABELS = ['A', 'B', 'C', 'D', 'E'];
 
 interface Args {
+  identity: boolean;
+  personaPhoto: string | null;
   clips: string[];
   personas: string | null;
   category: 'men' | 'women';
@@ -84,6 +89,8 @@ function parseArgs(argv: string[]): Args {
     browser: 'chrome',
     software: false,
     headed: false,
+    identity: true,
+    personaPhoto: null,
   };
   for (let i = 0; i < argv.length; i++) {
     const a = argv[i];
@@ -136,6 +143,12 @@ function parseArgs(argv: string[]): Args {
         break;
       case '--url':
         args.url = next();
+        break;
+      case '--personaPhoto':
+        args.personaPhoto = path.resolve(next());
+        break;
+      case '--no-identity':
+        args.identity = false;
         break;
       case '--browser':
         args.browser = next();
@@ -206,6 +219,8 @@ interface FrameReport {
   shading: M.ShadingSample | null;
   mouth: M.MouthFidelity | null;
   foreheadToneStep: M.ForeheadToneStep | null;
+  /** Identity guard (R3b): cosine similarity of the output face to the persona photo and to the wearer. */
+  identity: IdentityFrame | null;
   files: { output: string; driver: string; overlay: string | null } | null;
 }
 
@@ -248,6 +263,12 @@ export interface ClipSummary {
   cameraMatchTrace: (M.TraceStats & { series: number[] }) | null;
   /** Learned resting mouth aperture at the end of the clip (flag restMouth). */
   restMar: number | null;
+  /** Identity guard (R3b): means over the captured frames; null when the recogniser was not run. */
+  identity: IdentitySummary | null;
+  /** Times the 5-zone CPU lighting gain ran over the persona's life (R3b item 4; 0 with default flags). */
+  cpuLightingGainUpdates: number | null;
+  /** Max/min of the persona de-light field (flag personaDelight). */
+  personaDelightRange: number | null;
 }
 
 interface ClipReport {
@@ -281,6 +302,18 @@ function roundDeep<T>(value: T): T {
   return value;
 }
 
+/** The default persona's photo: --personaPhoto, else the first entry of references/personas.json. */
+function defaultPersonaPhoto(override: string | null): string | null {
+  if (override) return override;
+  try {
+    const manifest = JSON.parse(fs.readFileSync(path.join(ROOT, 'references', 'personas.json'), 'utf8')) as { personas?: Array<{ file: string }> };
+    const first = manifest.personas?.[0];
+    return first ? path.join(ROOT, 'references', first.file) : null;
+  } catch {
+    return null;
+  }
+}
+
 function gitCommit(): string | null {
   try {
     return execSync('git rev-parse --short HEAD', { cwd: ROOT, stdio: ['ignore', 'pipe', 'ignore'] }).toString().trim();
@@ -311,6 +344,8 @@ interface CaptureOptions {
   writeFrames: boolean;
   defaultFrames: number;
   pageErrors: string[];
+  /** Persona photo for the identity guard; null skips it. */
+  personaPhoto: string | null;
 }
 
 async function captureClip(page: Page, args: Args, o: CaptureOptions): Promise<ClipReport> {
@@ -355,6 +390,10 @@ async function captureClip(page: Page, args: Args, o: CaptureOptions): Promise<C
   const sheetRows: SheetRow[] = [];
   let tile: M.RgbaImage | undefined;
   let tileDistance = Infinity;
+  const identityDir = path.join(o.clipDir, 'identity');
+  const identityPairs: Array<{ output: string; driver: string }> = [];
+  const identityOn = !!o.personaPhoto && identityAvailable();
+  if (identityOn) fs.mkdirSync(identityDir, { recursive: true });
   for (const c of captures) {
     const tag = `t${c.t.toFixed(2).replace('.', '_')}`;
     let files: FrameReport['files'] = null;
@@ -399,8 +438,20 @@ async function captureClip(page: Page, args: Args, o: CaptureOptions): Promise<C
       shading: M.shadingSample(output, driver, lms),
       mouth: M.mouthFidelity(outputLms, lms),
       foreheadToneStep: M.foreheadToneStep(output, driver, lms),
+      identity: null,
       files,
     });
+
+    // Identity guard crops (face oval × 2, un-mirrored so they match the persona photo's handedness).
+    if (identityOn) {
+      const idBox = M.clampRect(M.expandRect(M.faceRegions(lms, output.width, output.height).ovalBox, 2.0, 2.0), output.width, output.height);
+      const oc = c.mirror ? flipHorizontal(crop(output, idBox)) : crop(output, idBox);
+      const dc = c.mirror ? flipHorizontal(crop(driver, idBox)) : crop(driver, idBox);
+      const pair = { output: path.join(identityDir, `${tag}-output.png`), driver: path.join(identityDir, `${tag}-driver.png`) };
+      writePng(pair.output, oc);
+      writePng(pair.driver, dc);
+      identityPairs.push(pair);
+    }
 
     if (args.regions) writePng(path.join(o.clipDir, `${tag}-regions.png`), regionsSheet(driver, output, lms));
 
@@ -421,6 +472,16 @@ async function captureClip(page: Page, args: Args, o: CaptureOptions): Promise<C
     }
   }
   if (sheetRows.length) writePng(path.join(o.clipDir, 'contact.png'), contactSheet(`${o.sheetTitle}  flags: ${o.flagString}`, sheetRows));
+
+  // --- Identity guard (R3b) -------------------------------------------------------------------
+  let identity: IdentitySummary | null = null;
+  if (identityOn && o.personaPhoto) {
+    const res = runIdentity(o.personaPhoto, identityPairs, identityDir);
+    if (res) {
+      res.forEach((r, i) => { if (frames[i]) frames[i].identity = r; });
+      identity = summarizeIdentity(res);
+    }
+  }
 
   // --- Burst metrics -------------------------------------------------------------------------
   let flicker: M.Flicker | null = null;
@@ -493,6 +554,9 @@ async function captureClip(page: Page, args: Args, o: CaptureOptions): Promise<C
     cameraMatch: finalState.cameraMatch,
     cameraMatchTrace: traceStats ? { ...traceStats, series: trace } : null,
     restMar: finalState.restMar ?? null,
+    identity,
+    cpuLightingGainUpdates: finalState.lightingGainUpdates ?? null,
+    personaDelightRange: finalState.personaDelightRange ?? null,
   };
 
   return {
@@ -520,6 +584,12 @@ function stepOf(s: M.SeamStep | null): { deltaE: number; worst: number } | null 
 }
 
 function printSummary(label: string, s: ClipSummary) {
+  if (s.identity) {
+    console.log(
+      `    identity (SFace):  output↔persona ${fmt(s.identity.toPersona)}  output↔wearer ${fmt(s.identity.toDriver)}  margin ${fmt(s.identity.margin)} (min ${fmt(s.identity.minMargin)})  wearer↔persona ${fmt(s.identity.driverToPersona)}  faces ${s.identity.detected}/${s.identity.frames}`
+    );
+  }
+  if (s.cpuLightingGainUpdates !== null) console.log(`    cpu lighting gain: ${s.cpuLightingGainUpdates} updates${s.personaDelightRange !== null ? `  de-light field range ${fmt(s.personaDelightRange)}` : ''}`);
   const t = s.targets;
   const check = (c: M.RelativeCheck) => `driver ${fmt(c.driver)} output ${fmt(c.output)} gap ${fmt(c.gap)} ${c.pass === null ? '' : c.pass ? 'PASS' : 'FAIL'}`;
   console.log(`  ${label}: ${s.frames} frames`);
@@ -543,6 +613,8 @@ function printSummary(label: string, s: ClipSummary) {
 
 /** Metrics compared across personas; every one is "higher is worse" after taking the gap's magnitude. */
 export const GRID_METRICS: Array<{ key: string; label: string; pick: (s: ClipSummary) => number | null }> = [
+  { key: 'identityToDriver', label: 'identity: output ↔ wearer cosine (higher = fading into the wearer)', pick: (s) => s.identity?.toDriver ?? null },
+  { key: 'identityMarginDeficit', label: 'identity margin deficit (−(persona − wearer) cosine)', pick: (s) => (s.identity?.margin === null || s.identity?.margin === undefined ? null : -s.identity.margin) },
   { key: 'skinToneNeckGapAbs', label: '|skin tone gap vs neck| (ΔE)', pick: (s) => abs(s.targets.skinToneNeck.gap) },
   { key: 'skinToneEarsGapAbs', label: '|skin tone gap vs ears| (ΔE)', pick: (s) => abs(s.targets.skinToneEars.gap) },
   { key: 'sharpnessInteriorGapAbs', label: '|sharpness gap, interior skin| (fraction)', pick: (s) => abs(s.targets.sharpnessInterior?.gap ?? null) },
@@ -673,6 +745,7 @@ async function main() {
           writeFrames: true,
           defaultFrames: 8,
           pageErrors,
+          personaPhoto: args.identity ? defaultPersonaPhoto(args.personaPhoto) : null,
         });
         printSummary(clip.label, report.summary);
         const { tile: _tile, ...rest } = report;
@@ -724,6 +797,7 @@ async function main() {
             writeFrames: args.frames,
             defaultFrames: 4,
             pageErrors,
+            personaPhoto: args.identity ? persona.file : null,
           });
           printSummary(`${persona.id}/${clip.label}`, report.summary);
           entry.clips[clip.label] = roundDeep(report.summary);

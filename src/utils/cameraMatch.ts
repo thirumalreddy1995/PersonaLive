@@ -33,6 +33,16 @@ export interface CameraMatchStepOptions {
 /** Steady mode: share of each new measurement that enters the estimate (one update per 15 frames). */
 export const STEADY_ALPHA = 0.12;
 /** Steady mode: |log ratio| below which the controls stay put. */
+/** Frames between camera-match readbacks once warm. */
+export const CAMERA_MATCH_EVERY = 15;
+/** After a persona or source change the first updates run on consecutive frames (R3b warm start). */
+export const CAMERA_MATCH_WARM_UPDATES = 5;
+
+/** True when a readback should be issued this frame: every frame while warm updates remain, then every `every` frames. */
+export function cameraMatchDue(frameIndex: number, warmLeft: number, every = CAMERA_MATCH_EVERY): boolean {
+  return warmLeft > 0 || frameIndex % every === 0;
+}
+
 export const STEADY_DEADBAND = 0.1;
 
 export const CAMERA_MATCH_LIMITS = {
