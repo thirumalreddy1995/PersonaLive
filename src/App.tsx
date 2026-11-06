@@ -9,6 +9,7 @@ import {
   TelemetryStats,
   TransformationSettings,
   UserAccount,
+  consentPending,
 } from './types/index.ts';
 import { INITIAL_PERSONAS } from './utils/mockPersonas.ts';
 import { localPersonas, measureLocalPersona } from './utils/localPersonas.ts';
@@ -53,7 +54,7 @@ export default function App() {
     return saved === 'women' || saved === 'men' ? saved : 'men';
   });
   const [activePersona, setActivePersonaState] = useState<AuthorizedPersona | null>(
-    () => personas.find((p) => p.category === subjectCategory) ?? null
+    () => personas.find((p) => p.category === subjectCategory && !consentPending(p.consent)) ?? null
   );
 
   // Quality metrics of local personas are measured from the image, not typed into the manifest.
@@ -90,7 +91,7 @@ export default function App() {
   // When the group changes, drop a mismatching active face and pick the first matching one.
   useEffect(() => {
     if (activePersona && activePersona.category === subjectCategory) return;
-    setActivePersonaState(personas.find((p) => p.category === subjectCategory) ?? null);
+    setActivePersonaState(personas.find((p) => p.category === subjectCategory && !consentPending(p.consent)) ?? null);
   }, [subjectCategory, personas, activePersona]);
 
   const [settings, setSettings] = useState<TransformationSettings>({
@@ -103,6 +104,7 @@ export default function App() {
     eyeGazeSync: true,
     keepRealMouth: true,
     eyePassThroughRadius: 1,
+    lipFadeFloor: 0,
     personaTextureSize: 1024,
     rigidPoseMinCutoff: 1.2,
     rigidPoseBeta: 0.05,
@@ -243,6 +245,11 @@ export default function App() {
     setPersonas((prev) => [persona, ...prev]);
   };
 
+  const handleUpdatePersona = (persona: AuthorizedPersona) => {
+    setPersonas((prev) => prev.map((p) => (p.id === persona.id ? persona : p)));
+    if (activePersona?.id === persona.id) setActivePersonaState(persona);
+  };
+
   const handleDeletePersona = (id: string) => {
     setPersonas((prev) => prev.filter((p) => p.id !== id));
     if (activePersona?.id === id) {
@@ -321,6 +328,7 @@ export default function App() {
         }}
         onAddPersona={handleAddPersona}
         onDeletePersona={handleDeletePersona}
+        onUpdatePersona={handleUpdatePersona}
       />
 
       <AccountAuthModal

@@ -47,7 +47,9 @@ export type RealismFlagKey =
   | 'motionBlur'
   | 'relightGlobalTone'
   | 'relightShadowGuard'
-  | 'personaDelight';
+  | 'personaDelight'
+  | 'autoRadius'
+  | 'symmetricDelight';
 
 export const REALISM_FLAG_DEFS: ReadonlyArray<RealismFlagDef> = [
   {
@@ -207,6 +209,23 @@ export const REALISM_FLAG_DEFS: ReadonlyArray<RealismFlagDef> = [
     appliesOn: 'persona-reload',
   },
   {
+    key: 'autoRadius',
+    label: 'Auto relight radius',
+    description:
+      'Each persona starts at a 2% relight radius and the loop raises it toward 8% while the output\'s side-shading gap and cheek-vs-neck gap stay within ~3 L / 3 ΔE of the wearer\'s own (hysteresis-smoothed, same async readback as the camera match), backing off otherwise (R3c item 1). Replaces the relightRadius setting while on.',
+    defaultValue: false,
+    group: 'shader',
+  },
+  {
+    key: 'symmetricDelight',
+    label: 'Symmetric de-light',
+    description:
+      'Splits the persona\'s mid-band luminance (2% to the active radius) per mesh vertex into the part that is mirror-symmetric about the face midline and the part that is not, and divides the asymmetric part (the photo\'s key light) out in linear light (R3c item 2). Re-prepares the persona.',
+    defaultValue: false,
+    group: 'shader',
+    appliesOn: 'persona-reload',
+  },
+  {
     key: 'steadyCameraMatch',
     label: 'Steady camera match',
     description: 'Camera-match estimates go through a slow EMA with a dead band and hold during fast head motion, so the blur tracks the camera\'s steady softness rather than per-frame motion blur (R3 item 3).',
@@ -248,15 +267,15 @@ export const REALISM_FLAG_DEFS: ReadonlyArray<RealismFlagDef> = [
  * the current defaults are. Update this only when a phase report changes defaults.
  */
 export const R0_FLAG_STRING =
-  'speechAnatomy=1,perspectiveForeshortening=1,eyelidKinematics=1,foreheadHarmonize=1,hairlineSoften=1,oralCavity=1,catchlights=1,syntheticSuite=1,shaderUnsharp=1,shaderSubsurface=1,shaderSebum=1,realMouth=0,eyePassThrough=0,closedLipMask=0,rigidForehead=0,webgl2=0,personaCrop=0,cameraMatch=0,relight=0,restMouth=0,softHoles=0,steadyCameraMatch=0,motionBlur=0,relightGlobalTone=0,relightShadowGuard=0,personaDelight=0';
+  'speechAnatomy=1,perspectiveForeshortening=1,eyelidKinematics=1,foreheadHarmonize=1,hairlineSoften=1,oralCavity=1,catchlights=1,syntheticSuite=1,shaderUnsharp=1,shaderSubsurface=1,shaderSebum=1,realMouth=0,eyePassThrough=0,closedLipMask=0,rigidForehead=0,webgl2=0,personaCrop=0,cameraMatch=0,relight=0,restMouth=0,softHoles=0,steadyCameraMatch=0,motionBlur=0,relightGlobalTone=0,relightShadowGuard=0,personaDelight=0,autoRadius=0,symmetricDelight=0';
 
 /** The R1 defaults, as a flag string: `--flags r1` reproduces the end-of-R1 behaviour. */
 export const R1_FLAG_STRING =
-  'speechAnatomy=0,perspectiveForeshortening=0,eyelidKinematics=0,foreheadHarmonize=1,hairlineSoften=1,oralCavity=0,catchlights=0,syntheticSuite=0,shaderUnsharp=0,shaderSubsurface=0,shaderSebum=0,realMouth=1,eyePassThrough=1,closedLipMask=0,rigidForehead=0,webgl2=0,personaCrop=0,cameraMatch=0,relight=0,restMouth=0,softHoles=0,steadyCameraMatch=0,motionBlur=0,relightGlobalTone=0,relightShadowGuard=0,personaDelight=0';
+  'speechAnatomy=0,perspectiveForeshortening=0,eyelidKinematics=0,foreheadHarmonize=1,hairlineSoften=1,oralCavity=0,catchlights=0,syntheticSuite=0,shaderUnsharp=0,shaderSubsurface=0,shaderSebum=0,realMouth=1,eyePassThrough=1,closedLipMask=0,rigidForehead=0,webgl2=0,personaCrop=0,cameraMatch=0,relight=0,restMouth=0,softHoles=0,steadyCameraMatch=0,motionBlur=0,relightGlobalTone=0,relightShadowGuard=0,personaDelight=0,autoRadius=0,symmetricDelight=0';
 
 /** The R2 defaults, as a flag string: `--flags r2` reproduces the end-of-R2 behaviour. */
 export const R2_FLAG_STRING =
-  'speechAnatomy=0,perspectiveForeshortening=0,eyelidKinematics=0,foreheadHarmonize=1,hairlineSoften=1,oralCavity=0,catchlights=0,syntheticSuite=0,shaderUnsharp=0,shaderSubsurface=0,shaderSebum=0,realMouth=1,eyePassThrough=1,closedLipMask=1,rigidForehead=1,webgl2=1,personaCrop=1,cameraMatch=1,relight=0,restMouth=0,softHoles=0,steadyCameraMatch=0,motionBlur=0,relightGlobalTone=0,relightShadowGuard=0,personaDelight=0';
+  'speechAnatomy=0,perspectiveForeshortening=0,eyelidKinematics=0,foreheadHarmonize=1,hairlineSoften=1,oralCavity=0,catchlights=0,syntheticSuite=0,shaderUnsharp=0,shaderSubsurface=0,shaderSebum=0,realMouth=1,eyePassThrough=1,closedLipMask=1,rigidForehead=1,webgl2=1,personaCrop=1,cameraMatch=1,relight=0,restMouth=0,softHoles=0,steadyCameraMatch=0,motionBlur=0,relightGlobalTone=0,relightShadowGuard=0,personaDelight=0,autoRadius=0,symmetricDelight=0';
 
 /** Named flag presets accepted by parseRealismFlagString (case-insensitive). */
 export const REALISM_FLAG_PRESETS: Record<string, string> = { r0: R0_FLAG_STRING, r1: R1_FLAG_STRING, r2: R2_FLAG_STRING };

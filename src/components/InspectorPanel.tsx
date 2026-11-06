@@ -296,6 +296,24 @@ export const InspectorPanel: React.FC<InspectorPanelProps> = ({
             />
           </label>
 
+          {settings.keepRealMouth && (
+            <div className="px-2 pb-1 space-y-1">
+              <div className="flex items-center justify-between text-[10px] text-slate-500">
+                <span>Lips at rest: persona ↔ always mine</span>
+                <span className="text-slate-300">{settings.lipFadeFloor.toFixed(2)}</span>
+              </div>
+              <input
+                type="range"
+                min="0"
+                max="1"
+                step="0.05"
+                value={settings.lipFadeFloor}
+                onChange={(e) => onUpdateSettings({ lipFadeFloor: Number(e.target.value) })}
+                className="w-full accent-rose-500 cursor-pointer h-1.5 bg-slate-800 rounded-lg"
+              />
+            </div>
+          )}
+
           <label className="flex items-center justify-between p-2 rounded-lg bg-slate-900/60">
             <span className="text-slate-200">
               Persona texture size

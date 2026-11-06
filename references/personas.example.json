@@ -1,5 +1,5 @@
 {
-  "$comment": "Copy to references/personas.json (gitignored). Each entry is a local photo with the consent record of the pictured person. The dev server, local builds and the desktop build load these; the GitHub Pages build never sees this folder.",
+  "$comment": "Copy to references/personas.json (gitignored). Each entry is a local photo with the consent record of the pictured person. New entries start as status=pending with the photo's SHA-256; the person pictured signs the record in the app (Library > Record consent), which stores it locally and offers the JSON to paste here. The GitHub Pages build never sees this folder.",
   "personas": [
     {
       "id": "persona-example",
@@ -8,10 +8,46 @@
       "category": "men",
       "file": "example-portrait.jpeg",
       "consent": {
-        "signerName": "Example Person",
-        "authorizedUsage": "Full Likeness Real-Time Studio Video Stream",
+        "status": "pending",
+        "signerName": "",
+        "authorizedUsage": "none granted yet",
         "timestamp": "2026-01-01T00:00:00Z",
-        "signatureHash": "CONSENT-RECORD-ID",
+        "signedAt": null,
+        "scope": {
+          "liveCalls": false,
+          "cloudProcessing": false,
+          "recordings": false
+        },
+        "imageHashes": [
+          "<sha256 of example-portrait.jpeg>"
+        ],
+        "formVersion": 1,
+        "signatureHash": "PENDING",
+        "verified": false
+      }
+    },
+    {
+      "id": "persona-example-signed",
+      "name": "Example Signed Person",
+      "role": "Verified Presenter",
+      "category": "women",
+      "file": "example-signed.jpeg",
+      "consent": {
+        "status": "signed",
+        "signerName": "Example Signed Person",
+        "authorizedUsage": "live video calls where all participants know they see a persona",
+        "timestamp": "2026-01-02T10:00:00Z",
+        "signedAt": "2026-01-02T10:00:00Z",
+        "scope": {
+          "liveCalls": true,
+          "cloudProcessing": false,
+          "recordings": false
+        },
+        "imageHashes": [
+          "<sha256 of example-signed.jpeg>"
+        ],
+        "formVersion": 1,
+        "signatureHash": "sha256:<first 16 hex>@2026-01-02",
         "verified": true
       }
     }

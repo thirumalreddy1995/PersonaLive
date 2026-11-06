@@ -124,6 +124,7 @@ attribute float aLip;
 attribute float aLipZone;
 attribute float aEyeFade;
 attribute float aToneWeight;
+attribute float aDelight;
 
 uniform vec2 uResolution;
 uniform vec4 uFaceBounds;
@@ -141,6 +142,7 @@ varying float vLip;
 varying float vLipZone;
 varying float vEyeFade;
 varying float vToneWeight;
+varying float vDelight;
 
 void main() {
   vec2 clip = vec2(aPosition.x / uResolution.x * 2.0 - 1.0, 1.0 - aPosition.y / uResolution.y * 2.0);
@@ -151,6 +153,7 @@ void main() {
   vLipZone = aLipZone;
   vEyeFade = aEyeFade;
   vToneWeight = aToneWeight;
+  vDelight = aDelight;
 
   // Normalized position relative to face bounding box [0, 1]
   vec2 nPos = clamp((aPosition - uFaceBounds.xy) / max(uFaceBounds.zw, vec2(1.0)), 0.0, 1.0);
@@ -207,6 +210,7 @@ varying float vLip;
 varying float vLipZone;
 varying float vEyeFade;
 varying float vToneWeight;
+varying float vDelight;
 
 // Per-pixel, per-frame hash in [0, 1).
 float hash12(vec2 p) {
@@ -268,7 +272,8 @@ void main() {
     vec4 pl = texture2D(uPersonaLow, vUv);
     vec4 dl = texture2D(uDriverLow, gl_FragCoord.xy / uResolution);
     if (pl.a > 0.05 && dl.a > 0.05) {
-      vec3 P = srgbToLinear(base);
+      // Symmetric de-light (flag symmetricDelight): per-vertex gain removing the photo's asymmetric mid-band light.
+      vec3 P = srgbToLinear(base) * vDelight;
       vec3 PL = pl.rgb / pl.a;  // the low passes are stored in linear light (see PAINT_FRAGMENT_ES1)
       vec3 DL = dl.rgb / dl.a;
       vec3 detail = clamp(P / max(PL, vec3(0.002)), 0.0, 4.0);
@@ -420,6 +425,7 @@ interface GLResources {
   lipZoneBuffer: WebGLBuffer;
   eyeFadeBuffer: WebGLBuffer;
   toneBuffer: WebGLBuffer;
+  delightBuffer: WebGLBuffer;
   indexBuffer: WebGLBuffer;
   eyeIndexBuffer: WebGLBuffer;
   texture: WebGLTexture;
@@ -431,6 +437,7 @@ interface GLResources {
     aLipZone: number;
     aEyeFade: number;
     aToneWeight: number;
+    aDelight: number;
     uResolution: WebGLUniformLocation | null;
     uTexture: WebGLUniformLocation | null;
     uFaceBounds: WebGLUniformLocation | null;
@@ -581,7 +588,7 @@ export function softHoleRadiusPx(lodBias: number, texelPx: number): number {
 interface PendingReadback {
   buffer: WebGLBuffer;
   sync: WebGLSync;
-  resolve: (stats: FaceStats | null) => void;
+  resolve: (pixels: Uint8Array | null) => void;
 }
 
 function sourceSize(image: PersonaSource): { width: number; height: number } {
@@ -668,6 +675,7 @@ export class MeshWarpRenderer {
 
   private topology: FaceTopology | null = null;
   private eyeFadeWeights: Float32Array | null = null;
+  private delightGains: Float32Array | null = null;
   private personaImage: PersonaSource | null = null;
   private personaUv: Float32Array | null = null;
   private personaSize = { width: 1, height: 1 };
@@ -834,6 +842,7 @@ export class MeshWarpRenderer {
       lipZoneBuffer: buffer(),
       eyeFadeBuffer: buffer(),
       toneBuffer: buffer(),
+      delightBuffer: buffer(),
       indexBuffer: buffer(),
       eyeIndexBuffer: buffer(),
       texture,
@@ -845,6 +854,7 @@ export class MeshWarpRenderer {
         aLipZone: gl.getAttribLocation(program, 'aLipZone'),
         aEyeFade: gl.getAttribLocation(program, 'aEyeFade'),
         aToneWeight: gl.getAttribLocation(program, 'aToneWeight'),
+        aDelight: gl.getAttribLocation(program, 'aDelight'),
         uResolution: u('uResolution'),
         uTexture: u('uTexture'),
         uFaceBounds: u('uFaceBounds'),
@@ -1083,6 +1093,7 @@ export class MeshWarpRenderer {
     gl.deleteBuffer(r.lipZoneBuffer);
     gl.deleteBuffer(r.eyeFadeBuffer);
     gl.deleteBuffer(r.toneBuffer);
+    gl.deleteBuffer(r.delightBuffer);
     gl.deleteBuffer(r.indexBuffer);
     gl.deleteBuffer(r.eyeIndexBuffer);
     gl.deleteTexture(r.texture);
@@ -1133,6 +1144,7 @@ export class MeshWarpRenderer {
       this.contextLost = false;
       if (this.topology) this.uploadTopology(gl, this.resources, this.topology);
       if (this.eyeFadeWeights) this.uploadEyeFade(gl, this.resources, this.eyeFadeWeights);
+      this.uploadDelight(gl, this.resources, this.delightGains);
       if (this.personaImage) this.uploadTexture(gl, this.resources, this.personaImage);
       if (this.personaUv) this.uploadUvs(gl, this.resources, this.personaUv, gl.STATIC_DRAW);
       console.info('WebGL context restored; persona overlay resumed.');
@@ -1159,11 +1171,26 @@ export class MeshWarpRenderer {
       this.eyeFadeWeights = new Float32Array(topology.vertexCount);
     }
     this.uploadEyeFade(gl, r, this.eyeFadeWeights);
+    this.uploadDelight(gl, r, this.delightGains);
   }
 
   private uploadEyeFade(gl: WebGLRenderingContext, r: GLResources, weights: Float32Array) {
     gl.bindBuffer(gl.ARRAY_BUFFER, r.eyeFadeBuffer);
     gl.bufferData(gl.ARRAY_BUFFER, weights, gl.STATIC_DRAW);
+  }
+
+  /** Per-vertex de-light gains (null = all ones). */
+  private uploadDelight(gl: WebGLRenderingContext, r: GLResources, gains: Float32Array | null) {
+    const n = this.topology?.vertexCount ?? 468;
+    const data = gains && gains.length === n ? gains : new Float32Array(n).fill(1);
+    gl.bindBuffer(gl.ARRAY_BUFFER, r.delightBuffer);
+    gl.bufferData(gl.ARRAY_BUFFER, data, gl.DYNAMIC_DRAW);
+  }
+
+  /** R3c symmetric de-light: per-vertex linear-light gains on the persona (null clears them). */
+  setDelight(gains: Float32Array | null) {
+    this.delightGains = gains;
+    if (this.gl && this.resources && this.glReady) this.uploadDelight(this.gl, this.resources, gains);
   }
 
   /**
@@ -1309,6 +1336,10 @@ export class MeshWarpRenderer {
     gl.enableVertexAttribArray(loc.aToneWeight);
     gl.vertexAttribPointer(loc.aToneWeight, 1, gl.FLOAT, false, 0, 0);
 
+    gl.bindBuffer(gl.ARRAY_BUFFER, r.delightBuffer);
+    gl.enableVertexAttribArray(loc.aDelight);
+    gl.vertexAttribPointer(loc.aDelight, 1, gl.FLOAT, false, 0, 0);
+
     // R3 relighting inputs on units 1 and 2 (bound whether or not the passes ran this frame).
     const rl = r.relight;
     gl.uniform1f(loc.uRelight, relit && rl?.driver && rl.persona ? 1 : 0);
@@ -1398,6 +1429,15 @@ export class MeshWarpRenderer {
    * Call right after render() while the drawing buffer still holds the frame.
    */
   readFaceStats(region: [number, number, number, number]): Promise<FaceStats | null> {
+    return this.readFacePixels(region, true).then((p) => (p ? faceStatsFromPixels(p, READBACK_SIZE, READBACK_SIZE) : null));
+  }
+
+  /**
+   * R3c: the raw READBACK_SIZE² RGBA pixels of a display region of the warp output (the whole
+   * region scaled into the window; with `centredWindow` the 1:1 centred window the camera match
+   * uses). Row 0 is the bottom of the region (GL framebuffer order).
+   */
+  readFacePixels(region: [number, number, number, number], centredWindow = false): Promise<Uint8Array | null> {
     const gl = this.gl2;
     const r = this.resources?.readback;
     if (!gl || !r || this.contextLost) return Promise.resolve(null);
@@ -1414,7 +1454,7 @@ export class MeshWarpRenderer {
     gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_WRAP_S, gl.CLAMP_TO_EDGE);
     gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_WRAP_T, gl.CLAMP_TO_EDGE);
     const win = readbackWindow(w, h);
-    return this.downsampleAndRead(gl, r, centredRect([0, 0, 1, 1], [win / w, win / h]));
+    return this.downsampleAndRead(gl, r, centredWindow ? centredRect([0, 0, 1, 1], [win / w, win / h]) : [0, 0, 1, 1]);
   }
 
   /**
@@ -1424,6 +1464,11 @@ export class MeshWarpRenderer {
    * display pixels as readFaceStats does on the output.
    */
   readSourceFaceStats(source: TexImageSource, region: [number, number, number, number], window?: [number, number]): Promise<FaceStats | null> {
+    return this.readSourcePixels(source, region, window).then((p) => (p ? faceStatsFromPixels(p, READBACK_SIZE, READBACK_SIZE) : null));
+  }
+
+  /** R3c: raw pixels of a normalized source region (row 0 = top of the region, x in source order). */
+  readSourcePixels(source: TexImageSource, region: [number, number, number, number], window?: [number, number]): Promise<Uint8Array | null> {
     const gl = this.gl2;
     const r = this.resources?.readback;
     if (!gl || !r || this.contextLost) return Promise.resolve(null);
@@ -1437,7 +1482,7 @@ export class MeshWarpRenderer {
     return this.downsampleAndRead(gl, r, window ? centredRect(region, window) : region);
   }
 
-  private downsampleAndRead(gl: WebGL2RenderingContext, r: NonNullable<GLResources['readback']>, rect: [number, number, number, number]): Promise<FaceStats | null> {
+  private downsampleAndRead(gl: WebGL2RenderingContext, r: NonNullable<GLResources['readback']>, rect: [number, number, number, number]): Promise<Uint8Array | null> {
     gl.bindFramebuffer(gl.FRAMEBUFFER, r.framebuffer);
     gl.viewport(0, 0, READBACK_SIZE, READBACK_SIZE);
     gl.disable(gl.BLEND);
@@ -1487,7 +1532,7 @@ export class MeshWarpRenderer {
       gl.getBufferSubData(gl.PIXEL_PACK_BUFFER, 0, data);
       gl.bindBuffer(gl.PIXEL_PACK_BUFFER, null);
       gl.deleteBuffer(p.buffer);
-      p.resolve(faceStatsFromPixels(data, READBACK_SIZE, READBACK_SIZE));
+      p.resolve(data);
     }
     this.pending = still;
   }

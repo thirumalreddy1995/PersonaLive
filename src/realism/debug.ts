@@ -49,6 +49,14 @@ export interface RealismDebugState {
   lightingGainUpdates: number;
   /** Max/min of the de-light field fitted on the persona (flag personaDelight), null when off. */
   personaDelightRange: number | null;
+  /** R3c auto-radius loop state (flag autoRadius), null when off. */
+  autoRadius: { radius: number; sideExcess: number | null; neckExcess: number | null; updates: number } | null;
+  /** The radius after every loop update over the persona's life. */
+  autoRadiusTrace: number[];
+  /** The relight radius in use this frame (loop or setting). */
+  relightRadius: number;
+  /** True when the symmetric de-light bands are loaded for the current persona. */
+  symmetricDelight: boolean;
   renderer: 'webgl2' | 'webgl' | 'canvas2d';
   pose: HeadPose;
   isSpeaking: boolean;
@@ -213,6 +221,12 @@ export interface LoadPersonaSpec {
   dataUrl: string;
   id?: string;
   role?: string;
+  /**
+   * `review-synthetic` (default): a generated face, no real person. `pending`: a real person's
+   * local photo whose consent record is still pending; the dev-only review hook activates it for
+   * the local realism review with a warning, the production gate never does.
+   */
+  consent?: 'review-synthetic' | 'pending';
 }
 
 export interface RealismWindowHook {
@@ -396,14 +410,28 @@ export function installRealismWindowHook(app?: RealismAppHooks): RealismWindowHo
           obstruction: 'None',
           singleFaceVerified: true,
         },
-        consent: {
-          signerName: 'synthetic test persona (no real person)',
-          authorizedUsage: 'Realism review only',
-          timestamp,
-          signatureHash: 'REVIEW-TEST-PERSONA',
-          verified: true,
-        },
+        consent:
+          spec.consent === 'pending'
+            ? {
+                status: 'pending',
+                signerName: '',
+                authorizedUsage: 'none granted yet (local realism review of a pending persona)',
+                timestamp,
+                signedAt: null,
+                signatureHash: 'PENDING',
+                verified: false,
+              }
+            : {
+                status: 'signed',
+                signerName: 'synthetic test persona (no real person)',
+                authorizedUsage: 'Realism review only',
+                timestamp,
+                signedAt: timestamp,
+                signatureHash: 'REVIEW-TEST-PERSONA',
+                verified: true,
+              },
       };
+      if (spec.consent === 'pending') console.warn(`[realism review] activating "${spec.name}" with a pending consent record: local review only, the production gate stays closed.`);
       appHooks.setSubjectCategory(spec.category);
       appHooks.addPersona(persona);
       appHooks.activatePersona(persona);

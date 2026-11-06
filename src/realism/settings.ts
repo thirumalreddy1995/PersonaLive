@@ -13,6 +13,7 @@ const NUMERIC_KEYS: ReadonlyArray<SettingKey> = [
   'lipSyncSensitivity',
   'manualSmileBias',
   'eyePassThroughRadius',
+  'lipFadeFloor',
   'rigidPoseMinCutoff',
   'rigidPoseBeta',
   'skinToneMatch',

@@ -15,6 +15,9 @@ import { OneEuroFilter } from './faceMath.ts';
 import { RigidPoseStabilizer, StabilizerOptions, poseAngles } from './rigidPose.ts';
 import { cropUvs, planCrop } from './personaCrop.ts';
 import { delightPersona } from './personaDelight.ts';
+import { AUTO_RADIUS_EVERY, AutoRadiusState, initialAutoRadius, measureShading, shadingPatches, stepAutoRadius } from './autoRadius.ts';
+import { lumaAtScale, symmetricDelightGains, vertexBandLuma } from './faceSymmetry.ts';
+import { READBACK_SIZE } from './meshWarpRenderer.ts';
 import { CameraMatchState, initialCameraMatch, stepCameraMatch, CAMERA_MATCH_WARM_UPDATES, cameraMatchDue } from './cameraMatch.ts';
 import { RestMouthCalibrator, lipFadeWindow } from './restMouth.ts';
 import {
@@ -202,6 +205,13 @@ export class RealtimeFacialEngine {
   private lightingGainUpdates = 0;
   /** Max/min of the de-light shading field fitted on the current persona (flag personaDelight). */
   private personaDelightRange: number | null = null;
+  /** R3c auto-radius loop state (flag autoRadius) and its per-update trace. */
+  private autoRadius: AutoRadiusState = initialAutoRadius();
+  private autoRadiusPending = false;
+  private autoRadiusTrace: number[] = [];
+  /** R3c symmetric de-light: per-vertex persona luma at the DELIGHT_SCALES and the radius the gains were built for. */
+  private delightBands: Float32Array[] | null = null;
+  private delightRadius = -1;
   /** Resting mouth aperture learned from frontal frames (realism flag restMouth, R3 item 1). */
   private restMouth = new RestMouthCalibrator();
   /** Smoothed screen velocity of the face (canvas px per frame) for motion blur and the steady camera match. */
@@ -259,7 +269,11 @@ export class RealtimeFacialEngine {
 
     // Flags that change how the persona is prepared take effect by re-preparing it.
     this.flagsUnsubscribe = realismFlags.subscribe((_flags, changed) => {
-      if ((changed.includes('syntheticSuite') || changed.includes('personaCrop') || changed.includes('personaDelight')) && this.personaImage) void this.preparePersona();
+      if ((changed.includes('syntheticSuite') || changed.includes('personaCrop') || changed.includes('personaDelight') || changed.includes('symmetricDelight')) && this.personaImage) void this.preparePersona();
+      if (changed.includes('autoRadius')) {
+        this.autoRadius = initialAutoRadius();
+        this.autoRadiusTrace = [];
+      }
       if (changed.includes('cameraMatch')) {
         this.cameraMatch = initialCameraMatch();
         this.cameraMatchTrace = [];
@@ -490,6 +504,22 @@ export class RealtimeFacialEngine {
           this.personaDelightRange = res.range;
         }
       }
+      // R3c (flag symmetricDelight): per-vertex band luma of the final texture for the mirror split.
+      this.delightBands = null;
+      this.delightRadius = -1;
+      this.warp.setDelight(null);
+      if (realismFlags.get().symmetricDelight) {
+        const tw = texture instanceof HTMLImageElement ? texture.naturalWidth : texture.width;
+        const th = texture instanceof HTMLImageElement ? texture.naturalHeight : texture.height;
+        const c = document.createElement('canvas');
+        c.width = tw;
+        c.height = th;
+        const cctx2 = c.getContext('2d', { willReadFrequently: true })!;
+        cctx2.drawImage(texture, 0, 0, tw, th);
+        const px = cctx2.getImageData(0, 0, tw, th);
+        const ub = pointBounds(new Float32Array(uv.subarray(0, 468 * 2)));
+        this.delightBands = vertexBandLuma(px.data, tw, th, uv, Math.max(1, ub.width * tw));
+      }
       this.warp.setPersona(texture, uv);
       this.currentKeyframeSource = texture;
       this.currentKeyframeId = null;
@@ -497,6 +527,9 @@ export class RealtimeFacialEngine {
       this.cameraMatchTrace = [];
       this.cameraMatchPending = false;
       this.cameraMatchWarm = CAMERA_MATCH_WARM_UPDATES;
+      this.autoRadius = initialAutoRadius();
+      this.autoRadiusPending = false;
+      this.autoRadiusTrace = [];
       this.personaMean = this.sampleMeanColor(img, face.landmarks, img.naturalWidth, img.naturalHeight, false);
 
       // Synthesize calibrated multi-angle, multi-expression identity suite for Person A.
@@ -931,7 +964,7 @@ export class RealtimeFacialEngine {
     // "Keep my real mouth": fade the persona lip band as the mouth opens (R1 §2); with restMouth
     // (R3 item 1) the thresholds sit above the wearer's learned resting aperture.
     const fadeWindow = lipFadeWindow(flags.restMouth ? this.restMouth.rest : null);
-    const lipFade = flags.realMouth && s.keepRealMouth ? lipFadeForMar(k.mar, 0, fadeWindow.start, fadeWindow.end) : 0;
+    const lipFade = flags.realMouth && s.keepRealMouth ? lipFadeForMar(k.mar, clamp(s.lipFadeFloor ?? 0, 0, 1), fadeWindow.start, fadeWindow.end) : 0;
     // Eye pass-through ring: only while the wearer's real eyes are showing (R1 §6).
     const eyeFade = flags.eyePassThrough && !drawPersonaEyes ? 1 : 0;
     // Closed-lip mask (R2): persona lips end at the wearer's lip contour while the mouth is closed.
@@ -940,6 +973,12 @@ export class RealtimeFacialEngine {
 
     const cameraMatchOn = flags.cameraMatch && this.warp.supportsReadback;
     this.warp.pollReadbacks();
+    // R3c: the relight radius comes from the auto loop (flag autoRadius) or the setting.
+    const radiusShare = flags.autoRadius && relightOn ? this.autoRadius.radius : clamp(s.relightRadius, 0.02, 0.2);
+    if (relightOn && flags.symmetricDelight && this.delightBands && Math.abs(radiusShare - this.delightRadius) > 0.001) {
+      this.warp.setDelight(symmetricDelightGains(this.delightBands[0], lumaAtScale(this.delightBands, radiusShare)));
+      this.delightRadius = radiusShare;
+    }
     this.warp.render({
       positions: this.warpPositions,
       opacity: Math.pow(strength, 0.55),
@@ -961,7 +1000,7 @@ export class RealtimeFacialEngine {
             mirror: layout.mirror,
             faceWidthPx: k.faceWidth,
             toneMatch: clamp(s.skinToneMatch, 0, 1),
-            radiusShare: clamp(s.relightRadius, 0.02, 0.2),
+            radiusShare,
             globalTone: flags.relightGlobalTone,
             shadowGuard: flags.relightShadowGuard,
           }
@@ -969,6 +1008,11 @@ export class RealtimeFacialEngine {
       motionBlurPx: flags.motionBlur ? [this.headVelocity.x * MOTION_BLUR_EXPOSURE, -this.headVelocity.y * MOTION_BLUR_EXPOSURE] : undefined,
       softHoles: flags.softHoles,
     });
+
+    // R3c: the auto-radius readbacks sit between the camera-match ones.
+    if (flags.autoRadius && relightOn && this.warp.supportsReadback && !this.autoRadiusPending && this.frameIndex % AUTO_RADIUS_EVERY === 7) {
+      this.stepAutoRadiusLoop(layout, source, k, bounds, flags.steadyCameraMatch && headSpeed > CAMERA_MATCH_HOLD_SPEED * k.faceWidth);
+    }
 
     // R2 §4: every 15 frames read the wearer's and the persona's face-region statistics back
     // asynchronously and step the control loop when both have arrived.
@@ -1004,6 +1048,50 @@ export class RealtimeFacialEngine {
         this.cameraMatchTrace.push(this.cameraMatch.lodBias);
       });
     }
+  }
+
+  /**
+   * R3c auto-radius loop: every AUTO_RADIUS_EVERY frames read the face-and-neck region of the
+   * persona layer and of the driver back (asynchronously, like the camera match), measure the
+   * side-shading gap and the cheek-vs-neck ΔE on both, and step the radius.
+   */
+  private stepAutoRadiusLoop(layout: SourceLayout, source: CanvasImageSource, k: LandmarkKinematics, bounds: { minX: number; minY: number; width: number; height: number }, hold: boolean) {
+    const W = this.canvas.width;
+    const H = this.canvas.height;
+    // Display rectangle: the face box widened by 10% each side and extended below the chin for the neck patch.
+    const x0 = clamp(bounds.minX - 0.1 * bounds.width, 0, W - 1);
+    const y0 = clamp(bounds.minY, 0, H - 1);
+    const x1 = clamp(bounds.minX + 1.1 * bounds.width, x0 + 1, W);
+    const y1 = clamp(bounds.minY + bounds.height * 1.45, y0 + 1, H);
+    const rect: [number, number, number, number] = [x0, y0, x1 - x0, y1 - y0];
+    let sx0 = (x0 - layout.offsetX) / layout.drawWidth;
+    let sx1 = (x1 - layout.offsetX) / layout.drawWidth;
+    if (layout.mirror) {
+      const m0 = 1 - sx1;
+      const m1 = 1 - sx0;
+      sx0 = m0;
+      sx1 = m1;
+    }
+    const sy0 = (y0 - layout.offsetY) / layout.drawHeight;
+    const sy1 = (y1 - layout.offsetY) / layout.drawHeight;
+    const srcRect: [number, number, number, number] = [clamp(sx0, 0, 1), clamp(sy0, 0, 1), clamp(sx1 - sx0, 0.01, 1), clamp(sy1 - sy0, 0.01, 1)];
+    const outMap = { x0, y0, w: rect[2], h: rect[3], size: READBACK_SIZE, flipY: true, mirrorX: false };
+    const drvMap = { x0, y0, w: rect[2], h: rect[3], size: READBACK_SIZE, flipY: false, mirrorX: layout.mirror };
+    const patches = shadingPatches(this.smoothed, k.faceWidth, k.faceHeight);
+    const token = this.personaPrepareToken;
+    this.autoRadiusPending = true;
+    const out = this.warp.readFacePixels(rect);
+    const drv = this.warp.readSourcePixels(source as TexImageSource, srcRect);
+    void Promise.all([out, drv]).then(([o, d]) => {
+      this.autoRadiusPending = false;
+      if (this.disposed || token !== this.personaPrepareToken || !o || !d) return;
+      const mo = measureShading(o, outMap, patches, d, drvMap);
+      const md = measureShading(d, drvMap, patches);
+      if (!mo || !md || mo.neck === null || md.neck === null) return;
+      this.autoRadius = stepAutoRadius(this.autoRadius, { sideOut: mo.side, sideDrv: md.side, neckOut: mo.neck, neckDrv: md.neck }, { hold });
+      if (this.autoRadiusTrace.length >= 1024) this.autoRadiusTrace.shift();
+      this.autoRadiusTrace.push(this.autoRadius.radius);
+    });
   }
 
   /**
@@ -1495,6 +1583,10 @@ export class RealtimeFacialEngine {
           restMar: this.restMouth.rest,
           lightingGainUpdates: this.lightingGainUpdates,
           personaDelightRange: this.personaDelightRange,
+          autoRadius: realismFlags.get().autoRadius ? { ...this.autoRadius } : null,
+          autoRadiusTrace: [...this.autoRadiusTrace],
+          relightRadius: realismFlags.get().autoRadius ? this.autoRadius.radius : this.settings.relightRadius,
+          symmetricDelight: !!this.delightBands,
           renderer: this.status.renderer,
           pose: { ...this.lastPose },
           isSpeaking: this.lastMetrics?.isSpeaking ?? false,

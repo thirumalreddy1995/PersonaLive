@@ -22,13 +22,34 @@ export interface AuthorizedPersona {
     obstruction: 'None' | 'Partial Glasses' | 'Occluded';
     singleFaceVerified: boolean;
   };
-  consent: {
-    signerName: string;
-    authorizedUsage: string;
-    timestamp: string;
-    signatureHash: string;
-    verified: boolean;
-  };
+  consent: ConsentRecord;
+}
+
+/** Version of the consent form whose fields a record carries. */
+export const CONSENT_FORM_VERSION = 1;
+
+/**
+ * Consent of the person pictured. Local personas start as `pending` (no usage granted, the gate
+ * stays closed) until that person signs the form themselves (src/components/ConsentForm.tsx).
+ */
+export interface ConsentRecord {
+  signerName: string;
+  authorizedUsage: string;
+  timestamp: string;
+  signatureHash: string;
+  /** True only when a signed record grants live-call use. */
+  verified: boolean;
+  /** `pending` until the pictured person has signed; absent on legacy/sample records (treated as signed). */
+  status?: 'pending' | 'signed';
+  signedAt?: string | null;
+  scope?: { liveCalls: boolean; cloudProcessing: boolean; recordings: boolean };
+  /** SHA-256 hex of every photo the record covers. */
+  imageHashes?: string[];
+  formVersion?: number;
+}
+
+export function consentPending(c: ConsentRecord): boolean {
+  return c.status === 'pending' || (c.status === 'signed' && !c.verified);
 }
 
 export interface HeadPose {
@@ -86,6 +107,8 @@ export interface TransformationSettings {
   keepRealMouth: boolean;
   /** Eye pass-through ring in tessellation rings (0 = none, 1 = just past the lash line, up to 2). */
   eyePassThroughRadius: number;
+  /** Minimum lip fade, 0..1: 0 shows the persona lips at rest, 1 keeps the wearer's lips always (R3c item 4). */
+  lipFadeFloor: number;
   /** Longest edge of the persona texture after the face crop (R2 §2). */
   personaTextureSize: 512 | 1024 | 2048;
   /** One Euro minimum cutoff (Hz) of the rigid head pose behind the forehead (realism flag rigidForehead). */

@@ -10,6 +10,7 @@
  * Quality metrics are measured from the actual image at load time, never typed into the manifest.
  */
 import { AuthorizedPersona, PersonaCategory } from '../types/index.ts';
+import { loadSignedConsent } from '../components/ConsentForm.tsx';
 import { publicAssetUrl } from './assetUrl.ts';
 import { assessPhoto } from './photoAssessment.ts';
 
@@ -54,7 +55,7 @@ export function localPersonas(): AuthorizedPersona[] {
       obstruction: 'None',
       singleFaceVerified: true,
     },
-    consent: entry.consent,
+    consent: loadSignedConsent(entry.id) ?? entry.consent,
   }));
 }
 

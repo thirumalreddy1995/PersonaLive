@@ -33,6 +33,7 @@ interface Targets {
 
 interface Summary {
   identity?: { toPersona: number | null; toDriver: number | null; margin: number | null } | null;
+  relightRadius?: number | null;
   targets: Targets;
   seamRatio: number | null;
   mouthLipErrorPct: number | null;
@@ -77,6 +78,7 @@ export const COMPARE_ROWS: CompareRow[] = [
   { key: 'idPersona', label: 'identity: output ↔ persona cosine', pick: (s) => s.identity?.toPersona ?? null, higherIsWorse: false, noise: 0.03 },
   { key: 'idDriver', label: 'identity: output ↔ wearer cosine', pick: (s) => s.identity?.toDriver ?? null, higherIsWorse: true, noise: 0.03 },
   { key: 'idMargin', label: 'identity margin (persona − wearer)', pick: (s) => s.identity?.margin ?? null, higherIsWorse: false, noise: 0.04 },
+  { key: 'radius', label: 'relight radius (% face width)', pick: (s) => (s.relightRadius === null || s.relightRadius === undefined ? null : s.relightRadius * 100), higherIsWorse: false, noise: 0.3, digits: 1 },
   { key: 'textureSlide', label: 'texture slide (px/frame)', pick: (s) => s.textureSlide?.residualPx ?? null, higherIsWorse: true, noise: 0.25 },
   { key: 'slideGap', label: 'texture slide gap (output − driver)', pick: (s) => s.targets.slide?.gap ?? null, higherIsWorse: true, noise: 0.25 },
   { key: 'flicker', label: 'flicker Δ (output − driver)', pick: (s) => s.flicker?.delta ?? null, higherIsWorse: true, noise: 0.6 },

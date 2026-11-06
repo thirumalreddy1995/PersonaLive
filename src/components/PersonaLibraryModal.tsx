@@ -11,7 +11,8 @@ import {
   Info,
   FileCheck,
 } from 'lucide-react';
-import { AuthorizedPersona, CATEGORY_LABEL, PersonaCategory } from '../types/index.ts';
+import { AuthorizedPersona, CATEGORY_LABEL, PersonaCategory, consentPending } from '../types/index.ts';
+import { ConsentForm } from './ConsentForm.tsx';
 import { generateConsentHash, QualityAssessmentResult } from '../utils/faceMath.ts';
 import { localPersonas } from '../utils/localPersonas.ts';
 import { assessReference, FACE_HEIGHT_RECOMMENDED_PX, ReferenceGate } from '../utils/photoAssessment.ts';
@@ -37,6 +38,8 @@ interface PersonaLibraryModalProps {
   onSelectPersona: (persona: AuthorizedPersona) => void;
   onAddPersona: (persona: AuthorizedPersona) => void;
   onDeletePersona: (id: string) => void;
+  /** Replaces a persona (used when its consent record is signed). */
+  onUpdatePersona?: (persona: AuthorizedPersona) => void;
 }
 
 export const PersonaLibraryModal: React.FC<PersonaLibraryModalProps> = ({
@@ -49,8 +52,10 @@ export const PersonaLibraryModal: React.FC<PersonaLibraryModalProps> = ({
   onSelectPersona,
   onAddPersona,
   onDeletePersona,
+  onUpdatePersona,
 }) => {
   const [activeTab, setActiveTab] = useState<'library' | 'enroll'>('library');
+  const [consentFormFor, setConsentFormFor] = useState<string | null>(null);
 
   // Enrollment Form State
   const [name, setName] = useState('');
@@ -245,7 +250,8 @@ export const PersonaLibraryModal: React.FC<PersonaLibraryModalProps> = ({
               <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
                 {personas.map((persona) => {
                   const isActive = activePersonaId === persona.id;
-                  const allowed = persona.category === subjectCategory;
+                  const pending = consentPending(persona.consent);
+                  const allowed = persona.category === subjectCategory && !pending;
                   return (
                     <div
                       key={persona.id}
@@ -300,16 +306,31 @@ export const PersonaLibraryModal: React.FC<PersonaLibraryModalProps> = ({
                         {/* Consent details */}
                         <div className="mt-3 pt-3 border-t border-slate-800/80 text-[11px] text-slate-400 space-y-1">
                           <div className="flex items-center justify-between text-slate-300">
-                            <span className="flex items-center gap-1 text-emerald-400">
-                              <ShieldCheck className="w-3.5 h-3.5" /> Legal Authorization
+                            <span className={`flex items-center gap-1 ${pending ? 'text-amber-400' : 'text-emerald-400'}`}>
+                              <ShieldCheck className="w-3.5 h-3.5" /> {pending ? 'Consent pending' : 'Consent recorded'}
                             </span>
                             <span className="font-mono text-[9px] text-slate-500">
-                              {persona.consent.signatureHash}
+                              {pending ? (persona.consent.imageHashes?.[0] ? `sha256 ${persona.consent.imageHashes[0].slice(0, 12)}…` : 'unsigned') : persona.consent.signatureHash}
                             </span>
                           </div>
                           <p className="text-[10px] text-slate-400 line-clamp-1">
-                            Usage: {persona.consent.authorizedUsage}
+                            {pending ? 'No usage granted until the person in the photo signs the record.' : `Usage: ${persona.consent.authorizedUsage}`}
                           </p>
+                          {pending && consentFormFor !== persona.id && (
+                            <button onClick={() => setConsentFormFor(persona.id)} className="mt-1 px-2 py-1 rounded bg-amber-900/50 text-amber-200 hover:bg-amber-800/60 text-[10px] font-semibold">
+                              Record consent (person in the photo)
+                            </button>
+                          )}
+                          {pending && consentFormFor === persona.id && (
+                            <ConsentForm
+                              persona={persona}
+                              onCancel={() => setConsentFormFor(null)}
+                              onSigned={(record) => {
+                                setConsentFormFor(null);
+                                onUpdatePersona?.({ ...persona, consent: record });
+                              }}
+                            />
+                          )}
                         </div>
                       </div>
 
@@ -321,7 +342,9 @@ export const PersonaLibraryModal: React.FC<PersonaLibraryModalProps> = ({
                           title={
                             allowed
                               ? undefined
-                              : `Only a ${CATEGORY_LABEL[persona.category].one.toLowerCase()} at the camera can use this face`
+                              : pending
+                                ? 'Consent pending: the person in the photo has to sign the record first'
+                                : `Only a ${CATEGORY_LABEL[persona.category].one.toLowerCase()} at the camera can use this face`
                           }
                           className={`flex-1 py-1.5 px-3 rounded text-xs font-semibold transition-colors ${
                             isActive
@@ -335,7 +358,9 @@ export const PersonaLibraryModal: React.FC<PersonaLibraryModalProps> = ({
                             ? 'Currently Active'
                             : allowed
                               ? 'Use This Face'
-                              : `${CATEGORY_LABEL[persona.category].one} only`}
+                              : pending
+                                ? 'Consent pending'
+                                : `${CATEGORY_LABEL[persona.category].one} only`}
                         </button>
 
                         {personas.length > 1 && (

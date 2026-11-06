@@ -269,6 +269,11 @@ export interface ClipSummary {
   cpuLightingGainUpdates: number | null;
   /** Max/min of the persona de-light field (flag personaDelight). */
   personaDelightRange: number | null;
+  /** R3c auto-radius loop: the radius it settled at (end of clip), its smoothed excesses and the per-clip trace. */
+  autoRadius: { radius: number; sideExcess: number | null; neckExcess: number | null; updates: number; trace: (M.TraceStats & { series: number[] }) | null } | null;
+  /** The relight radius in use at the end of the clip (loop or setting). */
+  relightRadius: number | null;
+  symmetricDelight: boolean;
 }
 
 interface ClipReport {
@@ -300,6 +305,16 @@ function roundDeep<T>(value: T): T {
     return out as T;
   }
   return value;
+}
+
+/** Entries of references/personas.json (empty when the folder is absent). */
+function localPersonaManifest(): Array<{ id: string; name: string; category: string; file: string }> {
+  try {
+    const manifest = JSON.parse(fs.readFileSync(path.join(ROOT, 'references', 'personas.json'), 'utf8')) as { personas?: Array<{ id: string; name: string; category: string; file: string }> };
+    return manifest.personas ?? [];
+  } catch {
+    return [];
+  }
 }
 
 /** The default persona's photo: --personaPhoto, else the first entry of references/personas.json. */
@@ -357,7 +372,9 @@ async function captureClip(page: Page, args: Args, o: CaptureOptions): Promise<C
   console.log(`  ${o.clipLabel}: ${duration.toFixed(2)} s, capturing at ${times.map((t) => t.toFixed(2)).join(', ')} s; burst from ${burstStart.toFixed(2)} s × ${args.burst.count}`);
 
   // The camera-match trace on the hook spans the persona's whole life; this clip's part starts here.
-  const traceStart = (await hookState(page))?.cameraMatchTrace?.length ?? 0;
+  const startState = await hookState(page);
+  const traceStart = startState?.cameraMatchTrace?.length ?? 0;
+  const radiusTraceStart = startState?.autoRadiusTrace?.length ?? 0;
 
   // Replay from the start with everything scheduled, so the temporal filters see the clip as live.
   await page.evaluate(async ({ times, burstStart, burstCount }) => {
@@ -557,6 +574,16 @@ async function captureClip(page: Page, args: Args, o: CaptureOptions): Promise<C
     identity,
     cpuLightingGainUpdates: finalState.lightingGainUpdates ?? null,
     personaDelightRange: finalState.personaDelightRange ?? null,
+    autoRadius: finalState.autoRadius
+      ? (() => {
+          const wholeR = finalState.autoRadiusTrace ?? [];
+          const rt = wholeR.length >= radiusTraceStart ? wholeR.slice(radiusTraceStart) : wholeR;
+          const st = M.traceStats(rt);
+          return { ...finalState.autoRadius, trace: st ? { ...st, series: rt } : null };
+        })()
+      : null,
+    relightRadius: finalState.relightRadius ?? null,
+    symmetricDelight: !!finalState.symmetricDelight,
   };
 
   return {
@@ -590,6 +617,7 @@ function printSummary(label: string, s: ClipSummary) {
     );
   }
   if (s.cpuLightingGainUpdates !== null) console.log(`    cpu lighting gain: ${s.cpuLightingGainUpdates} updates${s.personaDelightRange !== null ? `  de-light field range ${fmt(s.personaDelightRange)}` : ''}`);
+  if (s.autoRadius) console.log(`    auto radius:       ${(s.autoRadius.radius * 100).toFixed(1)}%  side excess ${fmt(s.autoRadius.sideExcess)} L  neck excess ${fmt(s.autoRadius.neckExcess)} ΔE  updates ${s.autoRadius.updates}${s.autoRadius.trace ? `  trace ${(s.autoRadius.trace.min * 100).toFixed(1)}..${(s.autoRadius.trace.max * 100).toFixed(1)}%` : ''}${s.symmetricDelight ? '  symmetric de-light on' : ''}`);
   const t = s.targets;
   const check = (c: M.RelativeCheck) => `driver ${fmt(c.driver)} output ${fmt(c.output)} gap ${fmt(c.gap)} ${c.pass === null ? '' : c.pass ? 'PASS' : 'FAIL'}`;
   console.log(`  ${label}: ${s.frames} frames`);
@@ -614,6 +642,7 @@ function printSummary(label: string, s: ClipSummary) {
 /** Metrics compared across personas; every one is "higher is worse" after taking the gap's magnitude. */
 export const GRID_METRICS: Array<{ key: string; label: string; pick: (s: ClipSummary) => number | null }> = [
   { key: 'identityToDriver', label: 'identity: output ↔ wearer cosine (higher = fading into the wearer)', pick: (s) => s.identity?.toDriver ?? null },
+  { key: 'autoRadiusPct', label: 'auto relight radius at the end of the clip (% face width)', pick: (s) => (s.autoRadius ? s.autoRadius.radius * 100 : null) },
   { key: 'identityMarginDeficit', label: 'identity margin deficit (−(persona − wearer) cosine)', pick: (s) => (s.identity?.margin === null || s.identity?.margin === undefined ? null : -s.identity.margin) },
   { key: 'skinToneNeckGapAbs', label: '|skin tone gap vs neck| (ΔE)', pick: (s) => abs(s.targets.skinToneNeck.gap) },
   { key: 'skinToneEarsGapAbs', label: '|skin tone gap vs ears| (ΔE)', pick: (s) => abs(s.targets.skinToneEars.gap) },
@@ -729,10 +758,27 @@ async function main() {
     const state = (await hookState(page))!;
     // Builds before the settings hook (R0) have no `settings` on the window hook.
     const liveSettings = await page.evaluate(() => window.__personaLiveRealism!.settings?.get() ?? null);
-    const app = { url, browser: args.browser, canvas: [state.canvasWidth, state.canvasHeight], persona: args.persona ?? 'default', settingsOverrides: parsedSettings.settings, settings: liveSettings };
+    const app: Record<string, unknown> & { persona: string } = { url, browser: args.browser, canvas: [state.canvasWidth, state.canvasHeight], persona: args.persona ?? 'default', settingsOverrides: parsedSettings.settings, settings: liveSettings };
 
     if (!personas) {
       // --- Default persona: full frame dump per clip ----------------------------------------------
+      // The local persona's consent record may be pending (R3c item 6): the app's gate then never
+      // auto-selects it, so the review loads it explicitly through the dev hook, flagged as pending.
+      const localPhoto = args.persona ? null : defaultPersonaPhoto(args.personaPhoto);
+      if (localPhoto) {
+        const manifest = localPersonaManifest();
+        const entry = manifest.find((p) => path.join(ROOT, 'references', p.file) === localPhoto) ?? manifest[0];
+        await page.evaluate((spec) => window.__personaLiveRealism!.loadPersona(spec), {
+          name: entry?.name ?? 'local persona',
+          category: (entry?.category ?? 'men') as 'men' | 'women',
+          dataUrl: imageDataUrl(localPhoto),
+          id: 'persona-local-review',
+          role: 'Local persona (realism review)',
+          consent: 'pending' as const,
+        });
+        await waitForHookState(page, 'local persona ready', (s) => ['ready', 'no-face', 'error'].includes(s?.personaStatus ?? ''), 120000);
+        app.persona = `local:${path.basename(localPhoto)}`;
+      }
       const clipReports: Record<string, unknown> = { ...((existing.clips as Record<string, unknown>) ?? {}) };
       for (const clip of clips) {
         const report = await captureClip(page, args, {

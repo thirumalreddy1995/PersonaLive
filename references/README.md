@@ -14,6 +14,17 @@ The web app never bundles a real person's photo. Instead, `personas.json` (copy
 { "personas": [ { "id": "persona-x", "name": "X", "category": "men", "file": "x.jpeg", "consent": { ... } } ] }
 ```
 
+## Consent records (R3c)
+
+A consent record is signed by the person in the photo, never on their behalf. New entries start
+as `"status": "pending"` with the photo's SHA-256 in `imageHashes` and grant nothing: the library
+shows "Consent pending" and the face cannot be activated. The pictured person opens Library →
+"Record consent", enters their name, ticks the scope they allow (live video calls where every
+participant knows they are seeing a persona; opt-in cloud processing of face crops; recordings)
+and confirms they are the person pictured. The app re-hashes the photo, stores the signed record
+on that machine (localStorage) and offers it as JSON to paste into this manifest. Fabricated
+"C2PA-SEC-…" style hashes are not consent records.
+
 `vite.config.ts` reads that manifest and serves the listed files under `references/` for the dev
 server, copies them into `dist/references/` for a local production build (which is what the
 desktop installer packages), and injects the entries as `__PL_LOCAL_PERSONAS__`. Their quality
