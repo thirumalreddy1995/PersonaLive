@@ -3,7 +3,8 @@
  *
  * Every visual stage of the persona pipeline that the realism pass touches sits behind one of
  * these flags so before/after can be compared live (debug panel) and headlessly (capture tool).
- * Defaults are the behaviour of the latest finished phase (R3: relit from the real frame, rest-mouth
+ * Defaults are the behaviour of the latest finished phase (R4: segmentation masks, foreshortening fade and
+ * persona inpaint on top of R3c's auto relight radius and R3: relit from the real frame, rest-mouth
  * lip window, steady camera match, soft pass-through edges, on top of R1/R2's tracked warp, real
  * mouth and eye pass-through, rigid forehead, WebGL2 texture pipeline). `--flags r0` restores the pre-R1 behaviour; a default changes only after a
  * phase report shows the comparison.
@@ -234,7 +235,7 @@ export const REALISM_FLAG_DEFS: ReadonlyArray<RealismFlagDef> = [
     label: 'Segmentation masks',
     description:
       'MediaPipe multiclass selfie segmenter every N frames (setting segmentEvery), EMA-smoothed and uploaded as a texture: the persona is removed under the wearer\'s hair (ghost strands), hands (body skin) and glasses (accessories) and limited to face skin; the geometric hairline falloff and the destination-out passes become the fallback when the segmenter is unavailable (R4 §1–2).',
-    defaultValue: false,
+    defaultValue: true,
     group: 'overlay',
   },
   {
@@ -248,14 +249,14 @@ export const REALISM_FLAG_DEFS: ReadonlyArray<RealismFlagDef> = [
     key: 'foreshortenFade',
     label: 'Foreshortened-triangle fade',
     description: 'Per frame, fades persona alpha on triangles compressed below 40% of their rest area or back-facing, so the far cheek on a turned head shows the colour-matched real skin instead of a smear (R4 §4).',
-    defaultValue: false,
+    defaultValue: true,
     group: 'mesh',
   },
   {
     key: 'personaInpaint',
     label: 'Persona photo inpaint',
     description: 'Segments the persona photo at load and inpaints hair and accessories (glasses) inside the face oval from the surrounding skin; the share replaced feeds the quality-gate warning (R4).',
-    defaultValue: false,
+    defaultValue: true,
     group: 'texture',
     appliesOn: 'persona-reload',
   },
@@ -315,8 +316,11 @@ export const R2_FLAG_STRING =
 export const R3_FLAG_STRING =
   'speechAnatomy=0,perspectiveForeshortening=0,eyelidKinematics=0,foreheadHarmonize=1,hairlineSoften=1,oralCavity=0,catchlights=0,syntheticSuite=0,shaderUnsharp=0,shaderSubsurface=0,shaderSebum=0,realMouth=1,eyePassThrough=1,closedLipMask=0,rigidForehead=1,webgl2=1,personaCrop=1,cameraMatch=1,relight=1,restMouth=1,softHoles=1,steadyCameraMatch=1,motionBlur=0,relightGlobalTone=1,relightShadowGuard=1,personaDelight=0,autoRadius=0,symmetricDelight=0,segmentation=0,twoBandBlend=0,foreshortenFade=0,personaInpaint=0';
 
+/** The R3c defaults (auto relight radius on, R4 flags off), as a flag string: `--flags r3c`. The loop's thresholds are constants (1.5 / 2.5 since R4). */
+export const R3C_FLAG_STRING = R3_FLAG_STRING.replace('autoRadius=0', 'autoRadius=1');
+
 /** Named flag presets accepted by parseRealismFlagString (case-insensitive). */
-export const REALISM_FLAG_PRESETS: Record<string, string> = { r0: R0_FLAG_STRING, r1: R1_FLAG_STRING, r2: R2_FLAG_STRING, r3: R3_FLAG_STRING };
+export const REALISM_FLAG_PRESETS: Record<string, string> = { r0: R0_FLAG_STRING, r1: R1_FLAG_STRING, r2: R2_FLAG_STRING, r3: R3_FLAG_STRING, r3c: R3C_FLAG_STRING };
 
 export type RealismFlags = Record<RealismFlagKey, boolean>;
 

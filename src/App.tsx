@@ -105,7 +105,7 @@ export default function App() {
     keepRealMouth: true,
     eyePassThroughRadius: 1,
     lipFadeFloor: 0,
-    segmentEvery: 2,
+    segmentEvery: 4,
     segmentationStrength: 1,
     segmentCpu: false,
     personaTextureSize: 1024,
