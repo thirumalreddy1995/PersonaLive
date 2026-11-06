@@ -76,6 +76,18 @@ skips it. `summary.cpuLightingGainUpdates` counts the 5-zone CPU gain (0 with de
 `npx tsx tools/realism/sweep.ts` turns the `r3b-sweep-r<radius>-d<0|1>` runs into per-persona
 side-by-side sheets and a table (`realism-review/out/r3b-sweep/`).
 
+Review builds (R4): the local persona's consent record is pending until the pictured person
+signs it, so the review needs `npm run build:review` (sets `PERSONALIVE_REVIEW=1`, compiling the
+review-only activation path in; `npm run build` refuses to carry it). Every such activation is
+logged and counted (`app.pendingBypassUses` in report.json); a signed record on the machine
+disables it automatically. Review personas never enter the app's library. Every run also records
+process count, CPU and GPU load at start and end (`app.system`) for the report header.
+
+R4 flags: `segmentation` (MediaPipe multiclass masks every `--settings segmentEvery=2` frames;
+the persona is removed under the wearer's hair, hand and glasses, captures carry the masks and
+`summary.ghostHairShare` / `handLeakShare` / `glassesLeakShare` measure what still leaks),
+`twoBandBlend`, `foreshortenFade`, `personaInpaint` (persona-reload; `summary.personaInpaintShare`).
+
 `--settings temporalSmoothing=20,blendStrength=100` overrides the inspector settings for the run (the
 same keys as `TransformationSettings`; `?rs=` on the page URL does the same in a browser). The rigid
 forehead can be tuned the same way: `rigidPoseMinCutoff` / `rigidPoseBeta` (One Euro on the head
