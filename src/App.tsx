@@ -154,6 +154,7 @@ export default function App() {
     installRealismWindowHook({
       addPersona: (persona) => setPersonas((prev) => [persona, ...prev.filter((p) => p.id !== persona.id)]),
       activatePersona: (persona) => setActivePersonaState(persona),
+      activateTransient: (persona) => setActivePersonaState(persona),
       setSubjectCategory: (category) => {
         setSubjectCategory(category);
         localStorage.setItem('pl_subject_category', category);

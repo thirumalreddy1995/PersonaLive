@@ -44,7 +44,7 @@ import { parseSettingsString } from '../../src/realism/settings.ts';
 import type { RealismDebugState, SerializedBurst, SerializedCapture } from '../../src/realism/debug.ts';
 import * as M from './metrics.ts';
 import { SheetRow, blank, blit, compositeOnChecker, contactSheet, crop, decodeImageFile, decodePngDataUrl, drawText, imageDataUrl, scaleImage, writeDataUrlPng, writePng } from './png.ts';
-import { REVIEW_DIR, ROOT, driveAppShell, hookState, launchBrowser, sleep, startPreview, waitForHookState } from './session.ts';
+import { REVIEW_DIR, ROOT, describeLoad, driveAppShell, hookState, launchBrowser, sleep, startPreview, systemLoad, waitForHookState } from './session.ts';
 import { regionsSheet } from './regions.ts';
 import { PersonaEntry, loadPersonaSet } from './personaSet.ts';
 import { IdentityFrame, IdentitySummary, flipHorizontal, identityAvailable, runIdentity, summarizeIdentity } from './identity.ts';
@@ -759,13 +759,17 @@ async function main() {
     const state = (await hookState(page))!;
     // Builds before the settings hook (R0) have no `settings` on the window hook.
     const liveSettings = await page.evaluate(() => window.__personaLiveRealism!.settings?.get() ?? null);
-    const app: Record<string, unknown> & { persona: string } = { url, browser: args.browser, canvas: [state.canvasWidth, state.canvasHeight], persona: args.persona ?? 'default', settingsOverrides: parsedSettings.settings, settings: liveSettings };
+    const load = systemLoad();
+    console.log(`system load at start: ${describeLoad(load)}`);
+    const reviewBuild = await page.evaluate(() => window.__personaLiveRealism?.reviewBuild ?? false);
+    const app: Record<string, unknown> & { persona: string } = { url, browser: args.browser, canvas: [state.canvasWidth, state.canvasHeight], persona: args.persona ?? 'default', settingsOverrides: parsedSettings.settings, settings: liveSettings, system: load, reviewBuild };
 
     if (!personas) {
       // --- Default persona: full frame dump per clip ----------------------------------------------
       // The local persona's consent record may be pending (R3c item 6): the app's gate then never
       // auto-selects it, so the review loads it explicitly through the dev hook, flagged as pending.
       const localPhoto = args.persona ? null : defaultPersonaPhoto(args.personaPhoto);
+      if (localPhoto && !reviewBuild) throw new Error('the local persona has a pending consent record: the review needs a review build (npm run build:review)');
       if (localPhoto) {
         const manifest = localPersonaManifest();
         const entry = manifest.find((p) => path.join(ROOT, 'references', p.file) === localPhoto) ?? manifest[0];
@@ -779,6 +783,8 @@ async function main() {
         });
         await waitForHookState(page, 'local persona ready', (s) => ['ready', 'no-face', 'error'].includes(s?.personaStatus ?? ''), 120000);
         app.persona = `local:${path.basename(localPhoto)}`;
+        app.pendingBypassUses = await page.evaluate(() => window.__personaLiveRealism?.pendingBypassUses() ?? 0);
+        if (app.pendingBypassUses) console.log(`  consent: pending record activated through the review build (logged use ${app.pendingBypassUses})`);
       }
       const clipReports: Record<string, unknown> = { ...((existing.clips as Record<string, unknown>) ?? {}) };
       for (const clip of clips) {
@@ -874,6 +880,7 @@ async function main() {
       console.log(`grid sheet: ${path.relative(ROOT, path.join(outDir, 'grid.png'))}`);
     }
     if (pageErrors.length) console.warn('page errors:', pageErrors);
+    console.log(`system load at end: ${describeLoad(systemLoad())}`);
     console.log(`report: ${path.relative(ROOT, reportFile)}`);
   } finally {
     await browser?.close().catch(() => undefined);

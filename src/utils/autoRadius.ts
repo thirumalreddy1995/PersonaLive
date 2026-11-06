@@ -15,9 +15,9 @@ import { ciede2000, rgbToLab, type Lab } from './color.ts';
 export const AUTO_RADIUS_MIN = 0.02;
 export const AUTO_RADIUS_MAX = 0.08;
 /** Raise the radius while both smoothed excesses are below this (L for the side gap, ΔE for the neck gap). */
-export const AUTO_RADIUS_RAISE_BELOW = 2.0;
+export const AUTO_RADIUS_RAISE_BELOW = 1.5;
 /** Lower it once either smoothed excess is above this; between the two nothing moves (hysteresis). */
-export const AUTO_RADIUS_LOWER_ABOVE = 3.0;
+export const AUTO_RADIUS_LOWER_ABOVE = 2.5;
 export const AUTO_RADIUS_STEP_UP = 0.002;
 export const AUTO_RADIUS_STEP_DOWN = 0.004;
 /** EMA weight of each new measurement. */

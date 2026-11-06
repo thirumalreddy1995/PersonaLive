@@ -19,11 +19,11 @@ test('stepAutoRadius raises slowly while the excesses are small, holds in the ba
   for (let i = 0; i < 10; i++) s = stepAutoRadius(s, calm);
   assert.ok(Math.abs(s.radius - (AUTO_RADIUS_MIN + 10 * AUTO_RADIUS_STEP_UP)) < 1e-9, `rose by ten steps (${s.radius})`);
   assert.ok(s.sideExcess !== null && s.sideExcess < 0.6 && s.neckExcess !== null && s.neckExcess < 1.1);
-  // Inside the hysteresis band (2.0..3.0) nothing moves once the EMA is there, while it keeps tracking.
-  for (let i = 0; i < 40; i++) s = stepAutoRadius(s, { sideOut: 3, sideDrv: 0, neckOut: 20, neckDrv: 19 }, { hold: true });
-  assert.ok(Math.abs(s.sideExcess! - 3) < 0.05);
+  // Inside the hysteresis band (1.5..2.5) nothing moves once the EMA is there, while it keeps tracking.
+  for (let i = 0; i < 40; i++) s = stepAutoRadius(s, { sideOut: 2, sideDrv: 0, neckOut: 20, neckDrv: 19 }, { hold: true });
+  assert.ok(Math.abs(s.sideExcess! - 2) < 0.05);
   const r0 = s.radius;
-  for (let i = 0; i < 40; i++) s = stepAutoRadius(s, { sideOut: 3, sideDrv: 0, neckOut: 20, neckDrv: 19 });
+  for (let i = 0; i < 40; i++) s = stepAutoRadius(s, { sideOut: 2, sideDrv: 0, neckOut: 20, neckDrv: 19 });
   assert.equal(s.radius, r0);
   // Clearly leaking: the radius comes down and never below the minimum.
   for (let i = 0; i < 40; i++) s = stepAutoRadius(s, { sideOut: 8, sideDrv: 0, neckOut: 20, neckDrv: 19 });

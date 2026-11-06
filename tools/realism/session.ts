@@ -2,7 +2,7 @@
  * Shared Playwright session helpers for the realism tools: start `vite preview` on the production
  * build, launch a GPU-enabled Chrome, sign into the demo and wait on `window.__personaLiveRealism`.
  */
-import { spawn, ChildProcess } from 'node:child_process';
+import { spawn, ChildProcess, execSync } from 'node:child_process';
 import fs from 'node:fs';
 import http from 'node:http';
 import path from 'node:path';
@@ -14,6 +14,53 @@ export const REVIEW_DIR = path.join(ROOT, 'realism-review');
 
 export function sleep(ms: number) {
   return new Promise((r) => setTimeout(r, ms));
+}
+
+export interface SystemLoad {
+  processes: number | null;
+  chromeProcesses: number | null;
+  cpuPercent: number | null;
+  /** GPU utilisation in percent: nvidia-smi when present, else the Windows GPU engine counters. */
+  gpuPercent: number | null;
+  gpuSource: string;
+  at: string;
+}
+
+function run(cmd: string): string | null {
+  try {
+    return execSync(cmd, { stdio: ['ignore', 'pipe', 'ignore'], timeout: 15000, windowsHide: true }).toString();
+  } catch {
+    return null;
+  }
+}
+
+/** Process count, CPU and GPU load at this moment (Windows; nulls where a probe is unavailable). Report headers carry it (R4 item 3). */
+export function systemLoad(): SystemLoad {
+  const tasks = run('tasklist /FO CSV /NH');
+  const lines = tasks ? tasks.split(/\r?\n/).filter((l) => l.trim()) : [];
+  const processes = tasks ? lines.length : null;
+  const chromeProcesses = tasks ? lines.filter((l) => /^"chrome\.exe"/i.test(l)).length : null;
+  const cpuRaw = run('wmic cpu get loadpercentage /value');
+  const cpuMatch = cpuRaw?.match(/LoadPercentage=(\d+)/);
+  const cpuPercent = cpuMatch ? Number(cpuMatch[1]) : null;
+  let gpuPercent: number | null = null;
+  let gpuSource = 'none';
+  const smi = run('nvidia-smi --query-gpu=utilization.gpu --format=csv,noheader,nounits');
+  if (smi && /\d/.test(smi)) {
+    gpuPercent = Number(smi.trim().split(/\r?\n/)[0]);
+    gpuSource = 'nvidia-smi';
+  } else {
+    const ctr = run('powershell -NoProfile -Command "(Get-Counter \'\\GPU Engine(*engtype_3D)\\Utilization Percentage\').CounterSamples | Measure-Object -Property CookedValue -Sum | Select-Object -ExpandProperty Sum"');
+    if (ctr && /\d/.test(ctr)) {
+      gpuPercent = Math.round(Number(ctr.trim().replace(',', '.')) * 10) / 10;
+      gpuSource = 'GPU Engine 3D counters';
+    }
+  }
+  return { processes, chromeProcesses, cpuPercent, gpuPercent, gpuSource, at: new Date().toISOString() };
+}
+
+export function describeLoad(l: SystemLoad): string {
+  return `processes ${l.processes ?? '?'} (chrome ${l.chromeProcesses ?? '?'}), cpu ${l.cpuPercent ?? '?'}%, gpu ${l.gpuPercent ?? '?'}% (${l.gpuSource})`;
 }
 
 async function waitForHttp(url: string, timeoutMs: number) {

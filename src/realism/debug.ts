@@ -17,6 +17,7 @@ import {
 import type { ProfileSummary } from './profiler.ts';
 import { parseSettingsFromSearch } from './settings.ts';
 import type { AuthorizedPersona, HeadPose, PersonaCategory, TransformationSettings } from '../types/index.ts';
+import { loadSignedConsent } from '../components/ConsentForm.tsx';
 
 export interface RealismDebugState {
   source: string;
@@ -137,6 +138,8 @@ export interface RealismEngineDebugApi {
 export interface RealismAppHooks {
   addPersona(persona: AuthorizedPersona): void;
   activatePersona(persona: AuthorizedPersona): void;
+  /** Activates a persona without adding it to the library (review personas never appear there). */
+  activateTransient(persona: AuthorizedPersona): void;
   setSubjectCategory(category: PersonaCategory): void;
   getSettings(): TransformationSettings;
   updateSettings(patch: Partial<TransformationSettings>): void;
@@ -242,6 +245,10 @@ export interface RealismWindowHook {
   };
   hasEngine(): boolean;
   state(): RealismDebugState | null;
+  /** True when this build carries the review-only pending-consent path (vite dev or build:review). */
+  reviewBuild: boolean;
+  /** How often a pending-consent persona was activated through this hook (logged each time). */
+  pendingBypassUses(): number;
   scheduleCaptures(times: number[]): boolean;
   scheduleBurst(start: number, count: number, scale: number): boolean;
   pending(): { captures: number; burst: number } | null;
@@ -280,6 +287,7 @@ function loadImage(src: string): Promise<HTMLImageElement> {
 }
 
 let appHooks: RealismAppHooks | null = null;
+let pendingBypassUses = 0;
 
 /**
  * Installs `window.__personaLiveRealism` once and applies `?rf=` flag overrides from the URL.
@@ -309,6 +317,8 @@ export function installRealismWindowHook(app?: RealismAppHooks): RealismWindowHo
     },
     hasEngine: () => activeEngine !== null,
     state: () => activeEngine?.getState() ?? null,
+    reviewBuild: __PL_REVIEW_BUILD__,
+    pendingBypassUses: () => pendingBypassUses,
     scheduleCaptures: (times) => {
       if (!activeEngine) return false;
       activeEngine.scheduleCaptures(times);
@@ -396,10 +406,34 @@ export function installRealismWindowHook(app?: RealismAppHooks): RealismWindowHo
       const img = await loadImage(spec.dataUrl);
       const id = spec.id ?? `persona-test-${spec.name.replace(/[^a-z0-9]+/gi, '-').toLowerCase()}`;
       const timestamp = new Date().toISOString();
+      // A real person's photo with a pending record: only a review build may activate it, only
+      // until the person has signed (then the signed record is used), and every use is logged.
+      let pendingRecord: AuthorizedPersona['consent'] | null = null;
+      if (spec.consent === 'pending') {
+        const signed = loadSignedConsent(id);
+        if (signed) {
+          console.info(`[realism review] "${spec.name}" has a signed consent record on this machine; using it.`);
+          pendingRecord = signed;
+        } else if (__PL_REVIEW_BUILD__) {
+          pendingBypassUses++;
+          console.warn(`[realism review] PENDING_CONSENT_BYPASS: activating "${spec.name}" with a pending consent record (use ${pendingBypassUses}); review build only, the production gate stays closed.`);
+          pendingRecord = {
+            status: 'pending',
+            signerName: '',
+            authorizedUsage: 'none granted yet (local realism review of a pending persona)',
+            timestamp,
+            signedAt: null,
+            signatureHash: 'PENDING',
+            verified: false,
+          };
+        } else {
+          throw new Error('a persona with a pending consent record cannot be activated outside a review build');
+        }
+      }
       const persona: AuthorizedPersona = {
         id,
         name: spec.name,
-        role: spec.role ?? 'Review test persona',
+        role: spec.role ?? (spec.consent === 'pending' ? 'Local persona (realism review)' : 'Synthetic test persona, no real person'),
         category: spec.category,
         imageUrl: spec.dataUrl,
         createdAt: timestamp.slice(0, 10),
@@ -412,31 +446,19 @@ export function installRealismWindowHook(app?: RealismAppHooks): RealismWindowHo
           obstruction: 'None',
           singleFaceVerified: true,
         },
-        consent:
-          spec.consent === 'pending'
-            ? {
-                status: 'pending',
-                signerName: '',
-                authorizedUsage: 'none granted yet (local realism review of a pending persona)',
-                timestamp,
-                signedAt: null,
-                signatureHash: 'PENDING',
-                verified: false,
-              }
-            : {
-                status: 'signed',
-                signerName: 'synthetic test persona (no real person)',
-                authorizedUsage: 'Realism review only',
-                timestamp,
-                signedAt: timestamp,
-                signatureHash: 'REVIEW-TEST-PERSONA',
-                verified: true,
-              },
+        consent: pendingRecord ?? {
+          status: 'signed',
+          signerName: 'synthetic test persona (no real person)',
+          authorizedUsage: 'Realism review only',
+          timestamp,
+          signedAt: timestamp,
+          signatureHash: 'REVIEW-TEST-PERSONA',
+          verified: true,
+        },
       };
-      if (spec.consent === 'pending') console.warn(`[realism review] activating "${spec.name}" with a pending consent record: local review only, the production gate stays closed.`);
       appHooks.setSubjectCategory(spec.category);
-      appHooks.addPersona(persona);
-      appHooks.activatePersona(persona);
+      // Review personas (synthetic faces, or a pending local photo) are activated transiently and never enter the library.
+      appHooks.activateTransient(persona);
       return id;
     },
     settings: {

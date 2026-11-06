@@ -127,10 +127,13 @@ function stampServiceWorker(): Plugin {
   };
 }
 
-export default defineConfig(() => {
+export default defineConfig(({ mode }) => {
+  // The realism review path (activating a local persona whose consent is still pending) is compiled
+  // in only for vite dev and `npm run build:review`; tools/check-prod-bundle.cjs fails any other build that carries it.
+  const reviewBuild = mode === 'development' || process.env.PERSONALIVE_REVIEW === '1';
   return {
     base: BASE_PATH,
-    define: { __PL_BUILD_ID__: JSON.stringify(BUILD_ID), __PL_APP_VERSION__: JSON.stringify(APP_VERSION) },
+    define: { __PL_BUILD_ID__: JSON.stringify(BUILD_ID), __PL_APP_VERSION__: JSON.stringify(APP_VERSION), __PL_REVIEW_BUILD__: JSON.stringify(reviewBuild) },
     plugins: [react(), tailwindcss(), mediapipeWasm(), localPersonas(), stampServiceWorker()],
     resolve: {
       alias: {
