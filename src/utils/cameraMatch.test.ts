@@ -1,7 +1,7 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import { CAMERA_MATCH_EVERY, CAMERA_MATCH_LIMITS, CAMERA_MATCH_WARM_UPDATES, STEADY_DEADBAND, cameraMatchDue, initialCameraMatch, stepCameraMatch } from './cameraMatch.ts';
-import { RELIGHT_RADIUS_SHARE, blendMean, blurTaps, derivativesPreamble, faceStatsFromPixels, lowPassSigma, meanChroma, softHoleRadiusPx, toGlslEs3, uvWidth } from './meshWarpRenderer.ts';
+import { RELIGHT_RADIUS_SHARE, blendMean, blurTaps, derivativesPreamble, faceStatsFromPixels, lowPassSigma, meanChroma, pairedFaceStats, softHoleRadiusPx, toGlslEs3, uvWidth } from './meshWarpRenderer.ts';
 
 const stats = (laplacianVariance: number, noiseMad: number, samples = 5000) => ({ laplacianVariance, noiseMad, samples });
 
@@ -50,6 +50,44 @@ test('faceStatsFromPixels measures Laplacian variance and noise and skips transp
   assert.ok(n.laplacianVariance > 100, `lap ${n.laplacianVariance}`);
   assert.ok(n.noiseMad > 3, `mad ${n.noiseMad}`);
   assert.ok(n.samples < f.samples, 'transparent pixels skipped');
+});
+
+test('pairedFaceStats measures the driver only where the output is opaque (flipped rows, mirrored columns)', () => {
+  const w = 32, h = 32;
+  let seed = 11;
+  const rnd = () => ((seed = (Math.imul(seed, 1664525) + 1013904223) >>> 0) / 4294967296);
+  const grey = (alpha: (x: number, y: number) => number) => {
+    const img = new Uint8Array(w * h * 4);
+    for (let y = 0; y < h; y++) for (let x = 0; x < w; x++) {
+      const i = (y * w + x) * 4;
+      img[i] = img[i + 1] = img[i + 2] = 128;
+      img[i + 3] = alpha(x, y);
+    }
+    return img;
+  };
+  // Driver: noise only in rows 22..31 and columns 22..31 of its own buffer, flat elsewhere.
+  const driver = grey(() => 255);
+  for (let y = 0; y < h; y++) for (let x = 0; x < w; x++) {
+    if (y < 22 && x < 22) continue;
+    const v = 128 + Math.round((rnd() - 0.5) * 60);
+    const i = (y * w + x) * 4;
+    driver[i] = driver[i + 1] = driver[i + 2] = v;
+  }
+  const plain = faceStatsFromPixels(driver, w, h);
+  assert.ok(plain.laplacianVariance > 100, `unmasked driver is busy: ${plain.laplacianVariance}`);
+  // Output transparent in rows 0..9 (driver rows 22..31 once flipped) and columns 0..9
+  // (driver columns 22..31 when mirrored): the paired driver statistics see only flat pixels.
+  const output = grey((x, y) => (y < 10 || x < 10 ? 0 : 255));
+  const mirrored = pairedFaceStats(output, driver, w, h, { mirror: true });
+  assert.equal(mirrored.driver.laplacianVariance, 0);
+  assert.equal(mirrored.driver.samples, mirrored.output.samples);
+  // Without the mirror the transparent columns land on flat driver columns, the noisy ones count.
+  const straight = pairedFaceStats(output, driver, w, h, { mirror: false });
+  assert.ok(straight.driver.laplacianVariance > 100, `unmirrored mask keeps the noisy columns: ${straight.driver.laplacianVariance}`);
+  // An opaque output leaves the driver statistics as they were.
+  const opaque = pairedFaceStats(grey(() => 255), driver, w, h, { mirror: false });
+  assert.equal(opaque.driver.laplacianVariance, plain.laplacianVariance);
+  assert.equal(opaque.driver.samples, plain.samples);
 });
 
 test('toGlslEs3 rewrites ES 1.00 shaders for WebGL2', () => {

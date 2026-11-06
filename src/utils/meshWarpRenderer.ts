@@ -736,6 +736,40 @@ export function faceStatsFromPixels(data: ArrayLike<number>, width: number, heig
 const HP_BIN_WIDTH = 0.25;
 const HP_BINS = 256;
 
+/**
+ * R4: camera-match statistics of the output and the driver over the same pixels. The output
+ * readback skips pixels below `minAlpha` (feathered edges and, since R4, the foreshortening fade and
+ * the segmentation keep factor); measured over the whole window, the driver then includes regions
+ * the persona side leaves out, typically minified, detail-dense ones (far cheek on a turn, under the
+ * nose when the head tilts back), so the persona reads blurrier than it is and the loop lowers the
+ * blur. Here the driver is measured only where the output is opaque. The driver readback is upside
+ * down relative to the output one (texture upload vs framebuffer copy) and mirrored when the
+ * display is: driver (x, y) is output (mirror ? w − 1 − x : x, h − 1 − y). Pure, for the tests.
+ */
+export function pairedFaceStats(
+  output: ArrayLike<number>,
+  driver: ArrayLike<number>,
+  width: number,
+  height: number,
+  opts: { mirror: boolean; minAlpha?: number },
+): { output: FaceStats; driver: FaceStats } {
+  const minAlpha = opts.minAlpha ?? 240;
+  const masked = new Uint8Array(width * height * 4);
+  for (let y = 0; y < height; y++) {
+    const oy = height - 1 - y;
+    for (let x = 0; x < width; x++) {
+      const ox = opts.mirror ? width - 1 - x : x;
+      const d = (y * width + x) * 4;
+      const o = (oy * width + ox) * 4;
+      masked[d] = driver[d];
+      masked[d + 1] = driver[d + 1];
+      masked[d + 2] = driver[d + 2];
+      masked[d + 3] = output[o + 3] >= minAlpha ? 255 : 0;
+    }
+  }
+  return { output: faceStatsFromPixels(output, width, height, minAlpha), driver: faceStatsFromPixels(masked, width, height, minAlpha) };
+}
+
 export class MeshWarpRenderer {
   private _canvas: HTMLCanvasElement;
   private gl: WebGLRenderingContext | WebGL2RenderingContext | null = null;

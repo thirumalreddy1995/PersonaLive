@@ -50,7 +50,7 @@ import {
   FACE_TESSELLATION,
   TrackedFace,
 } from './faceTracker.ts';
-import { FacialLightingZones, MeshWarpRenderer, readbackWindow } from './meshWarpRenderer.ts';
+import { FacialLightingZones, MeshWarpRenderer, pairedFaceStats, readbackWindow, type FaceStats } from './meshWarpRenderer.ts';
 import { OralCavityRenderer, extractOralApertureMetrics } from './oralCavityRenderer.ts';
 import { MultiReferenceBank } from './multiReferenceBank.ts';
 import { CranialBoundaryBlender } from './cranialBoundaryBlender.ts';
@@ -1107,9 +1107,20 @@ export class RealtimeFacialEngine {
       // Both readbacks sample the same square window of display pixels at 1:1, so the loop sees
       // the single-pixel band the camera blur removes (the band the review metric measures).
       const win = readbackWindow(bounds.width, bounds.height);
-      const output = this.warp.readFaceStats(faceRect);
-      const driver = this.warp.readSourceFaceStats(source as TexImageSource, srcRect, [win / layout.drawWidth, win / layout.drawHeight]);
-      void Promise.all([driver, output]).then(([d, o]) => {
+      const srcWindow: [number, number] = [win / layout.drawWidth, win / layout.drawHeight];
+      // Output first: both readbacks go through the same source texture.
+      const stats: Promise<[FaceStats | null, FaceStats | null]> = flags.cameraMatchSameMask
+        ? Promise.all([this.warp.readFacePixels(faceRect, true), this.warp.readSourcePixels(source as TexImageSource, srcRect, srcWindow)]).then(([op, dp]) => {
+            if (!op || !dp) return [null, null];
+            const p = pairedFaceStats(op, dp, READBACK_SIZE, READBACK_SIZE, { mirror: layout.mirror });
+            return [p.driver, p.output];
+          })
+        : (() => {
+            const output = this.warp.readFaceStats(faceRect);
+            const driver = this.warp.readSourceFaceStats(source as TexImageSource, srcRect, srcWindow);
+            return Promise.all([driver, output]);
+          })();
+      void stats.then(([d, o]) => {
         this.cameraMatchPending = false;
         if (this.disposed || token !== this.personaPrepareToken || !d || !o) return;
         this.cameraMatch = stepCameraMatch(this.cameraMatch, d, o, 0.35, { steady, hold });

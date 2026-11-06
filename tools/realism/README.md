@@ -83,10 +83,13 @@ logged and counted (`app.pendingBypassUses` in report.json); a signed record on 
 disables it automatically. Review personas never enter the app's library. Every run also records
 process count, CPU and GPU load at start and end (`app.system`) for the report header.
 
-R4 flags: `segmentation` (MediaPipe multiclass masks every `--settings segmentEvery=2` frames;
-the persona is removed under the wearer's hair, hand and glasses, captures carry the masks and
+R4 flags: `segmentation` (MediaPipe multiclass masks from a Web Worker every `--settings segmentEvery=4`
+frames, the default; `segmentCpu=1` runs the segmenter on the CPU: no GPU stall, but ~220 ms per
+mask; the persona is removed under the wearer's hair, hand and glasses, captures carry the masks and
 `summary.ghostHairShare` / `handLeakShare` / `glassesLeakShare` measure what still leaks),
-`twoBandBlend`, `foreshortenFade`, `personaInpaint` (persona-reload; `summary.personaInpaintShare`).
+`twoBandBlend`, `foreshortenFade`, `personaInpaint` (persona-reload; `summary.personaInpaintShare`),
+`cameraMatchSameMask` (the camera match measures the camera frame only on the pixels where the
+persona layer is opaque, so faded or removed persona areas do not lower the blur).
 
 `--settings temporalSmoothing=20,blendStrength=100` overrides the inspector settings for the run (the
 same keys as `TransformationSettings`; `?rs=` on the page URL does the same in a browser). The rigid
