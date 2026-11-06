@@ -461,7 +461,7 @@ async function captureClip(page: Page, args: Args, o: CaptureOptions): Promise<C
     const output = decodePngDataUrl(c.outputPng);
     const driver = decodePngDataUrl(c.driverPng);
     const overlay = c.overlayPng ? decodePngDataUrl(c.overlayPng) : null;
-    const masks = c.masksPng ? decodePngDataUrl(c.masksPng) : null;
+    const masks = c.masksPng ? M.unpackMasksImage(decodePngDataUrl(c.masksPng)) : null;
     const lms = c.landmarks;
     // A re-detection counts only when it landed on the wearer's face (R2; see detectionAgrees).
     const outputLms = M.detectionAgrees(c.outputLandmarks, lms) ? c.outputLandmarks : null;

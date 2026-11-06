@@ -290,11 +290,30 @@ function png(canvas: HTMLCanvasElement): string {
   return canvas.toDataURL('image/png');
 }
 
+/**
+ * The packed masks as an opaque PNG twice as wide: left half RGB = hair, body skin, face skin;
+ * right half R = accessories. (Packing accessories into alpha would lose the colour channels:
+ * a canvas stores premultiplied pixels, so RGB is zeroed wherever alpha is 0.)
+ */
 function masksPng(m: { width: number; height: number; data: Uint8ClampedArray }): string {
   const c = document.createElement('canvas');
-  c.width = m.width;
+  c.width = m.width * 2;
   c.height = m.height;
-  c.getContext('2d')!.putImageData(new ImageData(new Uint8ClampedArray(m.data), m.width, m.height), 0, 0);
+  const out = new Uint8ClampedArray(c.width * c.height * 4);
+  for (let y = 0; y < m.height; y++) {
+    for (let x = 0; x < m.width; x++) {
+      const s = (y * m.width + x) * 4;
+      const l = (y * c.width + x) * 4;
+      const r = (y * c.width + m.width + x) * 4;
+      out[l] = m.data[s];
+      out[l + 1] = m.data[s + 1];
+      out[l + 2] = m.data[s + 2];
+      out[l + 3] = 255;
+      out[r] = m.data[s + 3];
+      out[r + 3] = 255;
+    }
+  }
+  c.getContext('2d')!.putImageData(new ImageData(out, c.width, c.height), 0, 0);
   return c.toDataURL('image/png');
 }
 

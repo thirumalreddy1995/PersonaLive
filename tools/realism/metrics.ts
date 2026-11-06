@@ -1280,3 +1280,21 @@ export function occlusionLeak(
   if (!n) return null;
   return { personaPixels: n, ghostHairShare: hair / n, handLeakShare: hand / n, glassesLeakShare: glasses / n };
 }
+
+/** Inverse of the debug hook's masksPng: a 2W × H opaque image (left RGB = hair, body skin, face skin; right R = accessories) → W × H RGBA (hair, body, face, accessories). */
+export function unpackMasksImage(img: RgbaImage): RgbaImage {
+  const w = Math.floor(img.width / 2);
+  const data = new Uint8Array(w * img.height * 4);
+  for (let y = 0; y < img.height; y++) {
+    for (let x = 0; x < w; x++) {
+      const l = (y * img.width + x) * 4;
+      const r = (y * img.width + w + x) * 4;
+      const d = (y * w + x) * 4;
+      data[d] = img.data[l];
+      data[d + 1] = img.data[l + 1];
+      data[d + 2] = img.data[l + 2];
+      data[d + 3] = img.data[r];
+    }
+  }
+  return { width: w, height: img.height, data };
+}

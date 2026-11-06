@@ -43,6 +43,7 @@ import {
   shadingFollow,
   traceStats,
   occlusionLeak,
+  unpackMasksImage,
 } from './metrics.ts';
 
 // --- Fixtures -------------------------------------------------------------------------------------
@@ -577,4 +578,10 @@ test('occlusionLeak counts persona pixels over the hair, hand and glasses masks 
   // Mirrored display: the same masks, the hair is now on the display's right; the share is unchanged.
   const m = occlusionLeak(overlay, masks, layout, true, pts)!;
   assert.ok(Math.abs(m.ghostHairShare - r.ghostHairShare) < 0.05);
+});
+
+test('unpackMasksImage restores the four mask channels from the opaque side-by-side PNG layout', () => {
+  // 1 × 1 masks: hair 10, body 20, face 30, accessories 40 → packed as a 2 × 1 opaque image.
+  const img = { width: 2, height: 1, data: new Uint8Array([10, 20, 30, 255, 40, 0, 0, 255]) };
+  assert.deepEqual(Array.from(unpackMasksImage(img).data), [10, 20, 30, 40]);
 });
