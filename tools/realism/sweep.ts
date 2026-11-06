@@ -20,15 +20,17 @@ const OUT = path.join(ROOT, 'realism-review', 'out');
 const DEFAULT_RUNS = ['0.02', '0.04', '0.06', '0.08'].flatMap((r) => [`r3b-sweep-r${r}-d0`, `r3b-sweep-r${r}-d1`]);
 const TILE_H = 150;
 
-interface Args { runs: string[]; out: string; clips: string[] }
+interface Args { runs: string[]; out: string; clips: string[]; personas: string[] | null; labels: string[] | null }
 
 function parseArgs(argv: string[]): Args {
-  const a: Args = { runs: DEFAULT_RUNS, out: 'r3b-sweep', clips: ['A', 'B', 'D', 'E'] };
+  const a: Args = { runs: DEFAULT_RUNS, out: 'r3b-sweep', clips: ['A', 'B', 'D', 'E'], personas: null, labels: null };
   for (let i = 0; i < argv.length; i++) {
     const v = argv[i];
     if (v === '--runs') a.runs = argv[++i].split(',');
     else if (v === '--out') a.out = argv[++i];
     else if (v === '--clips') a.clips = argv[++i].split(',');
+    else if (v === '--personas') a.personas = argv[++i].split(',');
+    else if (v === '--labels') a.labels = argv[++i].split(',');
     else throw new Error(`unknown argument ${v}`);
   }
   return a;
@@ -121,9 +123,10 @@ function main() {
   const rows: SweepRow[] = [];
   const settings: string[] = [];
   for (const persona of personas) {
+    if (args.personas && !args.personas.includes(persona)) continue;
     const sheetRows: SheetRow[] = [];
-    for (const { run, report } of reports) {
-      const setting = settingLabel(run, report);
+    for (const [ri, { run, report }] of reports.entries()) {
+      const setting = args.labels?.[ri] ?? settingLabel(run, report);
       if (!settings.includes(setting)) settings.push(setting);
       const clips = persona === 'default' ? Object.fromEntries(Object.entries(report.clips ?? {}).map(([k, v]) => [k, v.summary])) : report.grid?.personas[persona]?.clips;
       if (!clips) continue;

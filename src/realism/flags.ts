@@ -213,7 +213,7 @@ export const REALISM_FLAG_DEFS: ReadonlyArray<RealismFlagDef> = [
     label: 'Auto relight radius',
     description:
       'Each persona starts at a 2% relight radius and the loop raises it toward 8% while the output\'s side-shading gap and cheek-vs-neck gap stay within ~3 L / 3 ΔE of the wearer\'s own (hysteresis-smoothed, same async readback as the camera match), backing off otherwise (R3c item 1). Replaces the relightRadius setting while on.',
-    defaultValue: false,
+    defaultValue: true,
     group: 'shader',
   },
   {
@@ -277,8 +277,12 @@ export const R1_FLAG_STRING =
 export const R2_FLAG_STRING =
   'speechAnatomy=0,perspectiveForeshortening=0,eyelidKinematics=0,foreheadHarmonize=1,hairlineSoften=1,oralCavity=0,catchlights=0,syntheticSuite=0,shaderUnsharp=0,shaderSubsurface=0,shaderSebum=0,realMouth=1,eyePassThrough=1,closedLipMask=1,rigidForehead=1,webgl2=1,personaCrop=1,cameraMatch=1,relight=0,restMouth=0,softHoles=0,steadyCameraMatch=0,motionBlur=0,relightGlobalTone=0,relightShadowGuard=0,personaDelight=0,autoRadius=0,symmetricDelight=0';
 
+/** The R3 defaults (end of R3b), as a flag string: `--flags r3` reproduces them (fixed 2% relight radius, no loop). */
+export const R3_FLAG_STRING =
+  'speechAnatomy=0,perspectiveForeshortening=0,eyelidKinematics=0,foreheadHarmonize=1,hairlineSoften=1,oralCavity=0,catchlights=0,syntheticSuite=0,shaderUnsharp=0,shaderSubsurface=0,shaderSebum=0,realMouth=1,eyePassThrough=1,closedLipMask=0,rigidForehead=1,webgl2=1,personaCrop=1,cameraMatch=1,relight=1,restMouth=1,softHoles=1,steadyCameraMatch=1,motionBlur=0,relightGlobalTone=1,relightShadowGuard=1,personaDelight=0,autoRadius=0,symmetricDelight=0';
+
 /** Named flag presets accepted by parseRealismFlagString (case-insensitive). */
-export const REALISM_FLAG_PRESETS: Record<string, string> = { r0: R0_FLAG_STRING, r1: R1_FLAG_STRING, r2: R2_FLAG_STRING };
+export const REALISM_FLAG_PRESETS: Record<string, string> = { r0: R0_FLAG_STRING, r1: R1_FLAG_STRING, r2: R2_FLAG_STRING, r3: R3_FLAG_STRING };
 
 export type RealismFlags = Record<RealismFlagKey, boolean>;
 

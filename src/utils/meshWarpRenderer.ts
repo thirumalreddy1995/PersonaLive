@@ -1007,7 +1007,9 @@ export class MeshWarpRenderer {
       this.blurTarget(gl, rl, rl.persona, lowPassSigma(this.personaUvWidth * this.personaSize.width, share));
       this.personaLowDirty = false;
       this.personaLowShare = share;
-      rl.personaMean = o.globalTone ? this.readMean(gl, rl.persona) : null;
+      // The mean chroma barely depends on the sigma: read it once per persona, not on every radius change.
+      if (!o.globalTone) rl.personaMean = null;
+      else if (!rl.personaMean) rl.personaMean = this.readMean(gl, rl.persona);
     }
     this.paintMesh(gl, r, rl, rl.driver, 0, o);
     this.blurTarget(gl, rl, rl.driver, lowPassSigma(o.faceWidthPx, share));
