@@ -65,6 +65,17 @@ black) are the grid fixes. `--regions` writes `t<sec>-regions.png`
 with the metric patches and the seam-step bands (magenta inside, white outside) drawn on driver
 and output next to the measured values.
 
+Identity guard (R3b): every capture also writes un-mirrored face crops of the output and driver
+frames to `<clip>/identity/` and runs `tools/realism/identity.py` (OpenCV Zoo YuNet + SFace,
+Apache-2.0, from `realism-review/.venv` with the models in `realism-review/models/`, both
+gitignored) against the persona photo (`--personaPhoto`, default: the first entry of
+`references/personas.json`; grid personas use their own file). `summary.identity` holds the cosine
+similarity output ↔ persona, output ↔ wearer and the margin: a regression guard so the persona does
+not fade into the wearer, never a score to maximise or a verification threshold. `--no-identity`
+skips it. `summary.cpuLightingGainUpdates` counts the 5-zone CPU gain (0 with default flags).
+`npx tsx tools/realism/sweep.ts` turns the `r3b-sweep-r<radius>-d<0|1>` runs into per-persona
+side-by-side sheets and a table (`realism-review/out/r3b-sweep/`).
+
 `--settings temporalSmoothing=20,blendStrength=100` overrides the inspector settings for the run (the
 same keys as `TransformationSettings`; `?rs=` on the page URL does the same in a browser). The rigid
 forehead can be tuned the same way: `rigidPoseMinCutoff` / `rigidPoseBeta` (One Euro on the head
