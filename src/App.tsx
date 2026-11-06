@@ -105,6 +105,7 @@ export default function App() {
     keepRealMouth: true,
     eyePassThroughRadius: 1,
     lipFadeFloor: 0,
+    segmentEvery: 2,
     personaTextureSize: 1024,
     rigidPoseMinCutoff: 1.2,
     rigidPoseBeta: 0.05,

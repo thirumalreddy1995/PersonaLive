@@ -221,6 +221,8 @@ interface FrameReport {
   foreheadToneStep: M.ForeheadToneStep | null;
   /** Identity guard (R3b): cosine similarity of the output face to the persona photo and to the wearer. */
   identity: IdentityFrame | null;
+  /** R4: persona layer over the wearer's hair / hand / glasses per the segmentation masks (null without masks). */
+  occlusion: M.OcclusionLeak | null;
   files: { output: string; driver: string; overlay: string | null } | null;
 }
 
@@ -274,6 +276,12 @@ export interface ClipSummary {
   /** The relight radius in use at the end of the clip (loop or setting). */
   relightRadius: number | null;
   symmetricDelight: boolean;
+  /** R4: mean share of opaque persona pixels over the wearer's hair / hand / glasses (segmentation masks). */
+  ghostHairShare: number | null;
+  handLeakShare: number | null;
+  glassesLeakShare: number | null;
+  segmentationUpdates: number | null;
+  personaInpaintShare: number | null;
 }
 
 interface ClipReport {
@@ -433,6 +441,7 @@ async function captureClip(page: Page, args: Args, o: CaptureOptions): Promise<C
     const output = decodePngDataUrl(c.outputPng);
     const driver = decodePngDataUrl(c.driverPng);
     const overlay = c.overlayPng ? decodePngDataUrl(c.overlayPng) : null;
+    const masks = c.masksPng ? decodePngDataUrl(c.masksPng) : null;
     const lms = c.landmarks;
     // A re-detection counts only when it landed on the wearer's face (R2; see detectionAgrees).
     const outputLms = M.detectionAgrees(c.outputLandmarks, lms) ? c.outputLandmarks : null;
@@ -457,6 +466,7 @@ async function captureClip(page: Page, args: Args, o: CaptureOptions): Promise<C
       mouth: M.mouthFidelity(outputLms, lms),
       foreheadToneStep: M.foreheadToneStep(output, driver, lms),
       identity: null,
+      occlusion: overlay && masks && c.layout ? M.occlusionLeak(overlay, masks, c.layout, c.mirror, lms) : null,
       files,
     });
 
@@ -585,6 +595,11 @@ async function captureClip(page: Page, args: Args, o: CaptureOptions): Promise<C
       : null,
     relightRadius: finalState.relightRadius ?? null,
     symmetricDelight: !!finalState.symmetricDelight,
+    ghostHairShare: M.meanOf(frames.map((f) => f.occlusion?.ghostHairShare ?? NaN)),
+    handLeakShare: M.meanOf(frames.map((f) => f.occlusion?.handLeakShare ?? NaN)),
+    glassesLeakShare: M.meanOf(frames.map((f) => f.occlusion?.glassesLeakShare ?? NaN)),
+    segmentationUpdates: finalState.segmentation?.updates ?? null,
+    personaInpaintShare: finalState.personaInpaintShare ?? null,
   };
 
   return {
@@ -618,6 +633,7 @@ function printSummary(label: string, s: ClipSummary) {
     );
   }
   if (s.cpuLightingGainUpdates !== null) console.log(`    cpu lighting gain: ${s.cpuLightingGainUpdates} updates${s.personaDelightRange !== null ? `  de-light field range ${fmt(s.personaDelightRange)}` : ''}`);
+  if (s.ghostHairShare !== null || s.segmentationUpdates) console.log(`    occlusion (masks): ghost hair ${fmt(s.ghostHairShare)}  hand leak ${fmt(s.handLeakShare)}  glasses leak ${fmt(s.glassesLeakShare)}  segmenter updates ${s.segmentationUpdates ?? '-'}${s.personaInpaintShare !== null ? `  persona inpainted ${(s.personaInpaintShare * 100).toFixed(1)}%` : ''}`);
   if (s.autoRadius) console.log(`    auto radius:       ${(s.autoRadius.radius * 100).toFixed(1)}%  side excess ${fmt(s.autoRadius.sideExcess)} L  neck excess ${fmt(s.autoRadius.neckExcess)} ΔE  updates ${s.autoRadius.updates}${s.autoRadius.trace ? `  trace ${(s.autoRadius.trace.min * 100).toFixed(1)}..${(s.autoRadius.trace.max * 100).toFixed(1)}%` : ''}${s.symmetricDelight ? '  symmetric de-light on' : ''}`);
   const t = s.targets;
   const check = (c: M.RelativeCheck) => `driver ${fmt(c.driver)} output ${fmt(c.output)} gap ${fmt(c.gap)} ${c.pass === null ? '' : c.pass ? 'PASS' : 'FAIL'}`;
@@ -644,6 +660,8 @@ function printSummary(label: string, s: ClipSummary) {
 export const GRID_METRICS: Array<{ key: string; label: string; pick: (s: ClipSummary) => number | null }> = [
   { key: 'identityToDriver', label: 'identity: output ↔ wearer cosine (higher = fading into the wearer)', pick: (s) => s.identity?.toDriver ?? null },
   { key: 'autoRadiusPct', label: 'auto relight radius at the end of the clip (% face width)', pick: (s) => (s.autoRadius ? s.autoRadius.radius * 100 : null) },
+  { key: 'ghostHairShare', label: 'ghost hair share (persona over the wearer\'s hair)', pick: (s) => s.ghostHairShare },
+  { key: 'handLeakShare', label: 'hand leak share (persona over a hand)', pick: (s) => s.handLeakShare },
   { key: 'identityMarginDeficit', label: 'identity margin deficit (−(persona − wearer) cosine)', pick: (s) => (s.identity?.margin === null || s.identity?.margin === undefined ? null : -s.identity.margin) },
   { key: 'skinToneNeckGapAbs', label: '|skin tone gap vs neck| (ΔE)', pick: (s) => abs(s.targets.skinToneNeck.gap) },
   { key: 'skinToneEarsGapAbs', label: '|skin tone gap vs ears| (ΔE)', pick: (s) => abs(s.targets.skinToneEars.gap) },

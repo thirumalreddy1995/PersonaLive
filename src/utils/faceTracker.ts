@@ -38,7 +38,7 @@ export const FACE_RIGHT_EYE = FaceLandmarker.FACE_LANDMARKS_RIGHT_EYE;
 export const FACE_LEFT_IRIS = FaceLandmarker.FACE_LANDMARKS_LEFT_IRIS;
 export const FACE_RIGHT_IRIS = FaceLandmarker.FACE_LANDMARKS_RIGHT_IRIS;
 
-async function fetchModel(url: string, onProgress: (p: number) => void): Promise<Uint8Array> {
+export async function fetchModel(url: string, onProgress: (p: number) => void): Promise<Uint8Array> {
   // 1. Cache Storage (persists across launches, works offline after first run)
   let cache: Cache | null = null;
   try {
@@ -105,6 +105,11 @@ export class FaceTracker {
   private disposed = false;
   public backend: TrackerBackend = 'GPU';
   public ready = false;
+
+  /** The shared WASM fileset (for other MediaPipe tasks, e.g. the segmenter); null until load(). */
+  get fileset() {
+    return this.wasmFileset;
+  }
 
   constructor(private modelUrl: string = (import.meta.env?.VITE_FACE_MODEL_URL as string | undefined) || DEFAULT_MODEL_URL) {}
 

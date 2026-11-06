@@ -93,6 +93,8 @@ export interface EngineStatus {
   faceDetected: boolean;
   persona: 'none' | 'preparing' | 'ready' | 'no-face' | 'error';
   personaMessage?: string;
+  /** Quality-gate warnings about the persona photo (R4): e.g. hair or glasses over the face skin. */
+  personaWarnings?: string[];
 }
 
 export interface TransformationSettings {
@@ -109,6 +111,8 @@ export interface TransformationSettings {
   eyePassThroughRadius: number;
   /** Minimum lip fade, 0..1: 0 shows the persona lips at rest, 1 keeps the wearer's lips always (R3c item 4). */
   lipFadeFloor: number;
+  /** Run the segmenter every N frames (R4 §1). */
+  segmentEvery: number;
   /** Longest edge of the persona texture after the face crop (R2 §2). */
   personaTextureSize: 512 | 1024 | 2048;
   /** One Euro minimum cutoff (Hz) of the rigid head pose behind the forehead (realism flag rigidForehead). */

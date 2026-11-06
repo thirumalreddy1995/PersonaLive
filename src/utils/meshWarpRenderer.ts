@@ -16,7 +16,8 @@
  * is the fallback, then a Canvas 2D per-triangle affine warp. The renderer survives WebGL
  * context loss (GPU reset, tab backgrounding) by rebuilding its GPU resources on restore.
  */
-import { closedLipMaskForZone, toneWeights, type FaceTopology } from './faceMesh.ts';
+import { closedLipMaskForZone, toneWeights, wideFeatherWeights, type FaceTopology } from './faceMesh.ts';
+import type { PackedMasks } from './segmentation.ts';
 
 export interface FacialLightingZones {
   forehead: [number, number, number];
@@ -102,6 +103,12 @@ export interface WarpFrameOptions {
   motionBlurPx?: [number, number];
   /** Widen the eye and mouth pass-through fades to the camera-match blur radius (realism flag softHoles). */
   softHoles?: boolean;
+  /** R4 §1–2 segmentation masks (packed RGBA, source-normalised) with the screen→source map; omitted = off. */
+  segmentation?: { masks: PackedMasks; dirty: boolean; srcMap: [number, number, number, number]; mirror: boolean };
+  /** R4 §3 two-band boundary blend (needs relight for the low layer). */
+  twoBand?: boolean;
+  /** R4 §4 per-vertex foreshortening weights (1 = flat, 0 = sliver/back-facing); omitted = off. */
+  foreshorten?: Float32Array;
 }
 
 /** Face-region pixel statistics from an asynchronous readback. */
@@ -125,6 +132,8 @@ attribute float aLipZone;
 attribute float aEyeFade;
 attribute float aToneWeight;
 attribute float aDelight;
+attribute float aFeatherWide;
+attribute float aForeshorten;
 
 uniform vec2 uResolution;
 uniform vec4 uFaceBounds;
@@ -143,6 +152,8 @@ varying float vLipZone;
 varying float vEyeFade;
 varying float vToneWeight;
 varying float vDelight;
+varying float vFeatherWide;
+varying float vForeshorten;
 
 void main() {
   vec2 clip = vec2(aPosition.x / uResolution.x * 2.0 - 1.0, 1.0 - aPosition.y / uResolution.y * 2.0);
@@ -154,6 +165,8 @@ void main() {
   vEyeFade = aEyeFade;
   vToneWeight = aToneWeight;
   vDelight = aDelight;
+  vFeatherWide = aFeatherWide;
+  vForeshorten = aForeshorten;
 
   // Normalized position relative to face bounding box [0, 1]
   vec2 nPos = clamp((aPosition - uFaceBounds.xy) / max(uFaceBounds.zw, vec2(1.0)), 0.0, 1.0);
@@ -201,6 +214,12 @@ uniform vec3 uMeanChromaP;
 uniform vec3 uMeanChromaD;
 uniform vec2 uMotionBlur;
 uniform float uSoftHolesPx;
+uniform sampler2D uSegMask;
+uniform float uSegOn;
+uniform vec4 uSegSrcMap;
+uniform float uSegMirror;
+uniform float uTwoBand;
+uniform float uForeshortenOn;
 
 varying vec2 vUv;
 varying float vFeather;
@@ -211,6 +230,8 @@ varying float vLipZone;
 varying float vEyeFade;
 varying float vToneWeight;
 varying float vDelight;
+varying float vFeatherWide;
+varying float vForeshorten;
 
 // Per-pixel, per-frame hash in [0, 1).
 float hash12(vec2 p) {
@@ -268,6 +289,8 @@ void main() {
   //    times the user's skin-tone-match setting. Otherwise the multi-zone gain of R0.
   vec3 base = clamp(microSkin, 0.0, 1.0);
   vec3 gain = vLighting;
+  vec3 lowCol = base;
+  float hasLow = 0.0;
   if (uRelight > 0.5) {
     vec4 pl = texture2D(uPersonaLow, vUv);
     vec4 dl = texture2D(uDriverLow, gl_FragCoord.xy / uResolution);
@@ -294,6 +317,8 @@ void main() {
         tone = mix(chromaP, chromaD, tw);
       }
       base = linearToSrgb(clamp(detail * shade * tone, 0.0, 1.0));
+      lowCol = linearToSrgb(clamp(shade * tone, 0.0, 1.0));
+      hasLow = 1.0;
       gain = vec3(1.0);
     }
   }
@@ -325,15 +350,39 @@ void main() {
   // 7. Cranial hairline feathering: smoothly dissolves the upper forehead boundary
   // into the driver's hairline and temple shadow, eliminating horizontal seam cuts
   float cranialFalloff = smoothstep(0.0, 0.15, vNormPos.y);
+  // R4 §1–2: segmentation masks (R hair, G body skin, B face skin, A accessories) in source coordinates.
+  float segKeep = 1.0;
+  if (uSegOn > 0.5) {
+    float sx = uSegMirror > 0.5 ? uResolution.x - gl_FragCoord.x : gl_FragCoord.x;
+    float sy = uResolution.y - gl_FragCoord.y;
+    vec2 su = vec2((sx - uSegSrcMap.x) / uSegSrcMap.z, (sy - uSegSrcMap.y) / uSegSrcMap.w);
+    vec4 m = texture2D(uSegMask, clamp(su, 0.0, 1.0));
+    float faceSkin = smoothstep(0.1, 0.5, m.b + m.g * 0.0);
+    segKeep = faceSkin * (1.0 - smoothstep(0.35, 0.7, m.r)) * (1.0 - smoothstep(0.35, 0.7, m.g)) * (1.0 - smoothstep(0.35, 0.7, m.a));
+    cranialFalloff = 1.0;
+  }
+  float foreshorten = uForeshortenOn > 0.5 ? clamp(vForeshorten, 0.0, 1.0) : 1.0;
 
   // 8. Keep my real mouth / eye pass-through / closed-lip mask (edges softened by uSoftHolesPx).
   float closedMask = soften(smoothstep(1.0, 1.3, vLipZone) * (1.0 - smoothstep(2.0, 3.0, vLipZone)), uSoftHolesPx) * uClosedLipMask * (1.0 - uLipFade);
   float lipHole = max(soften(clamp(vLip * uLipFade, 0.0, 1.0), uSoftHolesPx), closedMask);
   float holes = (1.0 - lipHole) * (1.0 - soften(clamp(vEyeFade * uEyeFade, 0.0, 1.0), uSoftHolesPx));
 
-  float a = uOpacity * f * cranialFalloff * c.a * holes;
-
-  gl_FragColor = vec4(naturalSkin * a, a);
+  float common = uOpacity * cranialFalloff * c.a * holes * segKeep * foreshorten;
+  if (uTwoBand > 0.5 && hasLow > 0.5) {
+    // R4 §3: low frequencies fade over the wide feather, the detail over the narrow one. Output is
+    // premultiplied: alpha = wide; colour = wide·low + narrow·(full − low), so compositing over the
+    // driver gives D·(1 − wide) + wide·low + narrow·detail.
+    float tw = clamp(vFeatherWide, 0.0, 1.0);
+    float fw = tw * tw * tw * (tw * (tw * 6.0 - 15.0) + 10.0);
+    float aWide = fw * common;
+    float aNarrow = min(f, fw) * common;
+    vec3 detailCol = naturalSkin - lowCol;
+    gl_FragColor = vec4(lowCol * aWide + detailCol * aNarrow, aWide);
+  } else {
+    float a = f * common;
+    gl_FragColor = vec4(naturalSkin * a, a);
+  }
 }`;
 
 /**
@@ -426,6 +475,9 @@ interface GLResources {
   eyeFadeBuffer: WebGLBuffer;
   toneBuffer: WebGLBuffer;
   delightBuffer: WebGLBuffer;
+  featherWideBuffer: WebGLBuffer;
+  foreshortenBuffer: WebGLBuffer;
+  segTexture: WebGLTexture;
   indexBuffer: WebGLBuffer;
   eyeIndexBuffer: WebGLBuffer;
   texture: WebGLTexture;
@@ -438,6 +490,8 @@ interface GLResources {
     aEyeFade: number;
     aToneWeight: number;
     aDelight: number;
+    aFeatherWide: number;
+    aForeshorten: number;
     uResolution: WebGLUniformLocation | null;
     uTexture: WebGLUniformLocation | null;
     uFaceBounds: WebGLUniformLocation | null;
@@ -468,6 +522,12 @@ interface GLResources {
     uMeanChromaD: WebGLUniformLocation | null;
     uMotionBlur: WebGLUniformLocation | null;
     uSoftHolesPx: WebGLUniformLocation | null;
+    uSegMask: WebGLUniformLocation | null;
+    uSegOn: WebGLUniformLocation | null;
+    uSegSrcMap: WebGLUniformLocation | null;
+    uSegMirror: WebGLUniformLocation | null;
+    uTwoBand: WebGLUniformLocation | null;
+    uForeshortenOn: WebGLUniformLocation | null;
   };
   /** R3 relighting: created on first use (see ensureRelight). */
   relight: RelightResources | null;
@@ -676,6 +736,7 @@ export class MeshWarpRenderer {
   private topology: FaceTopology | null = null;
   private eyeFadeWeights: Float32Array | null = null;
   private delightGains: Float32Array | null = null;
+  private segUploaded = false;
   private personaImage: PersonaSource | null = null;
   private personaUv: Float32Array | null = null;
   private personaSize = { width: 1, height: 1 };
@@ -843,6 +904,9 @@ export class MeshWarpRenderer {
       eyeFadeBuffer: buffer(),
       toneBuffer: buffer(),
       delightBuffer: buffer(),
+      featherWideBuffer: buffer(),
+      foreshortenBuffer: buffer(),
+      segTexture: gl.createTexture()!,
       indexBuffer: buffer(),
       eyeIndexBuffer: buffer(),
       texture,
@@ -855,6 +919,8 @@ export class MeshWarpRenderer {
         aEyeFade: gl.getAttribLocation(program, 'aEyeFade'),
         aToneWeight: gl.getAttribLocation(program, 'aToneWeight'),
         aDelight: gl.getAttribLocation(program, 'aDelight'),
+        aFeatherWide: gl.getAttribLocation(program, 'aFeatherWide'),
+        aForeshorten: gl.getAttribLocation(program, 'aForeshorten'),
         uResolution: u('uResolution'),
         uTexture: u('uTexture'),
         uFaceBounds: u('uFaceBounds'),
@@ -885,6 +951,12 @@ export class MeshWarpRenderer {
         uMeanChromaD: u('uMeanChromaD'),
         uMotionBlur: u('uMotionBlur'),
         uSoftHolesPx: u('uSoftHolesPx'),
+        uSegMask: u('uSegMask'),
+        uSegOn: u('uSegOn'),
+        uSegSrcMap: u('uSegSrcMap'),
+        uSegMirror: u('uSegMirror'),
+        uTwoBand: u('uTwoBand'),
+        uForeshortenOn: u('uForeshortenOn'),
       },
       relight: null,
       readback,
@@ -1082,6 +1154,11 @@ export class MeshWarpRenderer {
     pass(target.tex[1], target.fbo[0], 0, spacing / target.height);
   }
 
+  /** The persona's landmark UVs (normalised), null before setPersona. */
+  get personaUvs(): Float32Array | null {
+    return this.personaUv;
+  }
+
   /** True when the R3 relighting can run (any WebGL context that compiled its programs). */
   get supportsRelight(): boolean {
     return this.gl !== null && !this.contextLost && !this.relightFailed;
@@ -1096,6 +1173,9 @@ export class MeshWarpRenderer {
     gl.deleteBuffer(r.eyeFadeBuffer);
     gl.deleteBuffer(r.toneBuffer);
     gl.deleteBuffer(r.delightBuffer);
+    gl.deleteBuffer(r.featherWideBuffer);
+    gl.deleteBuffer(r.foreshortenBuffer);
+    gl.deleteTexture(r.segTexture);
     gl.deleteBuffer(r.indexBuffer);
     gl.deleteBuffer(r.eyeIndexBuffer);
     gl.deleteTexture(r.texture);
@@ -1147,6 +1227,7 @@ export class MeshWarpRenderer {
       if (this.topology) this.uploadTopology(gl, this.resources, this.topology);
       if (this.eyeFadeWeights) this.uploadEyeFade(gl, this.resources, this.eyeFadeWeights);
       this.uploadDelight(gl, this.resources, this.delightGains);
+      this.segUploaded = false;
       if (this.personaImage) this.uploadTexture(gl, this.resources, this.personaImage);
       if (this.personaUv) this.uploadUvs(gl, this.resources, this.personaUv, gl.STATIC_DRAW);
       console.info('WebGL context restored; persona overlay resumed.');
@@ -1168,6 +1249,10 @@ export class MeshWarpRenderer {
     gl.bufferData(gl.ARRAY_BUFFER, topology.lipZones, gl.STATIC_DRAW);
     gl.bindBuffer(gl.ARRAY_BUFFER, r.toneBuffer);
     gl.bufferData(gl.ARRAY_BUFFER, toneWeights(topology), gl.STATIC_DRAW);
+    gl.bindBuffer(gl.ARRAY_BUFFER, r.featherWideBuffer);
+    gl.bufferData(gl.ARRAY_BUFFER, wideFeatherWeights(topology), gl.STATIC_DRAW);
+    gl.bindBuffer(gl.ARRAY_BUFFER, r.foreshortenBuffer);
+    gl.bufferData(gl.ARRAY_BUFFER, new Float32Array(topology.vertexCount).fill(1), gl.DYNAMIC_DRAW);
     this.personaLowDirty = true;
     if (!this.eyeFadeWeights || this.eyeFadeWeights.length !== topology.vertexCount) {
       this.eyeFadeWeights = new Float32Array(topology.vertexCount);
@@ -1341,6 +1426,39 @@ export class MeshWarpRenderer {
     gl.bindBuffer(gl.ARRAY_BUFFER, r.delightBuffer);
     gl.enableVertexAttribArray(loc.aDelight);
     gl.vertexAttribPointer(loc.aDelight, 1, gl.FLOAT, false, 0, 0);
+
+    gl.bindBuffer(gl.ARRAY_BUFFER, r.featherWideBuffer);
+    gl.enableVertexAttribArray(loc.aFeatherWide);
+    gl.vertexAttribPointer(loc.aFeatherWide, 1, gl.FLOAT, false, 0, 0);
+
+    gl.bindBuffer(gl.ARRAY_BUFFER, r.foreshortenBuffer);
+    if (opts.foreshorten) gl.bufferData(gl.ARRAY_BUFFER, opts.foreshorten, gl.DYNAMIC_DRAW);
+    gl.enableVertexAttribArray(loc.aForeshorten);
+    gl.vertexAttribPointer(loc.aForeshorten, 1, gl.FLOAT, false, 0, 0);
+    gl.uniform1f(loc.uForeshortenOn, opts.foreshorten ? 1 : 0);
+    gl.uniform1f(loc.uTwoBand, opts.twoBand ? 1 : 0);
+
+    // R4 segmentation masks on unit 3 (uploaded when the segmenter produced a new frame).
+    const seg = opts.segmentation;
+    gl.activeTexture(gl.TEXTURE3);
+    gl.bindTexture(gl.TEXTURE_2D, r.segTexture);
+    if (seg) {
+      if (seg.dirty || !this.segUploaded) {
+        gl.pixelStorei(gl.UNPACK_FLIP_Y_WEBGL, false);
+        gl.pixelStorei(gl.UNPACK_PREMULTIPLY_ALPHA_WEBGL, false);
+        gl.texImage2D(gl.TEXTURE_2D, 0, gl.RGBA, seg.masks.width, seg.masks.height, 0, gl.RGBA, gl.UNSIGNED_BYTE, seg.masks.data);
+        gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MIN_FILTER, gl.LINEAR);
+        gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MAG_FILTER, gl.LINEAR);
+        gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_WRAP_S, gl.CLAMP_TO_EDGE);
+        gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_WRAP_T, gl.CLAMP_TO_EDGE);
+        this.segUploaded = true;
+      }
+      gl.uniform4f(loc.uSegSrcMap, seg.srcMap[0], seg.srcMap[1], Math.max(1, seg.srcMap[2]), Math.max(1, seg.srcMap[3]));
+      gl.uniform1f(loc.uSegMirror, seg.mirror ? 1 : 0);
+    }
+    gl.uniform1i(loc.uSegMask, 3);
+    gl.uniform1f(loc.uSegOn, seg && seg.masks.updates > 0 ? 1 : 0);
+    gl.activeTexture(gl.TEXTURE0);
 
     // R3 relighting inputs on units 1 and 2 (bound whether or not the passes ran this frame).
     const rl = r.relight;

@@ -60,6 +60,10 @@ export interface RealismDebugState {
   relightRadius: number;
   /** True when the symmetric de-light bands are loaded for the current persona. */
   symmetricDelight: boolean;
+  /** R4 segmenter state. */
+  segmentation: { ready: boolean; active: boolean; updates: number; backend: string; error: string | null };
+  /** Share of the persona face oval inpainted at load (flag personaInpaint), null when off. */
+  personaInpaintShare: number | null;
   renderer: 'webgl2' | 'webgl' | 'canvas2d';
   pose: HeadPose;
   isSpeaking: boolean;
@@ -91,6 +95,10 @@ export interface RealismFrameCapture {
   warpPositions: Float32Array;
   /** Landmarks re-detected on the output frame, in output-canvas pixels; null if none found. */
   outputLandmarks: Float32Array | null;
+  /** Where the source frame sits on the canvas (for mapping the masks). */
+  layout: { offsetX: number; offsetY: number; drawWidth: number; drawHeight: number };
+  /** R4 segmentation masks at capture time (packed RGBA, source-normalised), null when off. */
+  masks: { width: number; height: number; data: Uint8ClampedArray } | null;
   /** True when the driver was drawn mirrored (webcam/clip); output detection un-mirrors to match. */
   mirror: boolean;
   mar: number;
@@ -202,6 +210,9 @@ export interface SerializedCapture {
   overlayPng: string | null;
   /** True when the canvases are shown mirrored (webcam-style). */
   mirror: boolean;
+  layout: { offsetX: number; offsetY: number; drawWidth: number; drawHeight: number };
+  /** PNG of the packed segmentation masks (R hair, G body skin, B face skin, A accessories), null when off. */
+  masksPng: string | null;
   landmarks: number[];
   warpPositions: number[];
   outputLandmarks: number[] | null;
@@ -277,6 +288,14 @@ function png(canvas: HTMLCanvasElement): string {
   return canvas.toDataURL('image/png');
 }
 
+function masksPng(m: { width: number; height: number; data: Uint8ClampedArray }): string {
+  const c = document.createElement('canvas');
+  c.width = m.width;
+  c.height = m.height;
+  c.getContext('2d')!.putImageData(new ImageData(new Uint8ClampedArray(m.data), m.width, m.height), 0, 0);
+  return c.toDataURL('image/png');
+}
+
 function loadImage(src: string): Promise<HTMLImageElement> {
   return new Promise((resolve, reject) => {
     const img = new Image();
@@ -340,6 +359,8 @@ export function installRealismWindowHook(app?: RealismAppHooks): RealismWindowHo
         driverPng: png(c.driver),
         overlayPng: c.overlay ? png(c.overlay) : null,
         mirror: c.mirror,
+        layout: c.layout,
+        masksPng: c.masks ? masksPng(c.masks) : null,
         landmarks: Array.from(c.landmarks),
         warpPositions: Array.from(c.warpPositions),
         outputLandmarks: c.outputLandmarks ? Array.from(c.outputLandmarks) : null,

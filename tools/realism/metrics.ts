@@ -1225,3 +1225,54 @@ export function traceStats(series: number[]): TraceStats | null {
   for (let i = 1; i < n; i++) steps += Math.abs(series[i] - series[i - 1]);
   return { updates: n, min: Math.min(...series), max: Math.max(...series), std, meanStep: n > 1 ? steps / (n - 1) : 0 };
 }
+
+// --- R4: occlusion leak from the segmentation masks -------------------------------------------
+
+export interface OcclusionLeak {
+  /** Opaque persona-layer pixels examined (inside the face box × 1.3). */
+  personaPixels: number;
+  /** Share of those pixels where the wearer's hair mask is ≥ 0.5 (ghost strands). */
+  ghostHairShare: number;
+  /** Share where the body-skin mask is ≥ 0.5 (a hand in front of the face). */
+  handLeakShare: number;
+  /** Share where the accessories mask is ≥ 0.5 (the wearer's glasses). */
+  glassesLeakShare: number;
+}
+
+/**
+ * Where the persona layer still covers the wearer's hair, hand or glasses. `masks` is the packed
+ * RGBA mask image (R hair, G body skin, B face skin, A accessories) in source-normalised
+ * coordinates; `layout` places the source on the canvas and `mirror` flips x.
+ */
+export function occlusionLeak(
+  overlay: RgbaImage,
+  masks: RgbaImage,
+  layout: { offsetX: number; offsetY: number; drawWidth: number; drawHeight: number },
+  mirror: boolean,
+  points: Landmarks
+): OcclusionLeak | null {
+  const regions = faceRegions(points, overlay.width, overlay.height);
+  const box = clampRect(expandRect(regions.ovalBox, 1.3, 1.3), overlay.width, overlay.height);
+  const x0 = Math.floor(box.x), y0 = Math.floor(box.y), x1 = Math.ceil(box.x + box.w), y1 = Math.ceil(box.y + box.h);
+  let n = 0, hair = 0, hand = 0, glasses = 0;
+  const sample = (ch: number, u: number, v: number) => {
+    const mx = Math.min(masks.width - 1, Math.max(0, Math.round(u * masks.width - 0.5)));
+    const my = Math.min(masks.height - 1, Math.max(0, Math.round(v * masks.height - 0.5)));
+    return masks.data[(my * masks.width + mx) * 4 + ch] / 255;
+  };
+  for (let y = y0; y < y1; y++) {
+    for (let x = x0; x < x1; x++) {
+      if (overlay.data[(y * overlay.width + x) * 4 + 3] < 128) continue;
+      const sx = mirror ? overlay.width - x : x;
+      const u = (sx - layout.offsetX) / layout.drawWidth;
+      const v = (y - layout.offsetY) / layout.drawHeight;
+      if (u < 0 || u > 1 || v < 0 || v > 1) continue;
+      n++;
+      if (sample(0, u, v) >= 0.5) hair++;
+      if (sample(1, u, v) >= 0.5) hand++;
+      if (sample(3, u, v) >= 0.5) glasses++;
+    }
+  }
+  if (!n) return null;
+  return { personaPixels: n, ghostHairShare: hair / n, handLeakShare: hand / n, glassesLeakShare: glasses / n };
+}

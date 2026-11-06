@@ -14,6 +14,7 @@ const NUMERIC_KEYS: ReadonlyArray<SettingKey> = [
   'manualSmileBias',
   'eyePassThroughRadius',
   'lipFadeFloor',
+  'segmentEvery',
   'rigidPoseMinCutoff',
   'rigidPoseBeta',
   'skinToneMatch',

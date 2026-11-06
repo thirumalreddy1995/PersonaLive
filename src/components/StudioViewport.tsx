@@ -361,7 +361,9 @@ export const StudioViewport: React.FC<StudioViewportProps> = ({
         ? { tone: 'error' as const, text: status.personaMessage ?? 'Persona photo could not be used.' }
         : status?.persona === 'none'
           ? { tone: 'info' as const, text: 'Choose a face on the right to start the transformation.' }
-          : null;
+          : status?.persona === 'ready' && status.personaWarnings?.length
+            ? { tone: 'info' as const, text: status.personaWarnings.join(' ') }
+            : null;
 
   const viewModes: Array<{ id: TransformationSettings['viewMode']; label: string; icon: React.ReactNode }> = [
     { id: 'split', label: 'Split Compare', icon: <Columns className="w-3.5 h-3.5" /> },

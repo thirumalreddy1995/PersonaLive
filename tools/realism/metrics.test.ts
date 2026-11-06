@@ -42,6 +42,7 @@ import {
   shadingSample,
   shadingFollow,
   traceStats,
+  occlusionLeak,
 } from './metrics.ts';
 
 // --- Fixtures -------------------------------------------------------------------------------------
@@ -545,4 +546,32 @@ test('traceStats summarises a control trace', () => {
   assert.equal(t.meanStep, 2);
   assert.ok(Math.abs(t.std - 1) < 1e-9);
   assert.equal(traceStats([]), null);
+});
+
+test('occlusionLeak counts persona pixels over the hair, hand and glasses masks through the mirrored layout', () => {
+  const W = 64, H = 64;
+  const overlay = { width: W, height: H, data: new Uint8Array(W * H * 4) };
+  // Persona covers the whole frame opaquely.
+  for (let i = 0; i < W * H; i++) overlay.data[i * 4 + 3] = 255;
+  // Masks: left source half is hair, bottom source quarter is a hand.
+  const masks = { width: 8, height: 8, data: new Uint8Array(8 * 8 * 4) };
+  for (let y = 0; y < 8; y++) for (let x = 0; x < 8; x++) {
+    const p = (y * 8 + x) * 4;
+    if (x < 4) masks.data[p] = 255;
+    if (y >= 6) masks.data[p + 1] = 255;
+  }
+  // Landmarks: a face oval filling the frame so the examined box is the whole frame.
+  const pts = new Float32Array(468 * 2);
+  for (let i = 0; i < 468; i++) { pts[i * 2] = W / 2; pts[i * 2 + 1] = H / 2; }
+  const oval = [10, 338, 297, 332, 284, 251, 389, 356, 454, 323, 361, 288, 397, 365, 379, 378, 400, 377, 152, 148, 176, 149, 150, 136, 172, 58, 132, 93, 234, 127, 162, 21, 54, 103, 67, 109];
+  oval.forEach((idx, k) => { const a = (k / oval.length) * Math.PI * 2; pts[idx * 2] = W / 2 + Math.cos(a) * 24; pts[idx * 2 + 1] = H / 2 + Math.sin(a) * 28; });
+  const layout = { offsetX: 0, offsetY: 0, drawWidth: W, drawHeight: H };
+  const r = occlusionLeak(overlay, masks, layout, false, pts)!;
+  assert.ok(r.personaPixels > 1000);
+  assert.ok(Math.abs(r.ghostHairShare - 0.5) < 0.08, `hair ${r.ghostHairShare}`);
+  assert.ok(Math.abs(r.handLeakShare - 0.25) < 0.08, `hand ${r.handLeakShare}`);
+  assert.equal(r.glassesLeakShare, 0);
+  // Mirrored display: the same masks, the hair is now on the display's right; the share is unchanged.
+  const m = occlusionLeak(overlay, masks, layout, true, pts)!;
+  assert.ok(Math.abs(m.ghostHairShare - r.ghostHairShare) < 0.05);
 });

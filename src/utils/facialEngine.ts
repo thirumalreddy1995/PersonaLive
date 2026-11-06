@@ -17,6 +17,11 @@ import { cropUvs, planCrop } from './personaCrop.ts';
 import { delightPersona } from './personaDelight.ts';
 import { AUTO_RADIUS_EVERY, AutoRadiusState, initialAutoRadius, measureShading, shadingPatches, stepAutoRadius } from './autoRadius.ts';
 import { lumaAtScale, symmetricDelightGains, vertexBandLuma } from './faceSymmetry.ts';
+import { FaceSegmenter } from './segmenter.ts';
+import { PackedMasks, emptyMasks, sampleMask } from './segmentation.ts';
+import { dilateMask, inpaintMasked } from './inpaint.ts';
+import { foreshortenWeights } from './foreshorten.ts';
+import { FACE_OVAL_RING } from './personaDelight.ts';
 import { READBACK_SIZE } from './meshWarpRenderer.ts';
 import { CameraMatchState, initialCameraMatch, stepCameraMatch, CAMERA_MATCH_WARM_UPDATES, cameraMatchDue } from './cameraMatch.ts';
 import { RestMouthCalibrator, lipFadeWindow } from './restMouth.ts';
@@ -214,6 +219,16 @@ export class RealtimeFacialEngine {
   /** R3c symmetric de-light: per-vertex persona luma at the DELIGHT_SCALES and the radius the gains were built for. */
   private delightBands: Float32Array[] | null = null;
   private delightRadius = -1;
+  /** R4 segmentation: the segmenter, its EMA masks, whether they changed since the last upload and whether they drive this frame. */
+  private segmenter = new FaceSegmenter();
+  private masks: PackedMasks = emptyMasks();
+  private masksDirty = false;
+  private segActive = false;
+  private segUpdates = 0;
+  /** R4 §4 per-vertex foreshortening weights (reused buffer). */
+  private foreshorten: Float32Array | null = null;
+  /** Share of the persona's face oval that was inpainted at load (flag personaInpaint). */
+  private personaInpaintShare: number | null = null;
   /** Resting mouth aperture learned from frontal frames (realism flag restMouth, R3 item 1). */
   private restMouth = new RestMouthCalibrator();
   /** Smoothed screen velocity of the face (canvas px per frame) for motion blur and the steady camera match. */
@@ -271,7 +286,7 @@ export class RealtimeFacialEngine {
 
     // Flags that change how the persona is prepared take effect by re-preparing it.
     this.flagsUnsubscribe = realismFlags.subscribe((_flags, changed) => {
-      if ((changed.includes('syntheticSuite') || changed.includes('personaCrop') || changed.includes('personaDelight') || changed.includes('symmetricDelight')) && this.personaImage) void this.preparePersona();
+      if ((changed.includes('syntheticSuite') || changed.includes('personaCrop') || changed.includes('personaDelight') || changed.includes('symmetricDelight') || changed.includes('personaInpaint')) && this.personaImage) void this.preparePersona();
       if (changed.includes('autoRadius')) {
         this.autoRadius = initialAutoRadius();
         this.autoRadiusTrace = [];
@@ -307,6 +322,8 @@ export class RealtimeFacialEngine {
       });
       if (this.disposed) return;
       this.patchStatus({ model: 'ready', modelProgress: 1, backend: this.tracker.backend, modelMessage: 'Face tracking ready' });
+      // R4: the segmenter loads in the background; until it is ready the geometric fallbacks stay on.
+      if (this.tracker.fileset) void this.segmenter.load(this.tracker.fileset);
       // Persona may have been selected while the model was still loading.
       if (this.personaImage && this.status.persona !== 'ready') void this.preparePersona();
     } catch (err) {
@@ -443,6 +460,7 @@ export class RealtimeFacialEngine {
     this.flagsUnsubscribe = null;
     if (isRealismDebugEnabled()) setRealismEngine(null);
     this.tracker.dispose();
+    this.segmenter.dispose();
     this.warp.dispose();
   }
 
@@ -506,6 +524,20 @@ export class RealtimeFacialEngine {
           this.personaDelightRange = res.range;
         }
       }
+      // R4 (flag personaInpaint): segment the photo and inpaint hair and glasses inside the face oval.
+      this.personaInpaintShare = null;
+      const warnings: string[] = [];
+      if (realismFlags.get().personaInpaint) {
+        const share = await this.inpaintPersona(texture, uv).then((t) => {
+          if (t) texture = t.canvas;
+          return t?.share ?? null;
+        });
+        if (this.disposed || token !== this.personaPrepareToken) return;
+        this.personaInpaintShare = share;
+        if (share !== null && share > 0.02) warnings.push(`Hair or glasses covered ${(share * 100).toFixed(0)}% of the face skin in this photo and were filled in; for best likeness retake without glasses and with the hair off the face.`);
+        if (share === null) warnings.push('The photo could not be checked for hair or glasses over the face (segmenter unavailable).');
+      }
+      this.patchStatus({ personaWarnings: warnings });
       // R3c (flag symmetricDelight): per-vertex band luma of the final texture for the mirror split.
       this.delightBands = null;
       this.delightRadius = -1;
@@ -637,6 +669,18 @@ export class RealtimeFacialEngine {
       tracked = this.tracker.detectVideo(src.source, timestamp);
     }
     profiler.end('track');
+    // R4 §1: segment the source every N frames into the EMA masks.
+    const segFlags = realismFlags.get();
+    const segEvery = Math.max(1, Math.round(settings.segmentEvery ?? 2));
+    if (segFlags.segmentation && src && this.segmenter.ready && this.frameIndex % segEvery === 0) {
+      profiler.begin('segment');
+      if (this.segmenter.segmentVideo(src.source, timestamp, this.masks)) {
+        this.masksDirty = true;
+        this.segUpdates++;
+      }
+      profiler.end('segment');
+    }
+    this.segActive = segFlags.segmentation && this.segmenter.ready && this.masks.updates > 0;
     if (tracked && layout) {
       this.ingestLandmarks(tracked.landmarks, layout, timestamp, tracked.transform);
       this.lastFace = tracked;
@@ -1009,7 +1053,13 @@ export class RealtimeFacialEngine {
         : undefined,
       motionBlurPx: flags.motionBlur ? [this.headVelocity.x * MOTION_BLUR_EXPOSURE, -this.headVelocity.y * MOTION_BLUR_EXPOSURE] : undefined,
       softHoles: flags.softHoles,
+      segmentation: this.segActive
+        ? { masks: this.masks, dirty: this.masksDirty, srcMap: [layout.offsetX, layout.offsetY, layout.drawWidth, layout.drawHeight], mirror: layout.mirror }
+        : undefined,
+      twoBand: flags.twoBandBlend && relightOn,
+      foreshorten: flags.foreshortenFade && this.warp.personaUvs ? (this.foreshorten = foreshortenWeights(this.warpPositions, this.warp.personaUvs, this.topology.triangles, this.topology.vertexCount, this.foreshorten ?? undefined)) : undefined,
     });
+    this.masksDirty = false;
 
     // R3c: the auto-radius readbacks sit between the camera-match ones.
     if (flags.autoRadius && relightOn && this.warp.supportsReadback && !this.autoRadiusPending && this.frameIndex % AUTO_RADIUS_EVERY === 7) {
@@ -1050,6 +1100,61 @@ export class RealtimeFacialEngine {
         this.cameraMatchTrace.push(this.cameraMatch.lodBias);
       });
     }
+  }
+
+  /**
+   * R4 persona inpaint: masks hair and accessories (from the segmenter) inside the slightly dilated
+   * face oval of the persona texture and fills them from the surrounding skin. Returns the new
+   * texture canvas and the share of the oval that was replaced, or null when the segmenter is off.
+   */
+  private async inpaintPersona(texture: HTMLImageElement | HTMLCanvasElement, uv: Float32Array): Promise<{ canvas: HTMLCanvasElement; share: number } | null> {
+    if (!this.segmenter.ready) {
+      // Give a just-started segmenter a moment; persona preparation is not time-critical.
+      await new Promise((r) => setTimeout(r, 1500));
+      if (!this.segmenter.ready) return null;
+    }
+    const masks = await this.segmenter.segmentImage(texture);
+    if (!masks) return null;
+    const tw = texture instanceof HTMLImageElement ? texture.naturalWidth : texture.width;
+    const th = texture instanceof HTMLImageElement ? texture.naturalHeight : texture.height;
+    const c = document.createElement('canvas');
+    c.width = tw;
+    c.height = th;
+    const cctx = c.getContext('2d', { willReadFrequently: true })!;
+    cctx.drawImage(texture, 0, 0, tw, th);
+    const px = cctx.getImageData(0, 0, tw, th);
+    // Face oval (dilated 5%) in texture pixels.
+    const oval = FACE_OVAL_RING.map((i) => ({ x: uv[i * 2] * tw, y: uv[i * 2 + 1] * th }));
+    const cx = oval.reduce((s, p) => s + p.x, 0) / oval.length, cy = oval.reduce((s, p) => s + p.y, 0) / oval.length;
+    const grown = oval.map((p) => ({ x: cx + (p.x - cx) * 1.05, y: cy + (p.y - cy) * 1.05 }));
+    const minX = Math.max(0, Math.floor(Math.min(...grown.map((p) => p.x)))), maxX = Math.min(tw - 1, Math.ceil(Math.max(...grown.map((p) => p.x))));
+    const minY = Math.max(0, Math.floor(Math.min(...grown.map((p) => p.y)))), maxY = Math.min(th - 1, Math.ceil(Math.max(...grown.map((p) => p.y))));
+    const mask = new Uint8Array(tw * th);
+    let inside = 0, masked = 0;
+    const insidePoly = (x: number, y: number) => {
+      let inn = false;
+      for (let i = 0, j = grown.length - 1; i < grown.length; j = i++) {
+        const a = grown[i], b = grown[j];
+        if (a.y > y !== b.y > y && x < ((b.x - a.x) * (y - a.y)) / (b.y - a.y) + a.x) inn = !inn;
+      }
+      return inn;
+    };
+    for (let y = minY; y <= maxY; y++) {
+      for (let x = minX; x <= maxX; x++) {
+        if (!insidePoly(x + 0.5, y + 0.5)) continue;
+        inside++;
+        const u = (x + 0.5) / tw, v = (y + 0.5) / th;
+        if (Math.max(sampleMask(masks, 0, u, v), sampleMask(masks, 3, u, v)) >= 0.5) {
+          mask[y * tw + x] = 1;
+          masked++;
+        }
+      }
+    }
+    if (!masked) return { canvas: c, share: 0 };
+    const grownMask = dilateMask(mask, tw, th, Math.max(1, Math.round(tw / 256)));
+    inpaintMasked(px.data, tw, th, grownMask);
+    cctx.putImageData(px, 0, 0);
+    return { canvas: c, share: inside ? masked / inside : 0 };
   }
 
   /**
@@ -1112,8 +1217,9 @@ export class RealtimeFacialEngine {
     octx.clearRect(0, 0, W, H);
     octx.drawImage(this.warp.canvas, 0, 0, W, H);
     const flags = realismFlags.get();
-    if (flags.foreheadHarmonize) CranialBoundaryBlender.harmonizeForeheadBoundary(octx, this.warpPositions);
-    if (flags.hairlineSoften) CranialBoundaryBlender.softenHairlineEdges(octx, this.warpPositions);
+    // R4: with segmentation masks driving the hairline, the geometric passes are the fallback only.
+    if (flags.foreheadHarmonize && !this.segActive) CranialBoundaryBlender.harmonizeForeheadBoundary(octx, this.warpPositions);
+    if (flags.hairlineSoften && !this.segActive) CranialBoundaryBlender.softenHairlineEdges(octx, this.warpPositions);
   }
 
   /** Estimates the wearer's facial skin tone across 5 spatial zones and derives lighting gains. */
@@ -1527,6 +1633,8 @@ export class RealtimeFacialEngine {
         warpPositions: Float32Array.from(this.warpPositions),
         outputLandmarks: null,
         mirror: layout.mirror,
+        layout: { offsetX: layout.offsetX, offsetY: layout.offsetY, drawWidth: layout.drawWidth, drawHeight: layout.drawHeight },
+        masks: this.segActive ? { width: this.masks.width, height: this.masks.height, data: Uint8ClampedArray.from(this.masks.data) } : null,
         mar: this.lastMar,
         pose: { ...this.lastPose },
         isSpeaking: this.lastMetrics?.isSpeaking ?? false,
@@ -1594,6 +1702,8 @@ export class RealtimeFacialEngine {
           autoRadiusLast: this.autoRadiusLast,
           relightRadius: realismFlags.get().autoRadius ? this.autoRadius.radius : this.settings.relightRadius,
           symmetricDelight: !!this.delightBands,
+          segmentation: { ready: this.segmenter.ready, active: this.segActive, updates: this.segUpdates, backend: this.segmenter.backend, error: this.segmenter.error },
+          personaInpaintShare: this.personaInpaintShare,
           renderer: this.status.renderer,
           pose: { ...this.lastPose },
           isSpeaking: this.lastMetrics?.isSpeaking ?? false,
