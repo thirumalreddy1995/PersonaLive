@@ -109,6 +109,8 @@ export interface BrowserOptions {
   browser: string;
   software: boolean;
   headed: boolean;
+  /** Ask Chrome for the high-performance (discrete) GPU on hybrid-graphics laptops. */
+  highPerformanceGpu?: boolean;
 }
 
 export async function launchBrowser(opts: BrowserOptions): Promise<Browser> {
@@ -119,6 +121,7 @@ export async function launchBrowser(opts: BrowserOptions): Promise<Browser> {
     '--use-fake-ui-for-media-stream',
   ];
   if (opts.software) chromeArgs.push('--use-gl=angle', '--use-angle=swiftshader', '--enable-unsafe-swiftshader');
+  if (opts.highPerformanceGpu) chromeArgs.push('--force_high_performance_gpu');
   const channels = opts.browser === 'chromium' ? [undefined] : [opts.browser, undefined];
   let lastError: unknown = null;
   for (const channel of channels) {
@@ -130,6 +133,17 @@ export async function launchBrowser(opts: BrowserOptions): Promise<Browser> {
     }
   }
   throw new Error(`No browser could be launched. Install Chrome, or run \`npx playwright install chromium\`. Last error: ${lastError}`);
+}
+
+/** The WebGL adapter actually used by the page (unmasked renderer string), e.g. which GPU rendered. */
+export async function webglRenderer(page: Page): Promise<string | null> {
+  return page.evaluate(() => {
+    const c = document.createElement('canvas');
+    const gl = c.getContext('webgl2') ?? c.getContext('webgl');
+    if (!gl) return null;
+    const ext = gl.getExtension('WEBGL_debug_renderer_info');
+    return ext ? String(gl.getParameter(ext.UNMASKED_RENDERER_WEBGL)) : String(gl.getParameter(gl.RENDERER));
+  });
 }
 
 export async function hookState(page: Page): Promise<RealismDebugState | null> {

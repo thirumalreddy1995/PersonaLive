@@ -33,6 +33,7 @@
  *   --no-identity             skip the identity guard (OpenCV Zoo YuNet + SFace via realism-review/.venv)
  *   --browser <chrome|chromium|msedge>   browser channel (default chrome: it has H.264)
  *   --software                force SwiftShader instead of the GPU
+ *   --gpu <default|high>      high asks Chrome for the discrete (high-performance) GPU; the adapter used is recorded either way
  *   --headed                  show the browser window
  */
 import { ChildProcess, execSync } from 'node:child_process';
@@ -44,7 +45,7 @@ import { parseSettingsString } from '../../src/realism/settings.ts';
 import type { RealismDebugState, SerializedBurst, SerializedCapture } from '../../src/realism/debug.ts';
 import * as M from './metrics.ts';
 import { SheetRow, blank, blit, compositeOnChecker, contactSheet, crop, decodeImageFile, decodePngDataUrl, drawText, imageDataUrl, scaleImage, writeDataUrlPng, writePng } from './png.ts';
-import { REVIEW_DIR, ROOT, describeLoad, driveAppShell, hookState, launchBrowser, sleep, startPreview, systemLoad, waitForHookState } from './session.ts';
+import { REVIEW_DIR, ROOT, describeLoad, driveAppShell, hookState, launchBrowser, sleep, startPreview, systemLoad, waitForHookState, webglRenderer } from './session.ts';
 import { regionsSheet } from './regions.ts';
 import { PersonaEntry, loadPersonaSet } from './personaSet.ts';
 import { IdentityFrame, IdentitySummary, flipHorizontal, identityAvailable, runIdentity, summarizeIdentity } from './identity.ts';
@@ -70,6 +71,7 @@ interface Args {
   browser: string;
   software: boolean;
   headed: boolean;
+  highPerformanceGpu: boolean;
 }
 
 function parseArgs(argv: string[]): Args {
@@ -89,6 +91,7 @@ function parseArgs(argv: string[]): Args {
     browser: 'chrome',
     software: false,
     headed: false,
+    highPerformanceGpu: false,
     identity: true,
     personaPhoto: null,
   };
@@ -153,6 +156,12 @@ function parseArgs(argv: string[]): Args {
       case '--browser':
         args.browser = next();
         break;
+      case '--gpu': {
+        const g = next();
+        if (g !== 'default' && g !== 'high') throw new Error('--gpu takes default or high');
+        args.highPerformanceGpu = g === 'high';
+        break;
+      }
       case '--software':
         args.software = true;
         break;
@@ -790,10 +799,12 @@ async function main() {
     const liveSettings = await page.evaluate(() => window.__personaLiveRealism!.settings?.get() ?? null);
     // The review measures the WebGL2 pipeline; a Canvas 2D fallback means a shader failed to compile.
     if (state.renderer !== 'webgl2' && !args.software) throw new Error(`renderer is ${state.renderer}, not webgl2: a shader or context problem in this build (see the browser console)`);
+    const gpuRenderer = await webglRenderer(page);
+    console.log(`webgl adapter: ${gpuRenderer ?? 'unknown'}`);
     const load = systemLoad();
     console.log(`system load at start: ${describeLoad(load)}`);
     const reviewBuild = await page.evaluate(() => window.__personaLiveRealism?.reviewBuild ?? false);
-    const app: Record<string, unknown> & { persona: string } = { url, browser: args.browser, canvas: [state.canvasWidth, state.canvasHeight], persona: args.persona ?? 'default', settingsOverrides: parsedSettings.settings, settings: liveSettings, system: load, reviewBuild };
+    const app: Record<string, unknown> & { persona: string } = { url, browser: args.browser, canvas: [state.canvasWidth, state.canvasHeight], persona: args.persona ?? 'default', settingsOverrides: parsedSettings.settings, settings: liveSettings, system: load, reviewBuild, gpuRenderer, highPerformanceGpu: args.highPerformanceGpu };
 
     if (!personas) {
       // --- Default persona: full frame dump per clip ----------------------------------------------
