@@ -40,21 +40,25 @@ export function systemLoad(): SystemLoad {
   const lines = tasks ? tasks.split(/\r?\n/).filter((l) => l.trim()) : [];
   const processes = tasks ? lines.length : null;
   const chromeProcesses = tasks ? lines.filter((l) => /^"chrome\.exe"/i.test(l)).length : null;
-  const cpuRaw = run('wmic cpu get loadpercentage /value');
-  const cpuMatch = cpuRaw?.match(/LoadPercentage=(\d+)/);
-  const cpuPercent = cpuMatch ? Number(cpuMatch[1]) : null;
+  // CPU: wmic is gone on recent Windows builds; CIM works everywhere.
+  const cpuRaw = run('powershell -NoProfile -Command "(Get-CimInstance Win32_Processor | Measure-Object -Property LoadPercentage -Average).Average"');
+  const cpuPercent = cpuRaw && /\d/.test(cpuRaw) ? Math.round(Number(cpuRaw.trim())) : null;
+  // GPU: the Windows 3D-engine counters cover every adapter (the browser may run on the integrated
+  // GPU while nvidia-smi reports the discrete one idle); nvidia-smi is reported alongside when present.
   let gpuPercent: number | null = null;
   let gpuSource = 'none';
+  const ctr = run('powershell -NoProfile -Command "(Get-Counter \'\\GPU Engine(*engtype_3D)\\Utilization Percentage\').CounterSamples | Measure-Object -Property CookedValue -Sum | Select-Object -ExpandProperty Sum"');
+  if (ctr && /\d/.test(ctr)) {
+    gpuPercent = Math.round(Number(ctr.trim().replace(',', '.')) * 10) / 10;
+    gpuSource = 'GPU Engine 3D counters (all adapters)';
+  }
   const smi = run('nvidia-smi --query-gpu=utilization.gpu --format=csv,noheader,nounits');
   if (smi && /\d/.test(smi)) {
-    gpuPercent = Number(smi.trim().split(/\r?\n/)[0]);
-    gpuSource = 'nvidia-smi';
-  } else {
-    const ctr = run('powershell -NoProfile -Command "(Get-Counter \'\\GPU Engine(*engtype_3D)\\Utilization Percentage\').CounterSamples | Measure-Object -Property CookedValue -Sum | Select-Object -ExpandProperty Sum"');
-    if (ctr && /\d/.test(ctr)) {
-      gpuPercent = Math.round(Number(ctr.trim().replace(',', '.')) * 10) / 10;
-      gpuSource = 'GPU Engine 3D counters';
-    }
+    const nv = Number(smi.trim().split(/\r?\n/)[0]);
+    if (gpuPercent === null) {
+      gpuPercent = nv;
+      gpuSource = 'nvidia-smi';
+    } else gpuSource += `, nvidia-smi ${nv}%`;
   }
   return { processes, chromeProcesses, cpuPercent, gpuPercent, gpuSource, at: new Date().toISOString() };
 }
