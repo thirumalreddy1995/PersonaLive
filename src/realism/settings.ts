@@ -15,12 +15,14 @@ const NUMERIC_KEYS: ReadonlyArray<SettingKey> = [
   'eyePassThroughRadius',
   'lipFadeFloor',
   'segmentEvery',
+  'segmentationStrength',
   'rigidPoseMinCutoff',
   'rigidPoseBeta',
   'skinToneMatch',
   'relightRadius',
 ];
 const BOOLEAN_KEYS: ReadonlyArray<SettingKey> = [
+  'segmentCpu',
   'audioReactiveLipSync',
   'eyeGazeSync',
   'keepRealMouth',

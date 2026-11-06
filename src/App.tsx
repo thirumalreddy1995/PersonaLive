@@ -106,6 +106,8 @@ export default function App() {
     eyePassThroughRadius: 1,
     lipFadeFloor: 0,
     segmentEvery: 2,
+    segmentationStrength: 1,
+    segmentCpu: false,
     personaTextureSize: 1024,
     rigidPoseMinCutoff: 1.2,
     rigidPoseBeta: 0.05,

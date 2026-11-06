@@ -135,6 +135,8 @@ export default defineConfig(({ mode }) => {
     base: BASE_PATH,
     define: { __PL_BUILD_ID__: JSON.stringify(BUILD_ID), __PL_APP_VERSION__: JSON.stringify(APP_VERSION), __PL_REVIEW_BUILD__: JSON.stringify(reviewBuild) },
     plugins: [react(), tailwindcss(), mediapipeWasm(), localPersonas(), stampServiceWorker()],
+    // The segmentation worker (R4) is a classic IIFE worker: MediaPipe loads its WASM glue with importScripts.
+    worker: { format: 'iife' as const },
     resolve: {
       alias: {
         '@': projectRoot,

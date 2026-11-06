@@ -42,7 +42,7 @@ export async function fetchModel(url: string, onProgress: (p: number) => void): 
   // 1. Cache Storage (persists across launches, works offline after first run)
   let cache: Cache | null = null;
   try {
-    if ('caches' in window) {
+    if (typeof caches !== 'undefined') {
       cache = await caches.open(MODEL_CACHE);
       const hit = await cache.match(url);
       if (hit) {

@@ -60,6 +60,20 @@ export function packMasks(
   return target;
 }
 
+/** Packs a category mask (one byte per pixel, SEG_CATEGORY values) as binary masks with the same EMA. */
+export function packCategory(target: PackedMasks, category: ArrayLike<number>, alpha = SEG_EMA): PackedMasks {
+  const n = target.width * target.height;
+  const hair = new Float32Array(n), body = new Float32Array(n), face = new Float32Array(n), acc = new Float32Array(n);
+  for (let i = 0; i < n; i++) {
+    const c = category[i];
+    if (c === SEG_CATEGORY.hair) hair[i] = 1;
+    else if (c === SEG_CATEGORY.bodySkin) body[i] = 1;
+    else if (c === SEG_CATEGORY.faceSkin) face[i] = 1;
+    else if (c === SEG_CATEGORY.accessories) acc[i] = 1;
+  }
+  return packMasks(target, hair, body, face, acc, alpha);
+}
+
 /** Bilinear sample of one packed channel (0 hair, 1 body-skin, 2 face-skin, 3 accessories) at normalised source coordinates. */
 export function sampleMask(m: PackedMasks, channel: 0 | 1 | 2 | 3, u: number, v: number): number {
   const x = Math.min(Math.max(u * m.width - 0.5, 0), m.width - 1);

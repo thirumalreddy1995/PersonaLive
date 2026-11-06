@@ -8,9 +8,9 @@
  * per-vertex weight is the minimum over the vertex's triangles. Pure and unit-testable.
  */
 
-/** Fade starts when a triangle is compressed below this share of its rest area and is complete below FADE_END. */
-export const FORESHORTEN_FADE_START = 0.4;
-export const FORESHORTEN_FADE_END = 0.12;
+/** Fade starts when a triangle is compressed below this share of its rest area and is complete below FADE_END (a 40° turn compresses the far cheek to ~0.3; only slivers and back faces fade). */
+export const FORESHORTEN_FADE_START = 0.22;
+export const FORESHORTEN_FADE_END = 0.05;
 
 function signedArea(p: ArrayLike<number>, a: number, b: number, c: number): number {
   const ax = p[a * 2], ay = p[a * 2 + 1];

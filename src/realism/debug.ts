@@ -61,7 +61,7 @@ export interface RealismDebugState {
   /** True when the symmetric de-light bands are loaded for the current persona. */
   symmetricDelight: boolean;
   /** R4 segmenter state. */
-  segmentation: { ready: boolean; active: boolean; updates: number; backend: string; error: string | null };
+  segmentation: { ready: boolean; active: boolean; updates: number; backend: string; error: string | null; lastMs: number; lastPackMs: number; bitmapMs: number; inferMs: number; readMs: number; roundTripMs: number; submits: number };
   /** Share of the persona face oval inpainted at load (flag personaInpaint), null when off. */
   personaInpaintShare: number | null;
   renderer: 'webgl2' | 'webgl' | 'canvas2d';

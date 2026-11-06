@@ -291,6 +291,7 @@ export class RealtimeFacialEngine {
         this.autoRadius = initialAutoRadius();
         this.autoRadiusTrace = [];
       }
+      if (changed.includes('segmentation') || changed.includes('personaInpaint')) this.ensureSegmenter();
       if (changed.includes('cameraMatch')) {
         this.cameraMatch = initialCameraMatch();
         this.cameraMatchTrace = [];
@@ -322,8 +323,8 @@ export class RealtimeFacialEngine {
       });
       if (this.disposed) return;
       this.patchStatus({ model: 'ready', modelProgress: 1, backend: this.tracker.backend, modelMessage: 'Face tracking ready' });
-      // R4: the segmenter loads in the background; until it is ready the geometric fallbacks stay on.
-      if (this.tracker.fileset) void this.segmenter.load(this.tracker.fileset);
+      // R4: the segmenter loads in the background only when a flag needs it; until it is ready the geometric fallbacks stay on.
+      this.ensureSegmenter();
       // Persona may have been selected while the model was still loading.
       if (this.personaImage && this.status.persona !== 'ready') void this.preparePersona();
     } catch (err) {
@@ -672,12 +673,9 @@ export class RealtimeFacialEngine {
     // R4 §1: segment the source every N frames into the EMA masks.
     const segFlags = realismFlags.get();
     const segEvery = Math.max(1, Math.round(settings.segmentEvery ?? 2));
-    if (segFlags.segmentation && src && this.segmenter.ready && this.frameIndex % segEvery === 0) {
+    if (segFlags.segmentation && src && this.segmenter.idle && this.frameIndex % segEvery === 0) {
       profiler.begin('segment');
-      if (this.segmenter.segmentVideo(src.source, timestamp, this.masks)) {
-        this.masksDirty = true;
-        this.segUpdates++;
-      }
+      this.segmenter.submitVideo(src.source, timestamp);
       profiler.end('segment');
     }
     this.segActive = segFlags.segmentation && this.segmenter.ready && this.masks.updates > 0;
@@ -1054,7 +1052,7 @@ export class RealtimeFacialEngine {
       motionBlurPx: flags.motionBlur ? [this.headVelocity.x * MOTION_BLUR_EXPOSURE, -this.headVelocity.y * MOTION_BLUR_EXPOSURE] : undefined,
       softHoles: flags.softHoles,
       segmentation: this.segActive
-        ? { masks: this.masks, dirty: this.masksDirty, srcMap: [layout.offsetX, layout.offsetY, layout.drawWidth, layout.drawHeight], mirror: layout.mirror }
+        ? { masks: this.masks, dirty: this.masksDirty, srcMap: [layout.offsetX, layout.offsetY, layout.drawWidth, layout.drawHeight], mirror: layout.mirror, strength: clamp(s.segmentationStrength ?? 1, 0, 1) }
         : undefined,
       twoBand: flags.twoBandBlend && relightOn,
       foreshorten: flags.foreshortenFade && this.warp.personaUvs ? (this.foreshorten = foreshortenWeights(this.warpPositions, this.warp.personaUvs, this.topology.triangles, this.topology.vertexCount, this.foreshorten ?? undefined)) : undefined,
@@ -1107,12 +1105,21 @@ export class RealtimeFacialEngine {
    * face oval of the persona texture and fills them from the surrounding skin. Returns the new
    * texture canvas and the share of the oval that was replaced, or null when the segmenter is off.
    */
+  /** Starts the segmentation worker once a flag that needs it is on (and the tracker has loaded). */
+  private ensureSegmenter() {
+    const f = realismFlags.get();
+    if (!(f.segmentation || f.personaInpaint) || this.status.model !== 'ready') return;
+    void this.segmenter.load(this.settings.segmentCpu ? 'CPU' : 'GPU', this.masks, () => {
+      this.masksDirty = true;
+      this.segUpdates++;
+    });
+  }
+
   private async inpaintPersona(texture: HTMLImageElement | HTMLCanvasElement, uv: Float32Array): Promise<{ canvas: HTMLCanvasElement; share: number } | null> {
-    if (!this.segmenter.ready) {
-      // Give a just-started segmenter a moment; persona preparation is not time-critical.
-      await new Promise((r) => setTimeout(r, 1500));
-      if (!this.segmenter.ready) return null;
-    }
+    this.ensureSegmenter();
+    // The worker takes ~10 s to start on this laptop (model, WASM, GPU graph); persona preparation can wait for it.
+    for (let i = 0; i < 60 && !this.segmenter.ready && !this.segmenter.error; i++) await new Promise((r) => setTimeout(r, 500));
+    if (!this.segmenter.ready) return null;
     const masks = await this.segmenter.segmentImage(texture);
     if (!masks) return null;
     const tw = texture instanceof HTMLImageElement ? texture.naturalWidth : texture.width;
@@ -1218,8 +1225,9 @@ export class RealtimeFacialEngine {
     octx.drawImage(this.warp.canvas, 0, 0, W, H);
     const flags = realismFlags.get();
     // R4: with segmentation masks driving the hairline, the geometric passes are the fallback only.
-    if (flags.foreheadHarmonize && !this.segActive) CranialBoundaryBlender.harmonizeForeheadBoundary(octx, this.warpPositions);
-    if (flags.hairlineSoften && !this.segActive) CranialBoundaryBlender.softenHairlineEdges(octx, this.warpPositions);
+    const segDrives = this.segActive && (this.settings.segmentationStrength ?? 1) > 0.5;
+    if (flags.foreheadHarmonize && !segDrives) CranialBoundaryBlender.harmonizeForeheadBoundary(octx, this.warpPositions);
+    if (flags.hairlineSoften && !segDrives) CranialBoundaryBlender.softenHairlineEdges(octx, this.warpPositions);
   }
 
   /** Estimates the wearer's facial skin tone across 5 spatial zones and derives lighting gains. */
@@ -1702,7 +1710,7 @@ export class RealtimeFacialEngine {
           autoRadiusLast: this.autoRadiusLast,
           relightRadius: realismFlags.get().autoRadius ? this.autoRadius.radius : this.settings.relightRadius,
           symmetricDelight: !!this.delightBands,
-          segmentation: { ready: this.segmenter.ready, active: this.segActive, updates: this.segUpdates, backend: this.segmenter.backend, error: this.segmenter.error },
+          segmentation: { ready: this.segmenter.ready, active: this.segActive, updates: this.segUpdates, backend: this.segmenter.backend, error: this.segmenter.error, lastMs: this.segmenter.lastMs, lastPackMs: this.segmenter.lastPackMs, bitmapMs: this.segmenter.bitmapMs, inferMs: this.segmenter.inferMs, readMs: this.segmenter.readMs, roundTripMs: this.segmenter.roundTripMs, submits: this.segmenter.submits },
           personaInpaintShare: this.personaInpaintShare,
           renderer: this.status.renderer,
           pose: { ...this.lastPose },

@@ -1,6 +1,6 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { emptyMasks, maskedShareInPolygon, packMasks, sampleMask } from './segmentation.ts';
+import { SEG_CATEGORY, emptyMasks, maskedShareInPolygon, packCategory, packMasks, sampleMask } from './segmentation.ts';
 import { dilateMask, inpaintMasked } from './inpaint.ts';
 import { FORESHORTEN_FADE_END, foreshortenWeights } from './foreshorten.ts';
 
@@ -19,6 +19,14 @@ test('packMasks copies the first update, then EMA-blends later ones; sampleMask 
   packMasks(half, [1, 1, 0, 0], [0, 0, 0, 0], [0, 0, 0, 0], [0, 0, 0, 0]);
   assert.ok(Math.abs(sampleMask(half, 0, 0.5, 0.5) - 0.5) < 1e-6);
   assert.ok(sampleMask(half, 0, 0.1, 0.5) > 0.99 && sampleMask(half, 0, 0.9, 0.5) < 0.01);
+});
+
+test('packCategory turns a category mask into the four binary channels', () => {
+  const m = emptyMasks(2, 2);
+  packCategory(m, [SEG_CATEGORY.hair, SEG_CATEGORY.bodySkin, SEG_CATEGORY.faceSkin, SEG_CATEGORY.accessories]);
+  assert.deepEqual(Array.from(m.data), [255, 0, 0, 0, 0, 255, 0, 0, 0, 0, 255, 0, 0, 0, 0, 255]);
+  packCategory(m, [SEG_CATEGORY.background, SEG_CATEGORY.background, SEG_CATEGORY.background, SEG_CATEGORY.background], 0.5);
+  assert.equal(m.data[0], 128);
 });
 
 test('maskedShareInPolygon measures hair over the face oval of a photo', () => {
@@ -64,7 +72,7 @@ test('foreshortenWeights fades compressed and back-facing triangles only', () =>
   const flat = new Float32Array(uv.map((v) => v * 100));
   assert.deepEqual(Array.from(foreshortenWeights(flat, uv, tris, 4)), [1, 1, 1, 1]);
   // Second triangle squashed: vertex 3 pulled almost onto the shared edge → its triangle is a sliver.
-  const squashed = new Float32Array([0, 0, 100, 0, 0, 100, 52, 52]);
+  const squashed = new Float32Array([0, 0, 100, 0, 0, 100, 50.8, 50.8]);
   const w = foreshortenWeights(squashed, uv, tris, 4);
   assert.ok(w[3] < 0.5 && w[0] === 1, `sliver vertex faded (${Array.from(w)})`);
   // Vertex 3 flipped across the edge: back-facing triangle → weight 0 on its vertices (shared ones take the min).

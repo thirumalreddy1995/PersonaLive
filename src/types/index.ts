@@ -113,6 +113,10 @@ export interface TransformationSettings {
   lipFadeFloor: number;
   /** Run the segmenter every N frames (R4 §1). */
   segmentEvery: number;
+  /** 0..1: how strongly the masks remove the persona (0 = masks measured but not applied). */
+  segmentationStrength: number;
+  /** Run the segmenter on the CPU delegate instead of the GPU one (takes effect at engine start). */
+  segmentCpu: boolean;
   /** Longest edge of the persona texture after the face crop (R2 §2). */
   personaTextureSize: 512 | 1024 | 2048;
   /** One Euro minimum cutoff (Hz) of the rigid head pose behind the forehead (realism flag rigidForehead). */

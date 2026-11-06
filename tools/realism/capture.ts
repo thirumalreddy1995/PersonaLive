@@ -373,6 +373,12 @@ interface CaptureOptions {
 
 async function captureClip(page: Page, args: Args, o: CaptureOptions): Promise<ClipReport> {
   const ready = await loadClip(page, o.clipFile);
+  // R4: with the segmentation flag on, measure the steady state: wait for the worker and its first masks.
+  if (o.flagValues.segmentation) {
+    const t0 = Date.now();
+    const seg = await waitForHookState(page, 'segmenter ready', (s) => !!s?.segmentation?.ready && (s?.segmentation?.updates ?? 0) > 0, 90000).catch(() => null);
+    console.log(`  segmenter ${seg?.segmentation?.ready ? `ready after ${((Date.now() - t0) / 1000).toFixed(1)} s more` : 'NOT ready (geometric fallback measured)'}`);
+  }
   const duration = ready.videoDuration!;
   const n = o.defaultFrames;
   const times = (args.times ?? Array.from({ length: n }, (_, i) => duration * (0.1 + (0.8 * i) / Math.max(1, n - 1)))).filter((t) => t < duration - 0.1);
@@ -404,6 +410,10 @@ async function captureClip(page: Page, args: Args, o: CaptureOptions): Promise<C
   await sleep(300);
   const finalState = (await hookState(page))!;
   if (finalState.autoRadiusLast) console.log(`    auto-radius last measurement: ${JSON.stringify(finalState.autoRadiusLast)}`);
+  if (finalState.segmentation?.updates) {
+    const g = finalState.segmentation;
+    console.log(`    segmenter: ${g.backend} worker  submits ${g.submits} masks ${g.updates}  bitmap ${g.bitmapMs.toFixed(1)} ms  infer ${g.inferMs.toFixed(1)} ms  readback ${g.readMs.toFixed(1)} ms  round trip ${g.roundTripMs.toFixed(0)} ms  pack ${g.lastPackMs.toFixed(2)} ms`);
+  }
   const pending = await page.evaluate(() => window.__personaLiveRealism!.pending());
   await page.evaluate(() => window.__personaLiveRealism!.pause());
 
@@ -432,6 +442,7 @@ async function captureClip(page: Page, args: Args, o: CaptureOptions): Promise<C
       writeDataUrlPng(f.output, c.outputPng);
       writeDataUrlPng(f.driver, c.driverPng);
       if (f.overlay && c.overlayPng) writeDataUrlPng(f.overlay, c.overlayPng);
+      if (c.masksPng) writeDataUrlPng(path.join(o.clipDir, `${tag}-masks.png`), c.masksPng);
       fs.writeFileSync(
         path.join(o.clipDir, `${tag}-landmarks.json`),
         JSON.stringify({ t: c.t, driver: c.landmarks, warp: c.warpPositions, output: c.outputLandmarks })
@@ -777,6 +788,8 @@ async function main() {
     const state = (await hookState(page))!;
     // Builds before the settings hook (R0) have no `settings` on the window hook.
     const liveSettings = await page.evaluate(() => window.__personaLiveRealism!.settings?.get() ?? null);
+    // The review measures the WebGL2 pipeline; a Canvas 2D fallback means a shader failed to compile.
+    if (state.renderer !== 'webgl2' && !args.software) throw new Error(`renderer is ${state.renderer}, not webgl2: a shader or context problem in this build (see the browser console)`);
     const load = systemLoad();
     console.log(`system load at start: ${describeLoad(load)}`);
     const reviewBuild = await page.evaluate(() => window.__personaLiveRealism?.reviewBuild ?? false);

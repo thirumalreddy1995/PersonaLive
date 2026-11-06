@@ -170,17 +170,22 @@ export const TONE_WEIGHT_RINGS = 10;
  * Per-vertex weight of the R3 tone match: 1 on the face boundary (skin meets the neck and ears
  * without a colour step), falling to TONE_WEIGHT_CENTRE a few rings inward.
  */
-/** Rings from the face oval over which the R4 two-band blend fades the low frequencies (~12% of face width). */
-export const WIDE_FEATHER_RINGS = 7;
+/** Rings from the face oval over which the R4 two-band blend fades the low frequencies (~12% of face width) and the detail (~3%). */
+export const WIDE_FEATHER_RINGS = 5;
+export const NARROW_FEATHER_RINGS = 1.5;
 
-/** Per-vertex wide feather for the two-band boundary blend (R4 §3): 0 on the oval, 1 from WIDE_FEATHER_RINGS inward. */
-export function wideFeatherWeights(topology: FaceTopology): Float32Array {
-  const out = new Float32Array(topology.vertexCount);
+/** Per-vertex feather bands for the two-band boundary blend (R4 §3): [wide, narrow] per vertex, 0 on the oval, 1 from the ring count inward. */
+export function featherBandWeights(topology: FaceTopology): Float32Array {
+  const out = new Float32Array(topology.vertexCount * 2);
   for (let v = 0; v < topology.vertexCount; v++) {
     const d = topology.ovalRingDistance[v];
-    if (d < 0) { out[v] = 1; continue; }
-    const t = clamp(d / WIDE_FEATHER_RINGS, 0, 1);
-    out[v] = t * t * (3 - 2 * t);
+    const band = (rings: number) => {
+      if (d < 0) return 1;
+      const t = clamp(d / rings, 0, 1);
+      return t * t * (3 - 2 * t);
+    };
+    out[v * 2] = band(WIDE_FEATHER_RINGS);
+    out[v * 2 + 1] = band(NARROW_FEATHER_RINGS);
   }
   return out;
 }
