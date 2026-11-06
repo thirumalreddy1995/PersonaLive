@@ -395,6 +395,7 @@ async function captureClip(page: Page, args: Args, o: CaptureOptions): Promise<C
   }
   await sleep(300);
   const finalState = (await hookState(page))!;
+  if (finalState.autoRadiusLast) console.log(`    auto-radius last measurement: ${JSON.stringify(finalState.autoRadiusLast)}`);
   const pending = await page.evaluate(() => window.__personaLiveRealism!.pending());
   await page.evaluate(() => window.__personaLiveRealism!.pause());
 

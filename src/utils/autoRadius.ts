@@ -15,9 +15,9 @@ import { ciede2000, rgbToLab, type Lab } from './color.ts';
 export const AUTO_RADIUS_MIN = 0.02;
 export const AUTO_RADIUS_MAX = 0.08;
 /** Raise the radius while both smoothed excesses are below this (L for the side gap, ΔE for the neck gap). */
-export const AUTO_RADIUS_RAISE_BELOW = 2.5;
+export const AUTO_RADIUS_RAISE_BELOW = 2.0;
 /** Lower it once either smoothed excess is above this; between the two nothing moves (hysteresis). */
-export const AUTO_RADIUS_LOWER_ABOVE = 3.5;
+export const AUTO_RADIUS_LOWER_ABOVE = 3.0;
 export const AUTO_RADIUS_STEP_UP = 0.002;
 export const AUTO_RADIUS_STEP_DOWN = 0.004;
 /** EMA weight of each new measurement. */
@@ -88,6 +88,30 @@ export function toReadback(m: ReadbackMapping, x: number, y: number): { px: numb
   return { px: u * m.size, py: v * m.size };
 }
 
+export interface PatchMean {
+  /** Mean RGB (0..255) as stored: premultiplied by alpha on the persona layer. */
+  rgb: [number, number, number];
+  /** Mean alpha 0..1. */
+  alpha: number;
+  n: number;
+}
+
+/** Mean RGBA over a disk of the readback data (all pixels, premultiplied as stored); null when the disk is off the window. */
+export function patchMean(data: ArrayLike<number>, size: number, cx: number, cy: number, r: number): PatchMean | null {
+  let sr = 0, sg = 0, sb = 0, sa = 0, n = 0;
+  const x0 = Math.max(0, Math.floor(cx - r)), x1 = Math.min(size - 1, Math.ceil(cx + r));
+  const y0 = Math.max(0, Math.floor(cy - r)), y1 = Math.min(size - 1, Math.ceil(cy + r));
+  for (let y = y0; y <= y1; y++) {
+    for (let x = x0; x <= x1; x++) {
+      if ((x + 0.5 - cx) ** 2 + (y + 0.5 - cy) ** 2 > r * r) continue;
+      const p = (y * size + x) * 4;
+      sr += data[p]; sg += data[p + 1]; sb += data[p + 2]; sa += data[p + 3]; n++;
+    }
+  }
+  if (n < 4) return null;
+  return { rgb: [sr / n, sg / n, sb / n], alpha: sa / (255 * n), n };
+}
+
 /** Mean Lab of the opaque pixels in a disk of the readback data; null when none. */
 export function patchMeanLab(data: ArrayLike<number>, size: number, cx: number, cy: number, r: number, minAlpha = 200): Lab | null {
   let sr = 0, sg = 0, sb = 0, n = 0;
@@ -103,6 +127,21 @@ export function patchMeanLab(data: ArrayLike<number>, size: number, cx: number, 
   }
   if (n < 4) return null;
   return rgbToLab([sr / n, sg / n, sb / n]);
+}
+
+/**
+ * Lab of a persona-layer patch composited over the driver at the same display position:
+ * premultiplied layer colour + driver colour × (1 − alpha), which is what the output canvas shows.
+ * Where the layer is transparent (the neck) this is simply the driver.
+ */
+export function compositedPatchLab(layer: ArrayLike<number>, layerMap: ReadbackMapping, under: ArrayLike<number>, underMap: ReadbackMapping, x: number, y: number, radiusPx: number): Lab | null {
+  const l = toReadback(layerMap, x, y);
+  const u = toReadback(underMap, x, y);
+  const L = patchMean(layer, layerMap.size, l.px, l.py, (radiusPx / layerMap.w) * layerMap.size);
+  const U = patchMean(under, underMap.size, u.px, u.py, (radiusPx / underMap.w) * underMap.size);
+  if (!L || !U) return null;
+  const k = 1 - L.alpha;
+  return rgbToLab([L.rgb[0] + U.rgb[0] * k, L.rgb[1] + U.rgb[1] * k, L.rgb[2] + U.rgb[2] * k]);
 }
 
 export interface ShadingPatches {
@@ -130,18 +169,21 @@ export interface ShadingMeasure {
   cheek: Lab;
 }
 
-/** Samples the three patches on one readback. Null when a cheek is unreadable. */
-export function measureShading(data: ArrayLike<number>, mapping: ReadbackMapping, patches: ShadingPatches, neckData?: ArrayLike<number>, neckMapping?: ReadbackMapping): ShadingMeasure | null {
-  const r = (patches.radius / mapping.w) * mapping.size;
-  const l = toReadback(mapping, patches.left.x, patches.left.y);
-  const rt = toReadback(mapping, patches.right.x, patches.right.y);
-  const L = patchMeanLab(data, mapping.size, l.px, l.py, r);
-  const R = patchMeanLab(data, mapping.size, rt.px, rt.py, r);
+/**
+ * Samples the three patches on one readback. With `under` (the driver readback) the data is the
+ * persona layer and every patch is composited over the driver first, so the measurement matches
+ * the output canvas; without it the data is opaque (the driver). Null when a cheek is unreadable.
+ */
+export function measureShading(data: ArrayLike<number>, mapping: ReadbackMapping, patches: ShadingPatches, under?: { data: ArrayLike<number>; mapping: ReadbackMapping }): ShadingMeasure | null {
+  const sample = (x: number, y: number): Lab | null => {
+    if (under) return compositedPatchLab(data, mapping, under.data, under.mapping, x, y, patches.radius);
+    const p = toReadback(mapping, x, y);
+    return patchMeanLab(data, mapping.size, p.px, p.py, (patches.radius / mapping.w) * mapping.size);
+  };
+  const L = sample(patches.left.x, patches.left.y);
+  const R = sample(patches.right.x, patches.right.y);
   if (!L || !R) return null;
   const cheek: Lab = [(L[0] + R[0]) / 2, (L[1] + R[1]) / 2, (L[2] + R[2]) / 2];
-  const nd = neckData ?? data;
-  const nm = neckMapping ?? mapping;
-  const n = toReadback(nm, patches.neck.x, patches.neck.y);
-  const N = patchMeanLab(nd, nm.size, n.px, n.py, (patches.radius / nm.w) * nm.size);
+  const N = sample(patches.neck.x, patches.neck.y);
   return { side: L[0] - R[0], neck: N ? ciede2000(cheek, N) : null, cheek };
 }

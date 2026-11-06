@@ -209,6 +209,8 @@ export class RealtimeFacialEngine {
   private autoRadius: AutoRadiusState = initialAutoRadius();
   private autoRadiusPending = false;
   private autoRadiusTrace: number[] = [];
+  /** Last loop measurement, for the review tool's cross-check against the offline metric. */
+  private autoRadiusLast: Record<string, number | boolean | null> | null = null;
   /** R3c symmetric de-light: per-vertex persona luma at the DELIGHT_SCALES and the radius the gains were built for. */
   private delightBands: Float32Array[] | null = null;
   private delightRadius = -1;
@@ -1085,8 +1087,12 @@ export class RealtimeFacialEngine {
     void Promise.all([out, drv]).then(([o, d]) => {
       this.autoRadiusPending = false;
       if (this.disposed || token !== this.personaPrepareToken || !o || !d) return;
-      const mo = measureShading(o, outMap, patches, d, drvMap);
+      const mo = measureShading(o, outMap, patches, { data: d, mapping: drvMap });
       const md = measureShading(d, drvMap, patches);
+      this.autoRadiusLast = {
+        sideOut: mo?.side ?? null, sideDrv: md?.side ?? null, neckOut: mo?.neck ?? null, neckDrv: md?.neck ?? null,
+        cheekOutL: mo?.cheek[0] ?? null, cheekDrvL: md?.cheek[0] ?? null,
+      };
       if (!mo || !md || mo.neck === null || md.neck === null) return;
       this.autoRadius = stepAutoRadius(this.autoRadius, { sideOut: mo.side, sideDrv: md.side, neckOut: mo.neck, neckDrv: md.neck }, { hold });
       if (this.autoRadiusTrace.length >= 1024) this.autoRadiusTrace.shift();
@@ -1585,6 +1591,7 @@ export class RealtimeFacialEngine {
           personaDelightRange: this.personaDelightRange,
           autoRadius: realismFlags.get().autoRadius ? { ...this.autoRadius } : null,
           autoRadiusTrace: [...this.autoRadiusTrace],
+          autoRadiusLast: this.autoRadiusLast,
           relightRadius: realismFlags.get().autoRadius ? this.autoRadius.radius : this.settings.relightRadius,
           symmetricDelight: !!this.delightBands,
           renderer: this.status.renderer,

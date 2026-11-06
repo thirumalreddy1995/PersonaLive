@@ -19,7 +19,7 @@ test('stepAutoRadius raises slowly while the excesses are small, holds in the ba
   for (let i = 0; i < 10; i++) s = stepAutoRadius(s, calm);
   assert.ok(Math.abs(s.radius - (AUTO_RADIUS_MIN + 10 * AUTO_RADIUS_STEP_UP)) < 1e-9, `rose by ten steps (${s.radius})`);
   assert.ok(s.sideExcess !== null && s.sideExcess < 0.6 && s.neckExcess !== null && s.neckExcess < 1.1);
-  // Inside the hysteresis band (2.5..3.5) nothing moves once the EMA is there, while it keeps tracking.
+  // Inside the hysteresis band (2.0..3.0) nothing moves once the EMA is there, while it keeps tracking.
   for (let i = 0; i < 40; i++) s = stepAutoRadius(s, { sideOut: 3, sideDrv: 0, neckOut: 20, neckDrv: 19 }, { hold: true });
   assert.ok(Math.abs(s.sideExcess! - 3) < 0.05);
   const r0 = s.radius;
@@ -76,4 +76,19 @@ test('patchMeanLab and measureShading read cheek and neck patches and skip trans
   // Mirrored driver window: the same landmarks now read the opposite halves, so the sign flips.
   const mirrored = measureShading(data, { ...mapping, mirrorX: true }, patches)!;
   assert.ok(Math.abs(mirrored.side + m.side) < 1e-9);
+  // Persona layer at half opacity (premultiplied) composited over the driver reads like the output canvas:
+  // a uniform half-transparent grey layer over the data gives the mean of grey and the driver.
+  const layer = new Uint8Array(size * size * 4);
+  for (let i = 0; i < size * size; i++) {
+    layer[i * 4] = layer[i * 4 + 1] = layer[i * 4 + 2] = 64; // 128 × 0.5 premultiplied
+    layer[i * 4 + 3] = 128;
+  }
+  const over = measureShading(layer, mapping, patches, { data, mapping })!;
+  const expectedLeft = rgbToLab([64 + 220 * (1 - 128 / 255), 64 + 170 * (1 - 128 / 255), 64 + 140 * (1 - 128 / 255)]);
+  const expectedRight = rgbToLab([64 + 150 * (1 - 128 / 255), 64 + 110 * (1 - 128 / 255), 64 + 90 * (1 - 128 / 255)]);
+  assert.ok(Math.abs(over.side - (expectedLeft[0] - expectedRight[0])) < 0.5, `composited side ${over.side}`);
+  // A fully transparent layer measures exactly the driver.
+  const clear = new Uint8Array(size * size * 4);
+  const through = measureShading(clear, mapping, patches, { data, mapping })!;
+  assert.ok(Math.abs(through.side - m.side) < 1e-6 && Math.abs(through.neck! - m.neck!) < 1e-6);
 });

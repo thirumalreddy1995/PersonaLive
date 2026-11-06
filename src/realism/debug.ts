@@ -53,6 +53,8 @@ export interface RealismDebugState {
   autoRadius: { radius: number; sideExcess: number | null; neckExcess: number | null; updates: number } | null;
   /** The radius after every loop update over the persona's life. */
   autoRadiusTrace: number[];
+  /** Last loop measurement (diagnostic). */
+  autoRadiusLast: Record<string, number | boolean | null> | null;
   /** The relight radius in use this frame (loop or setting). */
   relightRadius: number;
   /** True when the symmetric de-light bands are loaded for the current persona. */
