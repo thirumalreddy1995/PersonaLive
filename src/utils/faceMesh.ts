@@ -72,6 +72,11 @@ export interface FaceTopology {
   ovalRingDistance: Int16Array;
   /** Number of vertices referenced (468 mesh points; iris points are not part of the surface). */
   vertexCount: number;
+  /**
+   * R4b forehead extension only (see foreheadExtension.ts): two floats per vertex, [0] the feather
+   * weight while the extension is active, [1] the hairline coordinate (1 on the hairline ring).
+   */
+  forehead?: Float32Array;
 }
 
 /**
