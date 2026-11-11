@@ -77,3 +77,22 @@ test('the r0 preset reproduces the R0 behaviour whatever the defaults are', () =
   // Later tokens override the preset.
   assert.equal(parseRealismFlagString('r0,oralCavity=0').flags.oralCavity, false);
 });
+
+test('the r4 preset is the R4 defaults with the R4b forehead extension off', () => {
+  const { flags, errors } = parseRealismFlagString('r4');
+  assert.deepEqual(errors, []);
+  assert.equal(Object.keys(flags).length, REALISM_FLAG_DEFS.length, 'r4 preset covers every flag');
+  assert.equal(flags.segmentation, true);
+  assert.equal(flags.foreshortenFade, true);
+  assert.equal(flags.personaInpaint, true);
+  assert.equal(flags.autoRadius, true);
+  assert.equal(flags.twoBandBlend, false);
+  assert.equal(flags.cameraMatchSameMask, false);
+  assert.equal(flags.foreheadExtension, false);
+  // The extension is opt-in until a measured comparison: off by default and in every earlier preset.
+  assert.equal(defaultRealismFlags().foreheadExtension, false);
+  for (const preset of ['r0', 'r1', 'r2', 'r3', 'r3c']) assert.equal(parseRealismFlagString(preset).flags.foreheadExtension, false, preset);
+  assert.equal(parseRealismFlagString('r4,foreheadExtension=1').flags.foreheadExtension, true);
+  // Until R4b's defaults are decided, r4 equals the registry defaults.
+  assert.deepEqual(flags, defaultRealismFlags());
+});

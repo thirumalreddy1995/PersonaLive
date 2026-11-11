@@ -55,6 +55,11 @@ export interface RelightOptions {
   globalTone?: boolean;
   /** Flag relightShadowGuard: no detail amplification where the persona low pass is nearly black. */
   shadowGuard?: boolean;
+  /**
+   * R4b §5: leave the wearer's hair out of the driver low pass (needs the segmentation masks of the
+   * same frame); the masked blur then fills those pixels from the surrounding skin.
+   */
+  excludeHair?: boolean;
 }
 
 /** Frames between driver mean-tone readbacks (a small synchronous readPixels of the 1/RELIGHT_SCALE-scale low pass). */
@@ -109,6 +114,12 @@ export interface WarpFrameOptions {
   twoBand?: boolean;
   /** R4 §4 per-vertex foreshortening weights (1 = flat, 0 = sliver/back-facing); omitted = off. */
   foreshorten?: Float32Array;
+  /**
+   * R4b forehead extension (needs a topology from extendTopology): `strength` 0..1 blends from the
+   * base feather to the extension's (opaque forehead, one feather at the hairline ring of
+   * `featherPx` screen pixels); omitted = off.
+   */
+  forehead?: { strength: number; featherPx: number };
 }
 
 /** Face-region pixel statistics from an asynchronous readback. */
@@ -134,8 +145,10 @@ attribute float aToneWeight;
 attribute float aDelight;
 attribute vec2 aFeatherBands;
 attribute float aForeshorten;
+attribute vec2 aForehead;
 
 uniform vec2 uResolution;
+uniform float uForeheadExt;
 uniform vec4 uFaceBounds;
 uniform vec3 uGainForehead;
 uniform vec3 uGainLeftCheek;
@@ -154,12 +167,15 @@ varying float vToneWeight;
 varying float vDelight;
 varying vec2 vFeatherBands;
 varying float vForeshorten;
+varying float vHairline;
 
 void main() {
   vec2 clip = vec2(aPosition.x / uResolution.x * 2.0 - 1.0, 1.0 - aPosition.y / uResolution.y * 2.0);
   gl_Position = vec4(clip, 0.0, 1.0);
   vUv = aUv;
-  vFeather = aFeather;
+  // R4b: with the forehead extension active the forehead is opaque up to the hairline ring.
+  vFeather = mix(aFeather, aForehead.x, uForeheadExt);
+  vHairline = aForehead.y;
   vLip = aLip;
   vLipZone = aLipZone;
   vEyeFade = aEyeFade;
@@ -222,6 +238,8 @@ uniform vec4 uSegRect;
 uniform float uTwoBand;
 uniform float uForeshortenOn;
 uniform float uSegStrength;
+uniform float uForeheadExt;
+uniform float uHairFeatherPx;
 
 varying vec2 vUv;
 varying float vFeather;
@@ -234,6 +252,7 @@ varying float vToneWeight;
 varying float vDelight;
 varying vec2 vFeatherBands;
 varying float vForeshorten;
+varying float vHairline;
 
 // Per-pixel, per-frame hash in [0, 1).
 float hash12(vec2 p) {
@@ -371,12 +390,26 @@ void main() {
   }
   float foreshorten = uForeshortenOn > 0.5 ? clamp(vForeshorten, 0.0, 1.0) : 1.0;
 
+  // R4b: one transition, at the hairline ring. The geometric cranial falloff goes and the persona
+  // ends in a narrow feather (uHairFeatherPx screen pixels) below the ring; vHairline is 0 on the
+  // tracked mesh and 1 on the ring, so (1 - vHairline) / |grad vHairline| is the pixel distance to it.
+  float hairEdge = 1.0;
+  if (uForeheadExt > 0.0) {
+    cranialFalloff = mix(cranialFalloff, 1.0, uForeheadExt);
+#ifdef HAS_DERIVATIVES
+    float hg = length(vec2(dFdx(vHairline), dFdy(vHairline)));
+    if (hg > 1e-6) hairEdge = smoothstep(0.0, max(uHairFeatherPx, 1.0), (1.0 - vHairline) / hg);
+#else
+    hairEdge = 1.0 - smoothstep(0.7, 1.0, vHairline);
+#endif
+  }
+
   // 8. Keep my real mouth / eye pass-through / closed-lip mask (edges softened by uSoftHolesPx).
   float closedMask = soften(smoothstep(1.0, 1.3, vLipZone) * (1.0 - smoothstep(2.0, 3.0, vLipZone)), uSoftHolesPx) * uClosedLipMask * (1.0 - uLipFade);
   float lipHole = max(soften(clamp(vLip * uLipFade, 0.0, 1.0), uSoftHolesPx), closedMask);
   float holes = (1.0 - lipHole) * (1.0 - soften(clamp(vEyeFade * uEyeFade, 0.0, 1.0), uSoftHolesPx));
 
-  float alphaBase = uOpacity * cranialFalloff * c.a * holes * segKeep * foreshorten;
+  float alphaBase = uOpacity * cranialFalloff * c.a * holes * segKeep * foreshorten * hairEdge;
   if (uTwoBand > 0.5 && hasLow > 0.5) {
     // R4 §3: low frequencies fade over the wide feather, the detail over the narrow one. Output is
     // premultiplied: alpha = wide; colour = wide·low + narrow·(full − low), so compositing over the
@@ -421,11 +454,20 @@ void main() {
 const PAINT_FRAGMENT_ES1 = `
 precision highp float;
 uniform sampler2D uTexture;
+uniform sampler2D uSegMask;
+uniform float uSegOn;
+uniform vec4 uSegRect;
 varying vec2 vTex;
 void main() {
   // Linear light before the blur, so the low pass is a true mean and not a gamma-space one.
   vec3 c = texture2D(uTexture, clamp(vTex, 0.0, 1.0)).rgb;
-  gl_FragColor = vec4(pow(max(c, vec3(0.0)), vec3(2.2)), 1.0);
+  // R4b §5: hair pixels of the driver frame stay out (coverage 0); the masked blur fills them from the skin around.
+  float a = 1.0;
+  if (uSegOn > 0.5) {
+    vec2 mu = (vTex - uSegRect.xy) / uSegRect.zw;
+    if (mu.x >= 0.0 && mu.x <= 1.0 && mu.y >= 0.0 && mu.y <= 1.0) a = 1.0 - smoothstep(0.3, 0.7, texture2D(uSegMask, mu).r);
+  }
+  gl_FragColor = vec4(pow(max(c, vec3(0.0)), vec3(2.2)) * a, a);
 }`;
 
 /** R3 low-pass pipeline, pass 2: separable Gaussian on premultiplied RGBA (15 taps, spaced). */
@@ -487,6 +529,7 @@ interface GLResources {
   delightBuffer: WebGLBuffer;
   featherWideBuffer: WebGLBuffer;
   foreshortenBuffer: WebGLBuffer;
+  foreheadBuffer: WebGLBuffer;
   segTexture: WebGLTexture;
   indexBuffer: WebGLBuffer;
   eyeIndexBuffer: WebGLBuffer;
@@ -502,6 +545,7 @@ interface GLResources {
     aDelight: number;
     aFeatherBands: number;
     aForeshorten: number;
+    aForehead: number;
     uResolution: WebGLUniformLocation | null;
     uTexture: WebGLUniformLocation | null;
     uFaceBounds: WebGLUniformLocation | null;
@@ -540,6 +584,8 @@ interface GLResources {
     uTwoBand: WebGLUniformLocation | null;
     uForeshortenOn: WebGLUniformLocation | null;
     uSegStrength: WebGLUniformLocation | null;
+    uForeheadExt: WebGLUniformLocation | null;
+    uHairFeatherPx: WebGLUniformLocation | null;
   };
   /** R3 relighting: created on first use (see ensureRelight). */
   relight: RelightResources | null;
@@ -597,6 +643,9 @@ interface RelightResources {
     uSrcMap: WebGLUniformLocation | null;
     uMirror: WebGLUniformLocation | null;
     uTexture: WebGLUniformLocation | null;
+    uSegMask: WebGLUniformLocation | null;
+    uSegOn: WebGLUniformLocation | null;
+    uSegRect: WebGLUniformLocation | null;
   };
   blur: {
     program: WebGLProgram;
@@ -783,6 +832,9 @@ export class MeshWarpRenderer {
   private eyeFadeWeights: Float32Array | null = null;
   private delightGains: Float32Array | null = null;
   private segUploaded = false;
+  /** This frame's masks are bound on texture unit 3 (set by bindSegmentation, read by the driver paint). */
+  private segBound = false;
+  private segRect: [number, number, number, number] = [0, 0, 1, 1];
   private personaImage: PersonaSource | null = null;
   private personaUv: Float32Array | null = null;
   private personaSize = { width: 1, height: 1 };
@@ -952,6 +1004,7 @@ export class MeshWarpRenderer {
       delightBuffer: buffer(),
       featherWideBuffer: buffer(),
       foreshortenBuffer: buffer(),
+      foreheadBuffer: buffer(),
       segTexture: gl.createTexture()!,
       indexBuffer: buffer(),
       eyeIndexBuffer: buffer(),
@@ -967,6 +1020,7 @@ export class MeshWarpRenderer {
         aDelight: gl.getAttribLocation(program, 'aDelight'),
         aFeatherBands: gl.getAttribLocation(program, 'aFeatherBands'),
         aForeshorten: gl.getAttribLocation(program, 'aForeshorten'),
+        aForehead: gl.getAttribLocation(program, 'aForehead'),
         uResolution: u('uResolution'),
         uTexture: u('uTexture'),
         uFaceBounds: u('uFaceBounds'),
@@ -1005,6 +1059,8 @@ export class MeshWarpRenderer {
         uTwoBand: u('uTwoBand'),
         uForeshortenOn: u('uForeshortenOn'),
         uSegStrength: u('uSegStrength'),
+        uForeheadExt: u('uForeheadExt'),
+        uHairFeatherPx: u('uHairFeatherPx'),
       },
       relight: null,
       readback,
@@ -1031,6 +1087,9 @@ export class MeshWarpRenderer {
           uSrcMap: gl.getUniformLocation(paint, 'uSrcMap'),
           uMirror: gl.getUniformLocation(paint, 'uMirror'),
           uTexture: gl.getUniformLocation(paint, 'uTexture'),
+          uSegMask: gl.getUniformLocation(paint, 'uSegMask'),
+          uSegOn: gl.getUniformLocation(paint, 'uSegOn'),
+          uSegRect: gl.getUniformLocation(paint, 'uSegRect'),
         },
         blur: {
           program: blur,
@@ -1174,6 +1233,11 @@ export class MeshWarpRenderer {
     gl.uniform2f(rl.paint.uResolution, this._canvas.width, this._canvas.height);
     gl.uniform4f(rl.paint.uSrcMap, o.srcMap[0], o.srcMap[1], Math.max(1, o.srcMap[2]), Math.max(1, o.srcMap[3]));
     gl.uniform1f(rl.paint.uMirror, o.mirror ? 1 : 0);
+    // R4b §5: the driver paint leaves hair out when this frame's masks are on unit 3 (see bindSegmentation).
+    const excludeHair = mode === 0 && !!o.excludeHair && this.segBound;
+    gl.uniform1f(rl.paint.uSegOn, excludeHair ? 1 : 0);
+    gl.uniform1i(rl.paint.uSegMask, 3);
+    gl.uniform4f(rl.paint.uSegRect, this.segRect[0], this.segRect[1], Math.max(1e-4, this.segRect[2]), Math.max(1e-4, this.segRect[3]));
     gl.activeTexture(gl.TEXTURE0);
     gl.bindTexture(gl.TEXTURE_2D, mode === 0 ? rl.driverTexture : r.texture);
     gl.uniform1i(rl.paint.uTexture, 0);
@@ -1247,6 +1311,7 @@ export class MeshWarpRenderer {
     gl.deleteBuffer(r.delightBuffer);
     gl.deleteBuffer(r.featherWideBuffer);
     gl.deleteBuffer(r.foreshortenBuffer);
+    gl.deleteBuffer(r.foreheadBuffer);
     gl.deleteTexture(r.segTexture);
     gl.deleteBuffer(r.indexBuffer);
     gl.deleteBuffer(r.eyeIndexBuffer);
@@ -1325,6 +1390,9 @@ export class MeshWarpRenderer {
     gl.bufferData(gl.ARRAY_BUFFER, featherBandWeights(topology), gl.STATIC_DRAW);
     gl.bindBuffer(gl.ARRAY_BUFFER, r.foreshortenBuffer);
     gl.bufferData(gl.ARRAY_BUFFER, new Float32Array(topology.vertexCount).fill(1), gl.DYNAMIC_DRAW);
+    // R4b: [extension feather, hairline coordinate] per vertex; zeros without the extension (uForeheadExt stays 0).
+    gl.bindBuffer(gl.ARRAY_BUFFER, r.foreheadBuffer);
+    gl.bufferData(gl.ARRAY_BUFFER, topology.forehead ?? new Float32Array(topology.vertexCount * 2), gl.STATIC_DRAW);
     this.personaLowDirty = true;
     if (!this.eyeFadeWeights || this.eyeFadeWeights.length !== topology.vertexCount) {
       this.eyeFadeWeights = new Float32Array(topology.vertexCount);
@@ -1342,6 +1410,8 @@ export class MeshWarpRenderer {
   private uploadDelight(gl: WebGLRenderingContext, r: GLResources, gains: Float32Array | null) {
     const n = this.topology?.vertexCount ?? 468;
     const data = gains && gains.length === n ? gains : new Float32Array(n).fill(1);
+    // Gains for the 468 mesh vertices on an extended topology (R4b): the extension vertices take 1.
+    if (gains && gains.length < n && gains.length >= 468) data.set(gains);
     gl.bindBuffer(gl.ARRAY_BUFFER, r.delightBuffer);
     gl.bufferData(gl.ARRAY_BUFFER, data, gl.DYNAMIC_DRAW);
   }
@@ -1452,6 +1522,25 @@ export class MeshWarpRenderer {
     }
   }
 
+  /** Binds the segmentation masks on texture unit 3, uploading them when the segmenter produced a new frame. */
+  private bindSegmentation(gl: WebGLRenderingContext | WebGL2RenderingContext, r: GLResources, seg: WarpFrameOptions['segmentation']) {
+    gl.activeTexture(gl.TEXTURE3);
+    gl.bindTexture(gl.TEXTURE_2D, r.segTexture);
+    if (seg && seg.masks && (seg.dirty || !this.segUploaded)) {
+      gl.pixelStorei(gl.UNPACK_FLIP_Y_WEBGL, false);
+      gl.pixelStorei(gl.UNPACK_PREMULTIPLY_ALPHA_WEBGL, false);
+      gl.texImage2D(gl.TEXTURE_2D, 0, gl.RGBA, seg.masks.width, seg.masks.height, 0, gl.RGBA, gl.UNSIGNED_BYTE, seg.masks.data);
+      gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MIN_FILTER, gl.LINEAR);
+      gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MAG_FILTER, gl.LINEAR);
+      gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_WRAP_S, gl.CLAMP_TO_EDGE);
+      gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_WRAP_T, gl.CLAMP_TO_EDGE);
+      this.segUploaded = true;
+    }
+    this.segBound = !!(seg && seg.masks && seg.masks.updates > 0 && this.segUploaded);
+    if (seg?.masks) this.segRect = [seg.masks.rect[0], seg.masks.rect[1], seg.masks.rect[2], seg.masks.rect[3]];
+    gl.activeTexture(gl.TEXTURE0);
+  }
+
   private renderGL(gl: WebGLRenderingContext | WebGL2RenderingContext, r: GLResources, opts: WarpFrameOptions) {
     const topo = this.topology!;
     const loc = r.locations;
@@ -1466,6 +1555,8 @@ export class MeshWarpRenderer {
     gl.bindBuffer(gl.ARRAY_BUFFER, r.positionBuffer);
     gl.bufferData(gl.ARRAY_BUFFER, opts.positions, gl.DYNAMIC_DRAW);
 
+    // R4: the masks go to unit 3 first, so the driver low pass can leave hair out (R4b §5).
+    this.bindSegmentation(gl, r, opts.segmentation);
     // R3: the low-pass passes run first (they switch programs, framebuffers and attribute 0).
     const relit = opts.relight ? this.relightPasses(gl, r, opts.relight) : false;
     gl.useProgram(r.program);
@@ -1512,21 +1603,9 @@ export class MeshWarpRenderer {
     gl.uniform1f(loc.uForeshortenOn, opts.foreshorten ? 1 : 0);
     gl.uniform1f(loc.uTwoBand, opts.twoBand ? 1 : 0);
 
-    // R4 segmentation masks on unit 3 (uploaded when the segmenter produced a new frame).
+    // R4 segmentation masks on unit 3 (uploaded before the relight passes, see bindSegmentation).
     const seg = opts.segmentation;
-    gl.activeTexture(gl.TEXTURE3);
-    gl.bindTexture(gl.TEXTURE_2D, r.segTexture);
     if (seg && seg.masks) {
-      if (seg.dirty || !this.segUploaded) {
-        gl.pixelStorei(gl.UNPACK_FLIP_Y_WEBGL, false);
-        gl.pixelStorei(gl.UNPACK_PREMULTIPLY_ALPHA_WEBGL, false);
-        gl.texImage2D(gl.TEXTURE_2D, 0, gl.RGBA, seg.masks.width, seg.masks.height, 0, gl.RGBA, gl.UNSIGNED_BYTE, seg.masks.data);
-        gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MIN_FILTER, gl.LINEAR);
-        gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MAG_FILTER, gl.LINEAR);
-        gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_WRAP_S, gl.CLAMP_TO_EDGE);
-        gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_WRAP_T, gl.CLAMP_TO_EDGE);
-        this.segUploaded = true;
-      }
       gl.uniform4f(loc.uSegSrcMap, seg.srcMap[0], seg.srcMap[1], Math.max(1, seg.srcMap[2]), Math.max(1, seg.srcMap[3]));
       gl.uniform1f(loc.uSegMirror, seg.mirror ? 1 : 0);
       const sr = seg.masks?.rect ?? [0, 0, 1, 1];
@@ -1536,6 +1615,14 @@ export class MeshWarpRenderer {
     gl.uniform1i(loc.uSegMask, 3);
     gl.uniform1f(loc.uSegOn, seg && seg.masks && seg.masks.updates > 0 ? 1 : 0);
     gl.activeTexture(gl.TEXTURE0);
+
+    // R4b forehead extension: feather blend and the hairline feather width.
+    gl.bindBuffer(gl.ARRAY_BUFFER, r.foreheadBuffer);
+    gl.enableVertexAttribArray(loc.aForehead);
+    gl.vertexAttribPointer(loc.aForehead, 2, gl.FLOAT, false, 0, 0);
+    const fh = topo.forehead ? opts.forehead : undefined;
+    gl.uniform1f(loc.uForeheadExt, fh ? Math.min(1, Math.max(0, fh.strength)) : 0);
+    gl.uniform1f(loc.uHairFeatherPx, fh ? Math.max(1, fh.featherPx) : 1);
 
     // R3 relighting inputs on units 1 and 2 (bound whether or not the passes ran this frame).
     const rl = r.relight;

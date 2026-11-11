@@ -64,6 +64,23 @@ export interface RealismDebugState {
   segmentation: { ready: boolean; active: boolean; updates: number; backend: string; error: string | null; lastMs: number; lastPackMs: number; bitmapMs: number; inferMs: number; readMs: number; roundTripMs: number; submits: number };
   /** Share of the persona face oval inpainted at load (flag personaInpaint), null when off. */
   personaInpaintShare: number | null;
+  /** R4b forehead extension (flag foreheadExtension), null when off. Ratios are (brow → hairline) / (brow → landmark 10) per column. */
+  forehead: {
+    /** 0..1: how far the extension has grown in (0 until both hairlines are known). */
+    strength: number;
+    calibrations: number;
+    collecting: boolean;
+    samples: number;
+    wearerRatios: number[] | null;
+    personaRatios: number[] | null;
+    /** The persona measurement before ambiguous columns were filled. */
+    personaMeasured: Array<number | null> | null;
+    /** Wearer-side ratios after the stretch guard. */
+    effectiveRatios: number[] | null;
+    clampedColumns: number;
+    /** Last frontal disagreement between the stored hairline and the mask, as a share of face height. */
+    disagreement: number | null;
+  } | null;
   renderer: 'webgl2' | 'webgl' | 'canvas2d';
   pose: HeadPose;
   isSpeaking: boolean;

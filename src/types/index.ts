@@ -117,6 +117,13 @@ export interface TransformationSettings {
   segmentationStrength: number;
   /** Run the segmenter on the CPU delegate instead of the GPU one (takes effect at engine start). */
   segmentCpu: boolean;
+  /** R4b: width of the feather at the hairline ring as a share of face height (0.025 = 2.5%). */
+  hairlineFeather: number;
+  /** R4b stretch guard: the wearer's forehead may be this much shorter / taller than the persona's before the mapping is clamped. */
+  foreheadStretchMin: number;
+  foreheadStretchMax: number;
+  /** R4b: bump to start a new hairline calibration ("Recalibrate forehead"). */
+  foreheadRecalibrate: number;
   /** Longest edge of the persona texture after the face crop (R2 §2). */
   personaTextureSize: 512 | 1024 | 2048;
   /** One Euro minimum cutoff (Hz) of the rigid head pose behind the forehead (realism flag rigidForehead). */

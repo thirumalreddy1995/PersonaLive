@@ -188,6 +188,16 @@ export const RealismDebugPanel: React.FC = () => {
                 <span>
                   {state ? `${state.pose.yaw.toFixed(0)}° ${state.pose.pitch.toFixed(0)}° ${state.pose.roll.toFixed(0)}° · ${state.mar.toFixed(2)} · lip fade ${state.lipFade.toFixed(2)}` : "-"}
                 </span>
+                {state?.forehead && (
+                  <>
+                    <span className="text-slate-500">forehead</span>
+                    <span className="truncate">
+                      {state.forehead.wearerRatios
+                        ? `hairline ×${state.forehead.wearerRatios[4].toFixed(2)} (persona ${state.forehead.personaRatios ? `×${state.forehead.personaRatios[4].toFixed(2)}` : '-'}) · in ${Math.round(state.forehead.strength * 100)}%${state.forehead.clampedColumns ? ` · ${state.forehead.clampedColumns} clamped` : ''}`
+                        : `calibrating ${state.forehead.samples}/20 (hold frontal)`}
+                    </span>
+                  </>
+                )}
                 <span className="text-slate-500">source</span>
                 <span>
                   {state?.source ?? '-'}

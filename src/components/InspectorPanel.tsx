@@ -22,6 +22,7 @@ import {
   CATEGORY_LABEL,
 } from '../types/index.ts';
 import { UserRound } from 'lucide-react';
+import { realismFlags } from '../realism/flags.ts';
 
 interface InspectorPanelProps {
   activePersona: AuthorizedPersona | null;
@@ -48,6 +49,12 @@ export const InspectorPanel: React.FC<InspectorPanelProps> = ({
   onUpdateSettings,
   onOpenLibrary,
 }) => {
+  // R4b: the forehead recalibration control shows only while the forehead extension flag is on.
+  const foreheadExtension = React.useSyncExternalStore(
+    (cb) => realismFlags.subscribe(() => cb()),
+    () => realismFlags.get().foreheadExtension,
+    () => realismFlags.get().foreheadExtension
+  );
   const personaState = status?.persona ?? 'none';
   const matchingPersonas = personas.filter((p) => p.category === subjectCategory);
   const hiddenCount = personas.length - matchingPersonas.length;
@@ -361,6 +368,22 @@ export const InspectorPanel: React.FC<InspectorPanelProps> = ({
                 onChange={(e) => onUpdateSettings({ skinToneMatch: Number(e.target.value) })}
                 className="w-full accent-sky-500 cursor-pointer h-1.5 bg-slate-800 rounded-lg"
               />
+            </div>
+          )}
+
+          {foreheadExtension && (
+            <div className="flex items-center justify-between p-2 rounded-lg bg-slate-900/60">
+              <span className="text-slate-200">
+                Forehead fit
+                <span className="block text-[10px] text-slate-500 font-normal">Face the camera for two seconds after pressing</span>
+              </span>
+              <button
+                type="button"
+                onClick={() => onUpdateSettings({ foreheadRecalibrate: (settings.foreheadRecalibrate ?? 0) + 1 })}
+                className="px-2 py-1 rounded-md text-[11px] font-medium bg-slate-800 hover:bg-slate-700 text-slate-200 border border-slate-700 cursor-pointer"
+              >
+                Recalibrate forehead
+              </button>
             </div>
           )}
         </div>

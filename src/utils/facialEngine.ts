@@ -18,7 +18,25 @@ import { delightPersona } from './personaDelight.ts';
 import { AUTO_RADIUS_EVERY, AutoRadiusState, initialAutoRadius, measureShading, shadingPatches, stepAutoRadius } from './autoRadius.ts';
 import { lumaAtScale, symmetricDelightGains, vertexBandLuma } from './faceSymmetry.ts';
 import { FaceSegmenter } from './segmenter.ts';
-import { NormRect, PackedMasks, emptyMasks, faceCropRect, sampleMask, stableCrop } from './segmentation.ts';
+import { NormRect, PackedMasks, emptyMasks, faceCropRect, insidePolygon, sampleMask, stableCrop } from './segmentation.ts';
+import {
+  EXT_COLUMNS,
+  EXT_MID_START,
+  EXT_VERTEX_COUNT,
+  HAIRLINE_FRONTAL_DEG,
+  HairlineCalibrator,
+  STRETCH_MAX,
+  STRETCH_MIN,
+  TRACKED_POINT_COUNT,
+  extendForehead,
+  extendTopology,
+  fillAmbiguousRatios,
+  foreheadFrame,
+  foreheadPolygon,
+  measureHairlineRatios,
+  padPoints,
+  stretchClamp,
+} from './foreheadExtension.ts';
 import { dilateMask, inpaintMasked } from './inpaint.ts';
 import { foreshortenWeights } from './foreshorten.ts';
 import { FACE_OVAL_RING } from './personaDelight.ts';
@@ -104,6 +122,13 @@ const MOTION_BLUR_EXPOSURE = 0.5;
 /** Steady camera match holds its estimate while the head moves faster than this share of face width per frame. */
 const CAMERA_MATCH_HOLD_SPEED = 0.015;
 const IDENTITY_GAIN: [number, number, number] = [1, 1, 1];
+/** R4b: the forehead extension grows in (and out) over this long once the hairline calibration lands. */
+const FOREHEAD_RAMP_MS = 500;
+/** R4b: time constant with which the rings move to a new hairline after a recalibration. */
+const FOREHEAD_SETTLE_MS = 250;
+/** R4b: alpha of persona pixels that were hair on the forehead and were filled from the surrounding skin. */
+const FRINGE_FILL_ALPHA = 217;
+const NO_EXTENSION: ReadonlyArray<number> = new Array(EXT_COLUMNS).fill(1);
 
 export class RealtimeFacialEngine {
   private canvas: HTMLCanvasElement;
@@ -133,7 +158,8 @@ export class RealtimeFacialEngine {
   // Tracking state
   private filters: OneEuroFilter[] = [];
   private smoothed = new Float32Array(LANDMARK_COUNT * 2);
-  private warpPositions = new Float32Array(LANDMARK_COUNT * 2);
+  /** The tracked points followed by the R4b forehead-extension vertices (unused without the flag). */
+  private warpPositions = new Float32Array(EXT_VERTEX_COUNT * 2);
   private lastFace: TrackedFace | null = null;
   private faceVisible = false;
   private framesSinceFace = 0;
@@ -231,6 +257,27 @@ export class RealtimeFacialEngine {
   private foreshorten: Float32Array | null = null;
   /** Share of the persona's face oval that was inpainted at load (flag personaInpaint). */
   private personaInpaintShare: number | null = null;
+  /** R4b forehead extension (flag foreheadExtension): the base and the extended topology, and whether the extended one is in use. */
+  private baseTopology: FaceTopology;
+  private extTopology: FaceTopology | null = null;
+  private foreheadOn = false;
+  /** The wearer's hairline, calibrated once from the hair mask while frontal. */
+  private hairline = new HairlineCalibrator();
+  private hairlineSegSeen = -1;
+  /** 0..1: how far the extension has grown in. */
+  private foreheadStrength = 0;
+  private foreheadClock: number | null = null;
+  /** Wearer-side ratios after the stretch guard; null until both hairlines are known. */
+  private foreheadWearer: number[] | null = null;
+  /** The ratios the rings are drawn at this frame (they ease toward foreheadWearer after a recalibration). */
+  private foreheadShown: number[] | null = null;
+  private foreheadClamped = 0;
+  /** The persona's hairline ratios (measured at load, ambiguous columns filled), and the raw measurement. */
+  private personaRatios: number[] | null = null;
+  private personaRatiosMeasured: Array<number | null> | null = null;
+  /** The persona UVs padded for the extension, and the texture size they refer to. */
+  private personaUvExt: Float32Array | null = null;
+  private personaTexSize = { width: 1, height: 1 };
   /** Resting mouth aperture learned from frontal frames (realism flag restMouth, R3 item 1). */
   private restMouth = new RestMouthCalibrator();
   /** Smoothed screen velocity of the face (canvas px per frame) for motion blur and the steady camera match. */
@@ -257,10 +304,10 @@ export class RealtimeFacialEngine {
     canvas.width = w;
     canvas.height = h;
 
-    this.topology = buildFaceTopology(FACE_TESSELLATION, FACE_OVAL, 468);
+    this.baseTopology = buildFaceTopology(FACE_TESSELLATION, FACE_OVAL, 468);
+    this.topology = this.baseTopology;
     this.warp = new MeshWarpRenderer(w, h, realismFlags.get().webgl2);
-    this.warp.setTopology(this.topology);
-    this.warp.setEyeFade(eyeFadeWeights(this.topology, settings.eyePassThroughRadius));
+    this.applyForeheadTopology();
     this.rigid.configure(rigidOptions(settings));
     this.status.renderer = this.warp.usesWebGL2 ? 'webgl2' : this.warp.usesWebGL ? 'webgl' : 'canvas2d';
 
@@ -293,7 +340,11 @@ export class RealtimeFacialEngine {
         this.autoRadius = initialAutoRadius();
         this.autoRadiusTrace = [];
       }
-      if (changed.includes('segmentation') || changed.includes('personaInpaint')) this.ensureSegmenter();
+      if (changed.includes('foreheadExtension')) {
+        this.applyForeheadTopology();
+        if (this.personaImage) void this.preparePersona();
+      }
+      if (changed.includes('segmentation') || changed.includes('personaInpaint') || changed.includes('foreheadExtension')) this.ensureSegmenter();
       if (changed.includes('cameraMatch')) {
         this.cameraMatch = initialCameraMatch();
         this.cameraMatchTrace = [];
@@ -426,6 +477,8 @@ export class RealtimeFacialEngine {
     if (prev.personaTextureSize !== settings.personaTextureSize && this.personaImage && realismFlags.get().personaCrop) {
       void this.preparePersona();
     }
+    if (prev.foreheadRecalibrate !== settings.foreheadRecalibrate) this.hairline.recalibrate();
+    if (prev.foreheadStretchMin !== settings.foreheadStretchMin || prev.foreheadStretchMax !== settings.foreheadStretchMax) this.applyForeheadMapping();
     if (
       prev.rigidPoseMinCutoff !== settings.rigidPoseMinCutoff ||
       prev.rigidPoseBeta !== settings.rigidPoseBeta ||
@@ -491,6 +544,8 @@ export class RealtimeFacialEngine {
         return;
       }
       const face = faces[0];
+      // R4b: whether this persona is prepared for the extended topology.
+      const foreheadOn = this.foreheadOn;
       // R2 §2: crop to the face oval × 1.6, cap the long edge, recompute UVs (flag personaCrop).
       let texture: HTMLImageElement | HTMLCanvasElement = img;
       let uv = face.landmarks;
@@ -530,15 +585,25 @@ export class RealtimeFacialEngine {
       // R4 (flag personaInpaint): segment the photo and inpaint hair and glasses inside the face oval.
       this.personaInpaintShare = null;
       const warnings: string[] = [];
-      if (realismFlags.get().personaInpaint) {
-        const share = await this.inpaintPersona(texture, uv).then((t) => {
-          if (t) texture = t.canvas;
-          return t?.share ?? null;
-        });
+      let personaRatios: number[] | null = null;
+      let personaRatiosMeasured: Array<number | null> | null = null;
+      const inpaintOn = realismFlags.get().personaInpaint;
+      if (inpaintOn || foreheadOn) {
+        // R4b (flag foreheadExtension): the same segmentation gives the persona's hairline ratios, and hair on its forehead is filled.
+        const res = await this.inpaintPersona(texture, uv, { inpaint: inpaintOn, forehead: foreheadOn });
         if (this.disposed || token !== this.personaPrepareToken) return;
-        this.personaInpaintShare = share;
-        if (share !== null && share > 0.02) warnings.push(`Hair or glasses covered ${(share * 100).toFixed(0)}% of the face skin in this photo and were filled in; for best likeness retake without glasses and with the hair off the face.`);
-        if (share === null) warnings.push('The photo could not be checked for hair or glasses over the face (segmenter unavailable).');
+        if (res) texture = res.canvas;
+        personaRatios = res?.ratios ?? null;
+        personaRatiosMeasured = res?.measured ?? null;
+        const share = res?.share ?? null;
+        if (inpaintOn) {
+          this.personaInpaintShare = share;
+          if (share !== null && share > 0.02) warnings.push(`Hair or glasses covered ${(share * 100).toFixed(0)}% of the face skin in this photo and were filled in; for best likeness retake without glasses and with the hair off the face.`);
+          if (share === null) warnings.push('The photo could not be checked for hair or glasses over the face (segmenter unavailable).');
+        }
+        if (foreheadOn && personaRatiosMeasured && personaRatiosMeasured.every((r) => r === null)) {
+          warnings.push('No hairline was found in this photo (hair over the forehead, a hat, a shaved head or a tight crop), so a typical forehead height is assumed.');
+        }
       }
       this.patchStatus({ personaWarnings: warnings });
       // R3c (flag symmetricDelight): per-vertex band luma of the final texture for the mirror split.
@@ -557,7 +622,23 @@ export class RealtimeFacialEngine {
         const ub = pointBounds(new Float32Array(uv.subarray(0, 468 * 2)));
         this.delightBands = vertexBandLuma(px.data, tw, th, uv, Math.max(1, ub.width * tw));
       }
+      // The flag flipped while this preparation ran: the one started by the flip prepares for the current topology.
+      if (foreheadOn !== this.foreheadOn) return;
+      this.personaRatios = personaRatios;
+      this.personaRatiosMeasured = personaRatiosMeasured;
+      this.personaTexSize = {
+        width: texture instanceof HTMLImageElement ? texture.naturalWidth : texture.width,
+        height: texture instanceof HTMLImageElement ? texture.naturalHeight : texture.height,
+      };
+      if (foreheadOn) {
+        // Extended topology: the UV set carries the two forehead rings (collapsed until the mapping below places them).
+        uv = this.collapsedExtension(uv);
+        this.personaUvExt = uv;
+      } else {
+        this.personaUvExt = null;
+      }
       this.warp.setPersona(texture, uv);
+      if (foreheadOn) this.applyForeheadMapping();
       this.currentKeyframeSource = texture;
       this.currentKeyframeId = null;
       this.cameraMatch = initialCameraMatch();
@@ -737,7 +818,7 @@ export class RealtimeFacialEngine {
     const overlayReady = !!(kinematics && this.faceVisible && this.lastFace && this.warp.hasPersona && this.status.persona === 'ready');
     if (overlayReady && kinematics && src && layout) {
       profiler.begin('warp');
-      this.renderPersonaOverlay(layout, src.source, src.width, src.height, kinematics);
+      this.renderPersonaOverlay(layout, src.source, src.width, src.height, kinematics, timestamp);
       profiler.end('warp');
       profiler.begin('overlay');
       this.composeOverlayLayer();
@@ -860,6 +941,12 @@ export class RealtimeFacialEngine {
     this.resetFilters();
     this.rigid.reset();
     this.restMouth.reset();
+    this.hairline.reset();
+    this.hairlineSegSeen = -1;
+    this.foreheadStrength = 0;
+    this.foreheadClock = null;
+    this.foreheadWearer = null;
+    this.foreheadShown = null;
     this.prevHeadCenter = null;
     this.headVelocity = { x: 0, y: 0 };
     this.lastFace = null;
@@ -937,7 +1024,8 @@ export class RealtimeFacialEngine {
     source: CanvasImageSource,
     srcW: number,
     srcH: number,
-    k: LandmarkKinematics
+    k: LandmarkKinematics,
+    timestamp: number
   ) {
     const s = this.settings;
     this.warpPositions.set(this.smoothed);
@@ -995,7 +1083,8 @@ export class RealtimeFacialEngine {
 
       // UVs only change when the bank picks a different keyframe; skip the per-frame GPU upload otherwise.
       if (queryResult.primary.id !== this.currentKeyframeId) {
-        this.warp.updateUVs(queryResult.primary.landmarks);
+        // On the extended topology (R4b) a bank keyframe has no forehead rings: they stay collapsed.
+        this.warp.updateUVs(this.foreheadOn ? this.collapsedExtension(queryResult.primary.landmarks) : queryResult.primary.landmarks);
         this.currentKeyframeId = queryResult.primary.id;
       }
       if (queryResult.primary.source !== this.currentKeyframeSource) {
@@ -1043,6 +1132,8 @@ export class RealtimeFacialEngine {
       this.warp.setDelight(symmetricDelightGains(this.delightBands[0], lumaAtScale(this.delightBands, radiusShare)));
       this.delightRadius = radiusShare;
     }
+    // R4b: place the forehead rings from the calibrated hairline (after every other vertex adjustment).
+    const forehead = this.foreheadOn ? this.updateForehead(layout, k, timestamp) : undefined;
     this.warp.render({
       positions: this.warpPositions,
       opacity: Math.pow(strength, 0.55),
@@ -1067,6 +1158,7 @@ export class RealtimeFacialEngine {
             radiusShare,
             globalTone: flags.relightGlobalTone,
             shadowGuard: flags.relightShadowGuard,
+            excludeHair: this.foreheadOn && this.segActive,
           }
         : undefined,
       motionBlurPx: flags.motionBlur ? [this.headVelocity.x * MOTION_BLUR_EXPOSURE, -this.headVelocity.y * MOTION_BLUR_EXPOSURE] : undefined,
@@ -1075,6 +1167,7 @@ export class RealtimeFacialEngine {
         ? { masks: this.masks, dirty: this.masksDirty, srcMap: [layout.offsetX, layout.offsetY, layout.drawWidth, layout.drawHeight], mirror: layout.mirror, strength: clamp(s.segmentationStrength ?? 1, 0, 1) }
         : undefined,
       twoBand: flags.twoBandBlend && relightOn,
+      forehead,
       foreshorten: flags.foreshortenFade && this.warp.personaUvs ? (this.foreshorten = foreshortenWeights(this.warpPositions, this.warp.personaUvs, this.topology.triangles, this.topology.vertexCount, this.foreshorten ?? undefined)) : undefined,
     });
     this.masksDirty = false;
@@ -1139,14 +1232,119 @@ export class RealtimeFacialEngine {
   /** Starts the segmentation worker once a flag that needs it is on (and the tracker has loaded). */
   private ensureSegmenter() {
     const f = realismFlags.get();
-    if (!(f.segmentation || f.personaInpaint) || this.status.model !== 'ready') return;
+    if (!(f.segmentation || f.personaInpaint || f.foreheadExtension) || this.status.model !== 'ready') return;
     void this.segmenter.load(this.settings.segmentCpu ? 'CPU' : 'GPU', this.masks, () => {
       this.masksDirty = true;
       this.segUpdates++;
     });
   }
 
-  private async inpaintPersona(texture: HTMLImageElement | HTMLCanvasElement, uv: Float32Array): Promise<{ canvas: HTMLCanvasElement; share: number } | null> {
+  /**
+   * R4b: selects the base or the extended topology for the current flags. The extension needs the
+   * shader (segmentation masks, hairline feather), so the Canvas 2D fallback keeps the base mesh.
+   */
+  private applyForeheadTopology() {
+    const on = realismFlags.get().foreheadExtension && this.warp.usesWebGL;
+    if (on && !this.extTopology) this.extTopology = extendTopology(this.baseTopology);
+    const topology = on ? this.extTopology! : this.baseTopology;
+    const changed = topology !== this.topology || on !== this.foreheadOn;
+    this.foreheadOn = on;
+    this.topology = topology;
+    this.foreshorten = null;
+    this.foreheadStrength = 0;
+    this.foreheadClock = null;
+    // No mapping until the persona has been prepared for this topology.
+    this.foreheadWearer = null;
+    this.foreheadShown = null;
+    this.warp.setTopology(topology);
+    this.warp.setEyeFade(eyeFadeWeights(topology, this.settings.eyePassThroughRadius));
+    // The UV set must cover every vertex the topology indexes until the persona is prepared again.
+    const uvs = this.warp.personaUvs;
+    if (changed && on && uvs && uvs.length < EXT_VERTEX_COUNT * 2) this.warp.updateUVs(this.collapsedExtension(uvs));
+    this.personaUvExt = null;
+  }
+
+  /** A UV or position set padded for the extended topology with the forehead rings collapsed onto the oval. */
+  private collapsedExtension(points: Float32Array): Float32Array {
+    const out = padPoints(points);
+    extendForehead(out, NO_EXTENSION, 0);
+    return out;
+  }
+
+  /**
+   * R4b §3: maps the persona's brow-to-hairline span onto the wearer's. Runs when either hairline
+   * changes (persona load, wearer calibration) or the stretch-guard limits do: the guard gives the
+   * wearer-side ratios used every frame and the persona-side ratios the extension UVs are placed from.
+   */
+  private applyForeheadMapping() {
+    const uv = this.personaUvExt;
+    if (!this.foreheadOn || !uv) return;
+    const persona = this.personaRatios;
+    const wearer = this.hairline.ratios;
+    let personaSide: ArrayLike<number> = persona ?? NO_EXTENSION;
+    this.foreheadWearer = null;
+    this.foreheadClamped = 0;
+    if (persona && wearer) {
+      const c = stretchClamp(wearer, persona, clamp(this.settings.foreheadStretchMin ?? STRETCH_MIN, 0.3, 1), clamp(this.settings.foreheadStretchMax ?? STRETCH_MAX, 1, 3));
+      this.foreheadWearer = c.wearer;
+      this.foreheadClamped = c.clamped;
+      personaSide = c.persona;
+    }
+    extendForehead(uv, personaSide, 1, this.personaTexSize.height / Math.max(1, this.personaTexSize.width));
+    for (let i = EXT_MID_START * 2; i < EXT_VERTEX_COUNT * 2; i++) uv[i] = clamp(uv[i], 0, 1);
+    this.warp.updateUVs(uv);
+  }
+
+  /**
+   * R4b §1, per frame: feeds the hairline calibration (a mask measurement only when the masks
+   * changed and the face is frontal), grows the extension in once both hairlines are known, and
+   * writes the two forehead rings into the warp positions from the stored ratios.
+   */
+  private updateForehead(layout: SourceLayout, k: LandmarkKinematics, timestamp: number): { strength: number; featherPx: number } {
+    const s = this.settings;
+    const masksDrive = this.segActive && (s.segmentationStrength ?? 1) > 0.5;
+    const frontal = Math.abs(k.yaw) < HAIRLINE_FRONTAL_DEG && Math.abs(k.pitch) < HAIRLINE_FRONTAL_DEG;
+    let sample: Array<number | null> | null = null;
+    if (masksDrive && this.segUpdates !== this.hairlineSegSeen) {
+      this.hairlineSegSeen = this.segUpdates;
+      if (frontal) {
+        const W = this.canvas.width;
+        const m = this.masks;
+        sample = measureHairlineRatios(this.smoothed, (x, y) => {
+          const u = ((layout.mirror ? W - x : x) - layout.offsetX) / layout.drawWidth;
+          const v = (y - layout.offsetY) / layout.drawHeight;
+          if (u < m.rect[0] || u > m.rect[0] + m.rect[2] || v < m.rect[1] || v > m.rect[1] + m.rect[3]) return null;
+          return { hair: sampleMask(m, 0, u, v), skin: Math.max(sampleMask(m, 2, u, v), sampleMask(m, 1, u, v)) };
+        });
+      }
+    }
+    const frame = foreheadFrame(this.smoothed);
+    if (this.hairline.push(sample, { frontal, t: timestamp, spanOverFaceHeight: frame ? frame.span / Math.max(1, k.faceHeight) : 0.3 })) this.applyForeheadMapping();
+
+    // Active once the wearer and the persona hairlines are both known; real keyframes get their own calibration in R5.
+    const active = masksDrive && !!this.foreheadWearer && this.referenceBank.getKeyframes().length === 0;
+    const dt = this.foreheadClock === null ? 0 : clamp(timestamp - this.foreheadClock, 0, 100);
+    this.foreheadClock = timestamp;
+    this.foreheadStrength = clamp(this.foreheadStrength + (active ? dt : -dt) / FOREHEAD_RAMP_MS, 0, 1);
+    // A recalibration moves the rings to the new hairline over a few frames instead of in one step.
+    const target = this.foreheadWearer;
+    if (!target) {
+      if (this.foreheadStrength === 0) this.foreheadShown = null;
+    } else if (!this.foreheadShown || this.foreheadStrength === 0) {
+      this.foreheadShown = [...target];
+    } else {
+      const a = Math.min(1, dt / FOREHEAD_SETTLE_MS);
+      for (let c = 0; c < EXT_COLUMNS; c++) this.foreheadShown[c] += (target[c] - this.foreheadShown[c]) * a;
+    }
+    extendForehead(this.warpPositions, this.foreheadShown ?? NO_EXTENSION, this.foreheadStrength);
+    return { strength: this.foreheadStrength, featherPx: clamp(s.hairlineFeather ?? 0.025, 0.005, 0.1) * k.faceHeight };
+  }
+
+  private async inpaintPersona(
+    texture: HTMLImageElement | HTMLCanvasElement,
+    uv: Float32Array,
+    opts: { inpaint: boolean; forehead: boolean }
+  ): Promise<{ canvas: HTMLCanvasElement; share: number; ratios: number[] | null; measured: Array<number | null> | null } | null> {
     this.ensureSegmenter();
     // The worker takes ~10 s to start on this laptop (model, WASM, GPU graph); persona preparation can wait for it.
     for (let i = 0; i < 60 && !this.segmenter.ready && !this.segmenter.error; i++) await new Promise((r) => setTimeout(r, 500));
@@ -1170,8 +1368,34 @@ export class RealtimeFacialEngine {
     const grown = oval.map((p) => ({ x: cx + (p.x - cx) * 1.05, y: cy + (p.y - cy) * 1.05 }));
     const minX = Math.max(0, Math.floor(Math.min(...grown.map((p) => p.x)))), maxX = Math.min(tw - 1, Math.ceil(Math.max(...grown.map((p) => p.x))));
     const minY = Math.max(0, Math.floor(Math.min(...grown.map((p) => p.y)))), maxY = Math.min(th - 1, Math.ceil(Math.max(...grown.map((p) => p.y))));
+    // R4b §2: the persona's hairline per column, and the forehead polygon up to it (texture pixels).
+    let ratios: number[] | null = null;
+    let measured: Array<number | null> | null = null;
+    let forehead: Array<{ x: number; y: number }> | null = null;
+    if (opts.forehead) {
+      const pts = new Float32Array(EXT_VERTEX_COUNT * 2);
+      for (let i = 0; i < Math.min(TRACKED_POINT_COUNT, uv.length / 2); i++) {
+        pts[i * 2] = uv[i * 2] * tw;
+        pts[i * 2 + 1] = uv[i * 2 + 1] * th;
+      }
+      measured = measureHairlineRatios(
+        pts,
+        (x, y) => {
+          const u = x / tw, v = y / th;
+          if (u < masks.rect[0] || u > masks.rect[0] + masks.rect[2] || v < masks.rect[1] || v > masks.rect[1] + masks.rect[3]) return null;
+          return { hair: sampleMask(masks, 0, u, v), skin: Math.max(sampleMask(masks, 2, u, v), sampleMask(masks, 1, u, v)) };
+        },
+        // Hair right on the oval is a fringe: it is filled below and the column takes its neighbours' ratio.
+        { startsInHair: 'ambiguous' }
+      );
+      ratios = fillAmbiguousRatios(measured);
+      extendForehead(pts, ratios);
+      forehead = foreheadPolygon(pts);
+    }
     const mask = new Uint8Array(tw * th);
-    let inside = 0, masked = 0;
+    /** Pixels masked because they were hair (not glasses): their alpha is lowered after the fill (R4b §2). */
+    const hairFill = opts.forehead ? new Uint8Array(tw * th) : null;
+    let inside = 0, masked = 0, filled = 0;
     const insidePoly = (x: number, y: number) => {
       let inn = false;
       for (let i = 0, j = grown.length - 1; i < grown.length; j = i++) {
@@ -1180,23 +1404,45 @@ export class RealtimeFacialEngine {
       }
       return inn;
     };
-    for (let y = minY; y <= maxY; y++) {
-      for (let x = minX; x <= maxX; x++) {
-        if (!insidePoly(x + 0.5, y + 0.5)) continue;
-        inside++;
+    // The scan covers the oval and, with the extension, the forehead above it.
+    const fMinX = forehead ? Math.max(0, Math.floor(Math.min(...forehead.map((p) => p.x)))) : minX;
+    const fMaxX = forehead ? Math.min(tw - 1, Math.ceil(Math.max(...forehead.map((p) => p.x)))) : maxX;
+    const fMinY = forehead ? Math.max(0, Math.floor(Math.min(...forehead.map((p) => p.y)))) : minY;
+    const fMaxY = forehead ? Math.min(th - 1, Math.ceil(Math.max(...forehead.map((p) => p.y)))) : maxY;
+    for (let y = Math.min(minY, fMinY); y <= Math.max(maxY, fMaxY); y++) {
+      for (let x = Math.min(minX, fMinX); x <= Math.max(maxX, fMaxX); x++) {
+        const inOval = opts.inpaint && insidePoly(x + 0.5, y + 0.5);
+        const inForehead = !inOval && !!forehead && insidePolygon(forehead, x + 0.5, y + 0.5);
+        if (!inOval && !inForehead) continue;
         const u = (x + 0.5) / tw, v = (y + 0.5) / th;
-        if (Math.max(sampleMask(masks, 0, u, v), sampleMask(masks, 3, u, v)) >= 0.5) {
+        const hair = sampleMask(masks, 0, u, v) >= 0.5;
+        if (inOval) {
+          // The share reported by the quality gate stays the oval's (R4).
+          inside++;
+          if (hair || sampleMask(masks, 3, u, v) >= 0.5) {
+            mask[y * tw + x] = 1;
+            masked++;
+            filled++;
+          }
+        } else if (hair) {
           mask[y * tw + x] = 1;
-          masked++;
+          filled++;
         }
+        if (hair && hairFill && mask[y * tw + x]) hairFill[y * tw + x] = 1;
       }
     }
-    if (!masked) return { canvas: c, share: 0 };
+    if (!filled) return { canvas: c, share: 0, ratios, measured };
     // Grow by 1.5 mask pixels so the soft, blurred edge of a frame or strand goes with it.
-    const grownMask = dilateMask(mask, tw, th, Math.max(2, Math.round((1.5 * masks.rect[2] * tw) / masks.width)));
+    const radius = Math.max(2, Math.round((1.5 * masks.rect[2] * tw) / masks.width));
+    const grownMask = dilateMask(mask, tw, th, radius);
     inpaintMasked(px.data, tw, th, grownMask);
+    if (hairFill) {
+      // Filled hair is invented skin: the persona is slightly more transparent there.
+      const grownHair = dilateMask(hairFill, tw, th, radius);
+      for (let i = 0; i < grownHair.length; i++) if (grownHair[i]) px.data[i * 4 + 3] = Math.min(px.data[i * 4 + 3], FRINGE_FILL_ALPHA);
+    }
     cctx.putImageData(px, 0, 0);
-    return { canvas: c, share: inside ? masked / inside : 0 };
+    return { canvas: c, share: inside ? masked / inside : 0, ratios, measured };
   }
 
   /**
@@ -1261,8 +1507,10 @@ export class RealtimeFacialEngine {
     const flags = realismFlags.get();
     // R4: with segmentation masks driving the hairline, the geometric passes are the fallback only.
     const segDrives = this.segActive && (this.settings.segmentationStrength ?? 1) > 0.5;
-    if (flags.foreheadHarmonize && !segDrives) CranialBoundaryBlender.harmonizeForeheadBoundary(octx, this.warpPositions);
-    if (flags.hairlineSoften && !segDrives) CranialBoundaryBlender.softenHairlineEdges(octx, this.warpPositions);
+    // R4b: with the forehead extension in, the hairline ring's feather is the only transition.
+    const stackedFades = !segDrives && this.foreheadStrength === 0;
+    if (flags.foreheadHarmonize && stackedFades) CranialBoundaryBlender.harmonizeForeheadBoundary(octx, this.warpPositions);
+    if (flags.hairlineSoften && stackedFades) CranialBoundaryBlender.softenHairlineEdges(octx, this.warpPositions);
   }
 
   /** Estimates the wearer's facial skin tone across 5 spatial zones and derives lighting gains. */
@@ -1673,7 +1921,7 @@ export class RealtimeFacialEngine {
         driver: snap.driver,
         overlay: this.overlayDrawnThisFrame ? snap.overlay : null,
         landmarks: snap.landmarks,
-        warpPositions: Float32Array.from(this.warpPositions),
+        warpPositions: Float32Array.from(this.foreheadOn ? this.warpPositions : this.warpPositions.subarray(0, LANDMARK_COUNT * 2)),
         outputLandmarks: null,
         mirror: layout.mirror,
         layout: { offsetX: layout.offsetX, offsetY: layout.offsetY, drawWidth: layout.drawWidth, drawHeight: layout.drawHeight },
@@ -1747,6 +1995,20 @@ export class RealtimeFacialEngine {
           symmetricDelight: !!this.delightBands,
           segmentation: { ready: this.segmenter.ready, active: this.segActive, updates: this.segUpdates, backend: this.segmenter.backend, error: this.segmenter.error, lastMs: this.segmenter.lastMs, lastPackMs: this.segmenter.lastPackMs, bitmapMs: this.segmenter.bitmapMs, inferMs: this.segmenter.inferMs, readMs: this.segmenter.readMs, roundTripMs: this.segmenter.roundTripMs, submits: this.segmenter.submits },
           personaInpaintShare: this.personaInpaintShare,
+          forehead: this.foreheadOn
+            ? {
+                strength: this.foreheadStrength,
+                calibrations: this.hairline.calibrations,
+                collecting: this.hairline.isCollecting,
+                samples: this.hairline.sampleCount,
+                wearerRatios: this.hairline.ratios ? [...this.hairline.ratios] : null,
+                personaRatios: this.personaRatios ? [...this.personaRatios] : null,
+                personaMeasured: this.personaRatiosMeasured ? [...this.personaRatiosMeasured] : null,
+                effectiveRatios: this.foreheadWearer ? [...this.foreheadWearer] : null,
+                clampedColumns: this.foreheadClamped,
+                disagreement: this.hairline.lastDisagreement,
+              }
+            : null,
           renderer: this.status.renderer,
           pose: { ...this.lastPose },
           isSpeaking: this.lastMetrics?.isSpeaking ?? false,
