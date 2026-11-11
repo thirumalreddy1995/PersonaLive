@@ -91,6 +91,17 @@ mask; the persona is removed under the wearer's hair, hand and glasses, captures
 `cameraMatchSameMask` (the camera match measures the camera frame only on the pixels where the
 persona layer is opaque, so faded or removed persona areas do not lower the blur).
 
+R4b flag: `foreheadExtension` (off by default; persona-reload; needs `segmentation`). The mesh is
+extended from the upper face oval to the wearer's hairline, calibrated once from the hair mask
+during a frontal hold; `--flags r4` is the R4 defaults with it off, `--flags r4,foreheadExtension=1`
+turns it on. Settings: `hairlineFeather=0.025` (share of face height), `foreheadStretchMin=0.75`,
+`foreheadStretchMax=1.35`, `foreheadRecalibrate=<n>` (any change starts a new calibration).
+`summary.forehead` holds the wearer and persona hairline ratios, the ratios after the stretch guard
+and how far the extension has grown in; `summary.hairlineAlignment` is the distance between the
+persona layer's top edge and the hair-mask boundary across the forehead (px and % of face height,
+upright frontal captures only; `stepPx` is the change between capture times, not video frames).
+The extension lands about 3 s into a clip, so earlier captures show the R4 forehead.
+
 `--settings temporalSmoothing=20,blendStrength=100` overrides the inspector settings for the run (the
 same keys as `TransformationSettings`; `?rs=` on the page URL does the same in a browser). The rigid
 forehead can be tuned the same way: `rigidPoseMinCutoff` / `rigidPoseBeta` (One Euro on the head
