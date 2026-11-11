@@ -1019,6 +1019,110 @@ export function hairlineAlignment(personaEdge: Array<number | null>, hairEdge: A
   return n ? { meanPx: s / n, columns: n } : null;
 }
 
+/** Upper face-oval landmarks across the forehead (subject's right to left), as in the R4b extension. */
+const FOREHEAD_OVAL_COLUMNS = [54, 103, 67, 109, 10, 338, 297, 332, 284];
+
+/**
+ * Per column in [x0, x1): the row where the wearer's hair starts above the forehead, walking up
+ * from `startY(x)` (a row on the forehead skin) by at most `maxRise` rows through the packed
+ * segmentation masks (R = hair, source-normalised, covering `rect`). A column is null when no
+ * hair is met, when the walk leaves the masks, or when it starts inside hair (a fringe: there is
+ * no skin-to-hair boundary above that point).
+ */
+export function hairBoundaryEdge(
+  masks: RgbaImage,
+  layout: { offsetX: number; offsetY: number; drawWidth: number; drawHeight: number },
+  mirror: boolean,
+  rect: [number, number, number, number],
+  canvasWidth: number,
+  x0: number,
+  x1: number,
+  startY: (x: number) => number,
+  maxRise: number
+): Array<number | null> {
+  const hairAt = (x: number, y: number): number | null => {
+    const su = ((mirror ? canvasWidth - x : x) - layout.offsetX) / layout.drawWidth;
+    const sv = (y - layout.offsetY) / layout.drawHeight;
+    const u = (su - rect[0]) / rect[2];
+    const v = (sv - rect[1]) / rect[3];
+    if (u < 0 || u > 1 || v < 0 || v > 1) return null;
+    const mx = Math.min(masks.width - 1, Math.max(0, Math.round(u * masks.width - 0.5)));
+    const my = Math.min(masks.height - 1, Math.max(0, Math.round(v * masks.height - 0.5)));
+    return masks.data[(my * masks.width + mx) * 4] / 255;
+  };
+  const out: Array<number | null> = [];
+  for (let x = Math.floor(x0); x < Math.ceil(x1); x++) {
+    const y0 = Math.round(startY(x + 0.5));
+    let edge: number | null = null;
+    for (let y = y0; y >= Math.max(0, y0 - maxRise); y--) {
+      const h = hairAt(x + 0.5, y + 0.5);
+      if (h === null) break;
+      if (h >= 0.5) {
+        // Hair on the starting rows is a fringe, not a boundary.
+        if (y < y0 - 1) edge = y;
+        break;
+      }
+    }
+    out.push(edge);
+  }
+  return out;
+}
+
+export interface ForeheadHairline {
+  /** Mean |persona top edge − hair boundary| over the columns where both exist (pixels). */
+  meanPx: number;
+  /** The same as a percentage of face height (landmark 10 to the chin). */
+  pctFaceHeight: number;
+  /** Mean signed offset: positive = the persona ends below the hairline (the wearer's skin shows), negative = it runs into the hair. */
+  signedPx: number;
+  columns: number;
+}
+
+/**
+ * Hairline alignment (plan metric): distance between the top edge of the persona layer and the
+ * wearer's hair-mask boundary, per pixel column across the middle of the forehead. Columns are
+ * image columns, so it is meaningful on roughly upright, frontal frames. Null without a usable column.
+ */
+export function foreheadHairline(
+  overlay: RgbaImage,
+  masks: RgbaImage,
+  layout: { offsetX: number; offsetY: number; drawWidth: number; drawHeight: number },
+  mirror: boolean,
+  rect: [number, number, number, number],
+  points: Landmarks
+): ForeheadHairline | null {
+  const cols = FOREHEAD_OVAL_COLUMNS.map((i) => ({ x: points[i * 2], y: points[i * 2 + 1] })).sort((a, b) => a.x - b.x);
+  // The middle of the forehead (between the second and second-to-last columns): the temples are excluded.
+  const x0 = Math.max(0, cols[1].x);
+  const x1 = Math.min(overlay.width, cols[cols.length - 2].x);
+  if (!(x1 - x0 >= 4)) return null;
+  const span = Math.hypot(points[10 * 2] - points[9 * 2], points[10 * 2 + 1] - points[9 * 2 + 1]);
+  const faceHeight = Math.hypot(points[152 * 2] - points[10 * 2], points[152 * 2 + 1] - points[10 * 2 + 1]);
+  if (!(span > 1) || !(faceHeight > 1)) return null;
+  // The top of the tracked mesh as a function of x, lowered a little so the walk starts on skin.
+  const ovalY = (x: number) => {
+    for (let i = 1; i < cols.length; i++) {
+      if (x <= cols[i].x) {
+        const t = cols[i].x > cols[i - 1].x ? (x - cols[i - 1].x) / (cols[i].x - cols[i - 1].x) : 0;
+        return cols[i - 1].y + (cols[i].y - cols[i - 1].y) * Math.min(1, Math.max(0, t));
+      }
+    }
+    return cols[cols.length - 1].y;
+  };
+  const hair = hairBoundaryEdge(masks, layout, mirror, rect, overlay.width, x0, x1, (x) => ovalY(x) + 0.1 * span, Math.ceil(1.4 * span));
+  const persona = personaTopEdge(overlay, x0, x1);
+  let abs = 0, signed = 0, n = 0;
+  for (let i = 0; i < Math.min(hair.length, persona.length); i++) {
+    const h = hair[i], p = persona[i];
+    if (h === null || p === null) continue;
+    abs += Math.abs(p - h);
+    signed += p - h;
+    n++;
+  }
+  if (!n) return null;
+  return { meanPx: abs / n, pctFaceHeight: (100 * abs) / n / faceHeight, signedPx: signed / n, columns: n };
+}
+
 /** Mean absolute frame-to-frame change of a per-frame scalar series (e.g. mean edge position). */
 export function jitter(series: number[]): number {
   if (series.length < 2) return 0;

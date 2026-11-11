@@ -44,6 +44,8 @@ interface Summary {
   foreheadToneStepOutput: number | null;
   foreheadToneStepDriver: number | null;
   foreheadToneStepDelta: number | null;
+  /** Present from R4b on. */
+  hairlineAlignment?: { pctFaceHeight: number; stepPx: number } | null;
   flicker: { delta: number | null } | null;
   textureSlide: { residualPx: number | null } | null;
   performance: { fps: number; frameP95Ms: number };
@@ -93,6 +95,7 @@ export const COMPARE_ROWS: CompareRow[] = [
   { key: 'sharpnessGap', label: 'sharpness gap, face/ring', pick: (s) => s.targets.sharpness.gap, higherIsWorse: true, abs: true, noise: 0.3 },
   { key: 'foreheadDelta', label: 'forehead step Δ (output − driver)', pick: (s) => s.foreheadToneStepDelta, higherIsWorse: true, abs: true, noise: 0.5 },
   { key: 'foreheadOut', label: 'forehead step output (ΔE)', pick: (s) => s.foreheadToneStepOutput, higherIsWorse: true, noise: 0.5 },
+  { key: 'hairline', label: 'hairline alignment (% face height)', pick: (s) => s.hairlineAlignment?.pctFaceHeight ?? null, higherIsWorse: true, noise: 0.5 },
   { key: 'seamStepOut', label: 'seam step output (ΔE)', pick: (s) => s.targets.seamStep?.output ?? null, higherIsWorse: true, noise: 0.5 },
   { key: 'seamStepGap', label: 'seam step gap (output − driver, ΔE)', pick: (s) => s.targets.seamStep?.gap ?? null, higherIsWorse: true, noise: 0.5 },
   { key: 'shadingSlope', label: 'shading slope (1 = follows the lamp)', pick: (s) => s.shading?.slope ?? null, higherIsWorse: false, noise: 0.1 },

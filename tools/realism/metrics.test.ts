@@ -9,6 +9,8 @@ import {
   flicker,
   foreheadToneStep,
   hairlineAlignment,
+  hairBoundaryEdge,
+  foreheadHairline,
   jitter,
   laplacianVariance,
   luminance,
@@ -584,4 +586,55 @@ test('unpackMasksImage restores the four mask channels from the opaque side-by-s
   // 1 × 1 masks: hair 10, body 20, face 30, accessories 40 → packed as a 2 × 1 opaque image.
   const img = { width: 2, height: 1, data: new Uint8Array([10, 20, 30, 255, 40, 0, 0, 255]) };
   assert.deepEqual(Array.from(unpackMasksImage(img).data), [10, 20, 30, 40]);
+});
+
+test('hairBoundaryEdge walks up to the hair mask and foreheadHairline compares it with the persona top edge', () => {
+  const W = 200, H = 200;
+  const layout = { offsetX: 0, offsetY: 0, drawWidth: W, drawHeight: H };
+  // Masks at half resolution over the whole frame: hair above row 60 (canvas pixels).
+  const masks: RgbaImage = { width: 100, height: 100, data: new Uint8ClampedArray(100 * 100 * 4) };
+  for (let y = 0; y < 30; y++) for (let x = 0; x < 100; x++) masks.data[(y * 100 + x) * 4] = 255;
+  const edge = hairBoundaryEdge(masks, layout, false, [0, 0, 1, 1], W, 50, 54, () => 100, 80);
+  assert.deepEqual(edge, [59, 59, 59, 59]);
+  // No hair within reach, the walk leaving the masks, and a start inside hair (a fringe) are all null.
+  assert.deepEqual(hairBoundaryEdge(masks, layout, false, [0, 0, 1, 1], W, 50, 52, () => 100, 20), [null, null]);
+  assert.deepEqual(hairBoundaryEdge(masks, layout, false, [0, 0.4, 1, 0.6], W, 50, 52, () => 100, 80), [null, null]);
+  assert.deepEqual(hairBoundaryEdge(masks, layout, false, [0, 0, 1, 1], W, 50, 52, () => 40, 80), [null, null]);
+  // Mirrored display: a mask with hair on the source's left half reads on the canvas's right half.
+  const half: RgbaImage = { width: 100, height: 100, data: new Uint8ClampedArray(100 * 100 * 4) };
+  for (let y = 0; y < 30; y++) for (let x = 0; x < 50; x++) half.data[(y * 100 + x) * 4] = 255;
+  assert.deepEqual(hairBoundaryEdge(half, layout, true, [0, 0, 1, 1], W, 150, 152, () => 100, 80), [59, 59]);
+  assert.deepEqual(hairBoundaryEdge(half, layout, true, [0, 0, 1, 1], W, 50, 52, () => 100, 80), [null, null]);
+
+  // A face whose mesh top is at row 90, brows at 120, chin at 190; forehead columns from x = 60 to 140.
+  const pts = new Float32Array(478 * 2);
+  const cols = [54, 103, 67, 109, 10, 338, 297, 332, 284];
+  cols.forEach((c, i) => {
+    pts[c * 2] = 60 + i * 10;
+    pts[c * 2 + 1] = 90;
+  });
+  pts[9 * 2] = 100;
+  pts[9 * 2 + 1] = 120;
+  pts[152 * 2] = 100;
+  pts[152 * 2 + 1] = 190;
+  const overlayWithTop = (top: number): RgbaImage => {
+    const o: RgbaImage = { width: W, height: H, data: new Uint8ClampedArray(W * H * 4) };
+    for (let y = top; y < 190; y++) for (let x = 40; x < 160; x++) o.data[(y * W + x) * 4 + 3] = 255;
+    return o;
+  };
+  // The persona ends at the mesh top, 30 rows below the hairline: 30% of the 100 px face height.
+  const short = foreheadHairline(overlayWithTop(90), masks, layout, false, [0, 0, 1, 1], pts)!;
+  assert.ok(Math.abs(short.meanPx - 31) <= 1, `mean ${short.meanPx}`);
+  assert.ok(short.signedPx > 0);
+  assert.ok(Math.abs(short.pctFaceHeight - 31) <= 1);
+  assert.equal(short.columns, 60);
+  // Extended to the hairline: aligned within a pixel.
+  const aligned = foreheadHairline(overlayWithTop(60), masks, layout, false, [0, 0, 1, 1], pts)!;
+  assert.ok(aligned.meanPx <= 1, `aligned ${aligned.meanPx}`);
+  // Running into the hair is a negative offset of the same size.
+  const over = foreheadHairline(overlayWithTop(50), masks, layout, false, [0, 0, 1, 1], pts)!;
+  assert.ok(over.signedPx < 0 && Math.abs(over.meanPx - 9) <= 1);
+  // Nothing to compare: no persona layer, or no hair.
+  assert.equal(foreheadHairline({ width: W, height: H, data: new Uint8ClampedArray(W * H * 4) }, masks, layout, false, [0, 0, 1, 1], pts), null);
+  assert.equal(foreheadHairline(overlayWithTop(60), { width: 100, height: 100, data: new Uint8ClampedArray(100 * 100 * 4) }, layout, false, [0, 0, 1, 1], pts), null);
 });

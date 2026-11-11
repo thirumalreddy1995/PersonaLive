@@ -230,6 +230,8 @@ interface FrameReport {
   foreheadToneStep: M.ForeheadToneStep | null;
   /** Identity guard (R3b): cosine similarity of the output face to the persona photo and to the wearer. */
   identity: IdentityFrame | null;
+  /** R4b: persona top edge against the hair-mask boundary across the forehead (null without masks or off-frontal). */
+  hairline: M.ForeheadHairline | null;
   /** R4: persona layer over the wearer's hair / hand / glasses per the segmentation masks (null without masks). */
   occlusion: M.OcclusionLeak | null;
   files: { output: string; driver: string; overlay: string | null } | null;
@@ -265,8 +267,15 @@ export interface ClipSummary {
   textureSlide: M.TextureSlide | null;
   /** Slide metric on the raw driver video: the floor set by landmark jitter and head motion. */
   driverTextureSlide: M.TextureSlide | null;
-  hairlineAlignment: null;
+  /**
+   * Hairline alignment (R4b): persona top edge against the wearer's hair-mask boundary across the
+   * forehead, over the captured frames that are roughly upright and frontal. `stepPx` is the mean
+   * change of the signed offset between consecutive captured frames (capture times, not video frames).
+   */
+  hairlineAlignment: { meanPx: number; pctFaceHeight: number; signedPx: number; frames: number; stepPx: number } | null;
   hairlineAlignmentNote: string;
+  /** R4b forehead extension state at the end of the clip (flag foreheadExtension), null when off. */
+  forehead: RealismDebugState['forehead'];
   performance: RealismDebugState['profile'] & { window: string; software: boolean };
   renderer: RealismDebugState['renderer'];
   cameraMatch: RealismDebugState['cameraMatch'];
@@ -487,6 +496,11 @@ async function captureClip(page: Page, args: Args, o: CaptureOptions): Promise<C
       foreheadToneStep: M.foreheadToneStep(output, driver, lms),
       identity: null,
       occlusion: overlay && masks && c.layout ? M.occlusionLeak(overlay, masks, c.layout, c.mirror, lms, c.masksRect ?? [0, 0, 1, 1]) : null,
+      // Image columns stand in for the forehead axis, so only roughly upright, frontal frames count.
+      hairline:
+        overlay && masks && c.layout && Math.abs(c.pose.roll) <= 10 && Math.abs(c.pose.yaw) <= 15
+          ? M.foreheadHairline(overlay, masks, c.layout, c.mirror, c.masksRect ?? [0, 0, 1, 1], lms)
+          : null,
       files,
     });
 
@@ -595,8 +609,19 @@ async function captureClip(page: Page, args: Args, o: CaptureOptions): Promise<C
     flicker,
     textureSlide,
     driverTextureSlide,
-    hairlineAlignment: null,
-    hairlineAlignmentNote: 'needs the R4 hair mask; personaTopEdge() is ready for it',
+    hairlineAlignment: (() => {
+      const h = frames.map((f) => f.hairline).filter((x): x is M.ForeheadHairline => !!x);
+      if (!h.length) return null;
+      return {
+        meanPx: M.meanOf(h.map((x) => x.meanPx))!,
+        pctFaceHeight: M.meanOf(h.map((x) => x.pctFaceHeight))!,
+        signedPx: M.meanOf(h.map((x) => x.signedPx))!,
+        frames: h.length,
+        stepPx: M.jitter(h.map((x) => x.signedPx)),
+      };
+    })(),
+    hairlineAlignmentNote: 'persona top edge (alpha 50%) vs the hair-mask boundary on upright frontal captures; needs the segmentation flag. stepPx is between capture times, not consecutive video frames.',
+    forehead: finalState.forehead ?? null,
     performance: { ...finalState.profile, window: 'last 300 frames of the replay', software: args.software },
     renderer: finalState.renderer,
     cameraMatch: finalState.cameraMatch,
@@ -695,6 +720,7 @@ export const GRID_METRICS: Array<{ key: string; label: string; pick: (s: ClipSum
   { key: 'mouthLipErrorPct', label: 'lip error (% face width)', pick: (s) => s.mouthLipErrorPct },
   { key: 'syntheticTeethShare', label: 'frames with synthetic teeth (share)', pick: (s) => (s.framesRenderedWholeClip ? s.syntheticTeethFramesWholeClip / s.framesRenderedWholeClip : null) },
   { key: 'foreheadToneStepDelta', label: 'forehead tone step Δ (ΔE)', pick: (s) => s.foreheadToneStepDelta },
+  { key: 'hairlineAlignmentPct', label: 'hairline alignment (% face height)', pick: (s) => s.hairlineAlignment?.pctFaceHeight ?? null },
   { key: 'flickerDelta', label: 'flicker Δ', pick: (s) => s.flicker?.delta ?? null },
   { key: 'textureSlidePx', label: 'texture slide (px/frame)', pick: (s) => s.textureSlide?.residualPx ?? null },
   { key: 'slideGapPx', label: 'texture slide gap (output − driver, px/frame)', pick: (s) => s.targets.slide?.gap ?? null },
