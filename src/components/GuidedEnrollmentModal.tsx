@@ -2,7 +2,8 @@ import React, { useCallback, useEffect, useRef, useState } from 'react';
 import { Camera, CheckCircle2, RotateCcw, ShieldCheck, X } from 'lucide-react';
 import { AuthorizedPersona, CATEGORY_LABEL, PersonaCategory } from '../types/index.ts';
 import { CONSENT_STORAGE_PREFIX } from './ConsentForm.tsx';
-import { getEnrollmentFrame, type EnrollmentFrame } from '../utils/enrollmentSource.ts';
+import { getEnrollmentFrame, setEnrollmentActive, type EnrollmentFrame } from '../utils/enrollmentSource.ts';
+import { publishEnrollment } from '../realism/debug.ts';
 import {
   ENROLLMENT_STEPS,
   ENROLL_ANALYSIS_WIDTH,
@@ -94,6 +95,7 @@ export const GuidedEnrollmentModal: React.FC<GuidedEnrollmentModalProps> = ({ is
   const qualityRef = useRef<{ t: number; value: ReturnType<typeof measureFace> }>({ t: 0, value: null });
   const capturingRef = useRef(false);
   const frameSizeRef = useRef({ width: 0, height: 0 });
+  const liveRef = useRef<{ yaw: number; pitch: number; mar: number; smile: number; sharpness: number | null; meanLuma: number | null } | null>(null);
   shotsRef.current = shots;
 
   // A fresh dialog every time it opens.
@@ -112,6 +114,13 @@ export const GuidedEnrollmentModal: React.FC<GuidedEnrollmentModalProps> = ({ is
     setError(null);
     holdRef.current.reset();
   }, [isOpen, defaultCategory]);
+
+  // The studio keeps its tracker running while this dialog is open (it stops behind other dialogs).
+  useEffect(() => {
+    if (!isOpen) return;
+    setEnrollmentActive(true);
+    return () => setEnrollmentActive(false);
+  }, [isOpen]);
 
   const step = ENROLLMENT_STEPS[Math.min(stepIndex, ENROLLMENT_STEPS.length - 1)];
 
@@ -191,6 +200,7 @@ export const GuidedEnrollmentModal: React.FC<GuidedEnrollmentModalProps> = ({ is
           clippedShare: q ? q.clippedShare : null,
         };
         const ev = evaluateShot(step, sample, baseline ? { yaw: baseline.yaw, pitch: baseline.pitch } : null);
+        liveRef.current = { yaw: sample.yaw, pitch: sample.pitch, mar: sample.mar, smile: sample.smile, sharpness: sample.sharpness, meanLuma: sample.meanLuma };
         setEvaluation(ev);
         const fire = holdRef.current.push(ev.ok, { yaw: live.yaw, pitch: live.pitch }, now);
         setHoldProgress(holdRef.current.progress(now));
@@ -210,6 +220,18 @@ export const GuidedEnrollmentModal: React.FC<GuidedEnrollmentModalProps> = ({ is
   }, [isOpen, phase, step, capture]);
 
   if (!isOpen) return null;
+
+  // Review tools read the dialog's state through the realism hook (a no-op without ?realism).
+  publishEnrollment({
+    phase,
+    stepId: phase === 'capture' ? step.id : null,
+    shots,
+    checks: phase === 'capture' && evaluation ? evaluation.checks : null,
+    hint: phase === 'capture' && evaluation && !evaluation.ok ? (evaluation.hints[0] ?? null) : null,
+    live: phase === 'capture' ? liveRef.current : null,
+    savedPersonaId: null,
+    error,
+  });
 
   const startCapture = () => {
     if (!signerName.trim()) return setError('Enter your name as the person who will be pictured.');
@@ -240,6 +262,7 @@ export const GuidedEnrollmentModal: React.FC<GuidedEnrollmentModalProps> = ({ is
       } catch {
         /* storage may be unavailable; the persona still carries the record for this session */
       }
+      publishEnrollment({ phase: 'saved', stepId: null, shots, checks: null, hint: null, live: null, savedPersonaId: id, error: null });
       onComplete(persona);
     } catch (err) {
       setError(err instanceof Error ? err.message : 'The persona could not be saved.');

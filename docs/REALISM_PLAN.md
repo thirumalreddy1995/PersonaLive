@@ -611,7 +611,7 @@ Over 30 extra runs of clip B (r4 on the new build, r4 on the previous commit, fl
 - 30 FPS at 720p with p95 frame time < 40 ms on this machine, for both personas.
 - No visible pop when keyframes switch on clip B.
 
-### R5 status (2026-11-12): implemented behind flags, not yet measured
+### R5 status (2026-11-12): implemented behind flags (measured in the report below)
 Branch `realism/r5-keyframes-perf`. `foreheadExtension` stays off (R4b decision); the upper-forehead orange patch and the camera-match bistability on clip B are carried into R5/R6 as open items. Nothing below changes a default: all five flags are off and `--flags r4` renders as before.
 
 - **Flags:** `keyframeCrossfade` (persona-reload), `guidedEnrollment`, `videoFramePacing`, `singleGlComposite`, `matrixHeadPose`. Every preset (`r0`…`r4`) sets them to 0.
@@ -641,6 +641,65 @@ Branch `realism/r5-keyframes-perf`. `foreheadExtension` stays off (R4b decision)
   - In the single GL path the debug panel's "persona layer" preview is refreshed only on captured frames.
 
 ---
+
+### R5 report (2026-11-12, later): measured, all five flags stay off
+Build `dist-r5/` (review build of this branch), Chrome on the Intel UHD adapter, clips A–E, two passes of six configurations (`r4` alone and `r4` plus each flag: `videoFramePacing`, `singleGlComposite`, `matrixHeadPose`, `keyframeCrossfade`, `keyframeCrossfade` with `matrixHeadPose`). Runs `r5-<cfg>-1` and `r5-<cfg>-2` under `realism-review/out/`. Pass 1 began on battery (reports carry `app.system.power`), so every timing below is from pass 2, on mains. The persona in all runs is the exported enrollment (below): six shots of the wearer himself, review-only.
+
+**Before → after per clip (pass 2, `r4` → `r4` + flag; A / B / C / D / E)**
+
+| | `r4` | + `videoFramePacing` | + `singleGlComposite` | + `matrixHeadPose` | + `keyframeCrossfade` | + keyframes and matrix pose |
+|---|---|---|---|---|---|---|
+| fps | 31.0 / 27.3 / 30.3 / 29.9 / 31.3 | 18.5 / 19.1 / 16.8 / 18.5 / 17.2 | 31.0 / 27.8 / 30.2 / 29.4 / 30.9 | 31.0 / 28.7 / 30.8 / 30.8 / 31.3 | 29.9 / 29.5 / 34.1 / 30.4 / 30.4 | 32.7 / 29.3 / 30.9 / 31.1 / 34.3 |
+| frame p95 (ms) | 62 / 81 / 75 / 76 / 66 | 89 / 60 / 78 / 56 / 95 | 71 / 83 / 80 / 79 / 73 | 70 / 81 / 72 / 76 / 72 | 75 / 65 / 54 / 74 / 75 | 70 / 89 / 76 / 70 / 56 |
+| frames processed | 632 / 468 / 637 / 860 / 1032 | 400 / 314 / 354 / 535 / 592 | 691 / 473 / 593 / 841 / 1073 | 641 / 477 / 623 / 870 / 1039 | 650 / 488 / 647 / 868 / 1060 | 683 / 471 / 631 / 903 / 1090 |
+| frame time outside the tracker (ms, mean) | 2.2 / 2.1 / 1.9 / 1.9 / 2.1 | 2.1 / 2.0 / 2.0 / 2.0 / 2.0 | 1.8 / 1.8 / 1.8 / 1.9 / 1.8 | 2.0 / 1.9 / 1.9 / 1.9 / 1.9 | 2.0 / 2.3 / 2.1 / 1.9 / 2.0 | 2.0 / 1.9 / 2.0 / 1.9 / 2.0 |
+| keyframe uploads | 0 | 0 | 0 | 0 | 6 on every clip | 6 on every clip |
+| sharpness gap (output against driver, ±0.15) | −0.14 / 0.49 / 0.31 / −0.29 / −0.26 | −0.18 / 1.42 / 1.99 / −0.23 / −0.08 | −0.16 / 0.91 / 0.25 / −0.33 / −0.26 | −0.23 / 0.32 / 0.26 / −0.21 / −0.18 | 0.11 / 0.63 / 0.17 / −0.23 / −0.19 | −0.07 / 0.68 / 0.76 / −0.30 / −0.25 |
+| seam step gap (ΔE, ≤ 1) | −0.04 / 0.45 / −0.07 / −0.03 / 0.04 | −0.01 / 0.28 / −0.07 / −0.01 / 0.03 | 0.05 / 0.35 / 0.60 / 0.01 / −0.04 | −0.03 / 0.15 / −0.12 / −0.03 / 0.06 | −0.05 / 0.09 / −0.15 / −0.09 / 0.05 | −0.01 / 0.04 / −0.14 / −0.03 / 0.06 |
+| texture slide gap (px/frame, ≤ 0.5) | 0.01 / 0.43 / −0.15 / 0.00 / −0.14 | 0.02 / 0.22 / −0.19 / −0.01 / −0.09 | 0.05 / 1.39 / −0.27 / 0.24 / 0.15 | 0.02 / 0.79 / 0.10 / −0.01 / −0.06 | −0.01 / 1.18 / 0.01 / 0.01 / 0.06 | 0.01 / 0.43 / −0.01 / 0.02 / −0.08 |
+
+- **Identity (SFace), delta against `r4`:** output↔persona 0.94 / 0.63 / 0.82 / 0.91 / 0.81 for `r4`; with keyframes and the matrix pose 0.94 / 0.69 / 0.81 / 0.91 / 0.81 (delta 0.00 / +0.06 / −0.01 / 0.00 / 0.00); with `keyframeCrossfade` alone 0.93 / 0.63 / 0.77 / 0.91 / 0.78 (C and E lower in both passes). The other three flags are within ±0.01 except clip B, which moves by up to 0.08 between passes of the same configuration. The persona here is the wearer himself, so the margin against the wearer says nothing in this phase (−0.01 to −0.19 in every configuration).
+- **Persona grid (median and worst 10%):** not run. The 28 synthetic personas have one photo each, so the keyframe path cannot run on them; the three other runtime flags showed no quality change on the clips. A grid pass for `matrixHeadPose` and `singleGlComposite` is still owed before either default could change.
+- **Contact sheets** (local, not tracked): `realism-review/out/r5-sheets/B-switch-1.60.png`, `B-switch-5.86.png`, `B-switch-9.67.png` (12 frames at 40 ms around three keyframe switches; rows driver / `r4` / keyframes) and `A-`, `B-`, `C-base-vs-keyframes.png`.
+
+**Acceptance**
+- **30 FPS at 720p:** about met on mains. `r4` runs 29.9–31.3 fps on A, C, D, E and 27.3 on B; no flag changes that except `videoFramePacing`, which lowers it to 17–19.
+- **p95 < 40 ms:** not met. p95 is 62–81 ms for `r4` and 54–89 ms with the flags; the median frame is 20–23 ms. The tracker is the whole of it: its p95 is 60–79 ms, and everything else in the frame averages 2 ms. No R5 flag touches the tracker.
+- **No visible pop on a keyframe switch (clip B):** met on the sheets and the numbers. The dense frames catch each fade midway (mix 1.00 → 0.89 → 0.65 → 0.20 → 0 at 1.60 s; similar at 5.86 s and 9.67 s) with no step between neighbours. Flicker gap across the switch: 0.45 / 0.25 / 0.67 with keyframes against 0.53 / 0.65 / −0.11 for `r4` at the same times. Zero texture uploads on a switch: 6 at load, 6 at the end of every clip (12 switches on clip B).
+- **Clip A (expressions):** nothing to judge. Clip A never leaves the frontal keyframe, and the smile shot is never selected on any clip (on clip C the smile at 17.4 s falls on the chin-up shot); there is no open-mouth shot.
+
+**Per flag**
+- **`videoFramePacing`: a real throttle, not duplicate removal.** A probe with its own `requestVideoFrameCallback` on clip A: flag off, 477 frames processed with a median gap of 33 ms; flag on, 317 processed with a median gap of 67 ms (on battery, same conditions for both). On mains the suite shows 400 against 632 frames on clip A. The engine's skipped-tick counter is 0, and at 31 fps on a 30 fps clip the plain loop has at most a few percent of duplicate ticks to remove, so duplicates explain almost none of the loss. Cause: the callback is requested again only after a frame has been processed, and a 20–30 ms frame makes it miss every other video frame. A loop that keeps processing on animation frames and uses the video callback only to mark "new frame" would avoid this; not done in R5. On this machine the frame costs more than one display refresh, so even a correct version has little to save.
+- **`singleGlComposite`: correct but no measurable gain.** Compositing falls from 0.3 to 0.1–0.2 ms and the frame outside the tracker from about 2.1 to 1.8 ms, inside the run-to-run noise of a 20–30 ms frame.
+- **`matrixHeadPose`: needed for keyframes, no effect alone.** With keyframes on clip B the matrix pose selects the matching shot at every turn (12 switches). With the landmark pose the selection is wrong on the pitch moves: the turned-left shot is chosen at 38° chin-up and alternates with the chin-down shot four times within 0.6 s. The matrix pose keeps tracking where the landmark estimate clamps (yaw past 55°, pitch past 45°); the two agree in sign throughout clip B, with the matrix pitch about 10° above the landmark pitch.
+- **`keyframeCrossfade` (with `matrixHeadPose`): works and looks better on turns, not ready as a default.** On the turned frames the eye region is cleaner than the single-photo render. Open points: the output is sharper than the driver on clip B (+0.63 to +0.79 in all four keyframe runs, with the camera-match blur bias at 0.00 in all of them, where `r4` moves between −0.25 and +0.49); the reference set is six frozen frames from clips, not a held-pose enrollment; identity cannot be judged with the wearer as persona.
+- **`guidedEnrollment`: exercised end to end by automation, one bug fixed, one shot refused.** See below.
+
+**Guided enrollment, automated (`npm run realism:enroll`)**
+- Chrome's fake camera plays `realism-review/enroll/camera.y4m`: seven frames cut from clips B, A and C, each frozen for 3 s. The clips contain no held poses (clip B sweeps through ±25° and ±15°), so frozen frames stand in for them. A `.mjpeg` stream did not advance past its first frame; `.y4m` does.
+- The dialog refused to start without a name and without the attestation, then took six shots itself, each passing every check: frontal (yaw 6.5°, pitch −2.2°, sharpness 29.6), turn right (36.5°, 9.8), turn left (−22.1°, 11.6), chin up (−18.0°, 36.3), chin down (17.5°, 14.1), smile (score 0.68, 39.2). Exposure passed on all (mean luma 91–117, clipped 0%).
+- **Open mouth was refused, correctly.** The widest mouth in any clip is 0.27 (clip A, speech) against the 0.30 the step asks for; the dialog showed "Open your mouth wider." and did not offer saving the incomplete set. The threshold was not lowered. So the sign-and-save step, and the hash check behind it, have still not run end to end.
+- **Bug found and fixed:** the studio stopped its tracker whenever a dialog was open, so the enrollment's checks read frozen tracking and could never pass after the first shot, for a person at the webcam as much as for the automation. The tracker now keeps running while the enrollment dialog is open, and a stopped engine reports no enrollment frame (`src/utils/enrollmentSource.ts`, unit-tested).
+- **Export bridge:** the dialog publishes its state to the realism hook (`enrollment()`); the tool writes the shots and `enrollment.json` to `realism-review/enrolled/<name>/` (gitignored) and `realism:capture --enrolled <dir>` loads them as a persona with reference keyframes. The export is marked review-only and carries no consent record: the attestation the script ticks is not a person's consent, so the persona loads with a pending record, which only a review build activates (`tools/realism/enrollExport.ts`, unit-tested).
+
+**What still looks fake (ranked)**
+1. Ring-shaped ghost around the eyes on clip B in `r4` (visible on all three switch sheets); weaker with the turned keyframes.
+2. Keyframe output sharper than the camera on clip B (see above).
+3. Carried from R4b: orange patch on the upper forehead (clip E), camera-match bistability on clip B (blur bias 0.25 and 0.71 for `r4` in the two passes).
+
+**Deviations**
+- Pass 1 timings are not used (battery, then mains from the third configuration on). `systemLoad` now records mains or battery in every report.
+- Two passes, not three; no persona grid.
+- Enrollment incomplete (6 of 7) and from frozen clip frames; the persona is the wearer.
+- The frontal step accepts up to 18° of pitch before a baseline exists: in one automated attempt it took the chin-down frame (17.4°) as the frontal shot. The script now starts on a straight face, as a person would; the band itself is unchanged and should be reviewed in R6.
+- Clip metadata: the clips are in a 60 fps container with about 30 distinct frames per second.
+
+**Recommendation: no default changes.**
+- `videoFramePacing`: off; redesign in R6 or drop.
+- `singleGlComposite`: off; no benefit measured.
+- `matrixHeadPose` and `keyframeCrossfade`: the pair to turn on next, after a live guided enrollment with held poses (which also completes the save path), a second person as persona so identity can be read, and the sharpness on clip B understood.
+- `guidedEnrollment`: off until a person has completed it at a webcam.
+- The p95 target needs work on the tracker (R6): input size, delegate, or tracking every frame on a worker.
 
 ## Phase R6 — Tuning pass
 

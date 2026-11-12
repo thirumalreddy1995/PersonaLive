@@ -110,6 +110,17 @@ selection by the pose from MediaPipe's matrix). `summary.r5` holds the keyframe 
 keyframe count however often the bank switches), the pacing mode, skipped ticks and whether the single GL
 path ran; frames carry `matrixPose`, `keyframeSecondaryId` and `keyframeMix`.
 
+`npm run realism:enroll -- --url <review build> --video <camera.y4m>` drives the guided enrollment dialog end
+to end with Chrome's fake camera playing a recording in a loop (`.y4m`; a `.mjpeg` file did not advance past
+its first frame here), and exports the shots to `realism-review/enrolled/<name>/` (`enrollment.json` plus one
+JPEG per shot, gitignored). The script checks that the dialog refuses to start without a name and without the
+attestation, starts once the face is straight and neutral, waits for the dialog to take each shot by itself,
+and logs a step whose checks never hold as refused (with the dialog's hints) instead of forcing it. The export
+is review-only: no consent record is written, and `realism:capture --enrolled <dir>` loads it with a pending
+record, which only a review build activates. A camera stream of held poses can be cut from clips with ffmpeg,
+for example seven stills of 3 s each at 15 fps:
+`ffmpeg -f concat -i list.txt -vf "fps=15,format=yuv420p" -f yuv4mpegpipe camera.y4m`.
+
 `--settings temporalSmoothing=20,blendStrength=100` overrides the inspector settings for the run (the
 same keys as `TransformationSettings`; `?rs=` on the page URL does the same in a browser). The rigid
 forehead can be tuned the same way: `rigidPoseMinCutoff` / `rigidPoseBeta` (One Euro on the head

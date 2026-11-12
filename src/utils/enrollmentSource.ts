@@ -32,6 +32,28 @@ export function setEnrollmentFrameProvider(p: Provider | null): void {
   provider = p;
 }
 
+// While the enrollment dialog is open the studio must keep tracking, although it otherwise stops
+// its engine behind a dialog: the dialog's checks read that tracking.
+let active = false;
+const activeListeners = new Set<() => void>();
+
+export function setEnrollmentActive(on: boolean): void {
+  if (active === on) return;
+  active = on;
+  for (const l of [...activeListeners]) l();
+}
+
+export function isEnrollmentActive(): boolean {
+  return active;
+}
+
+export function subscribeEnrollmentActive(listener: () => void): () => void {
+  activeListeners.add(listener);
+  return () => {
+    activeListeners.delete(listener);
+  };
+}
+
 /** The current live frame, or null when no webcam is running in the studio. */
 export function getEnrollmentFrame(): EnrollmentFrame | null {
   try {

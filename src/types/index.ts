@@ -36,7 +36,7 @@ export interface PersonaReference {
   id: string;
   label: string;
   imageUrl: string;
-  /** Head pose from the landmark estimate, in the driver convention of an un-mirrored photo. */
+  /** Head pose from the landmark estimate as the live tracker reported it when the shot was taken (the driver convention of the mirrored display), so it compares directly with the live pose. */
   pose: HeadPose;
   /** Head pose from MediaPipe's transformation matrix (degrees, same convention), when it was available. */
   matrixPose?: HeadPose | null;

@@ -571,6 +571,8 @@ export class RealtimeFacialEngine {
   public getEnrollmentFrame(): EnrollmentFrame | null {
     const v = this.videoElement;
     if (!v || this.videoKind !== 'webcam' || v.readyState < 2 || v.videoWidth === 0) return null;
+    // A stopped engine has no live tracking: its last values must not pass a shot check.
+    if (!this.isRunning) return null;
     const bs = this.lastFace?.blendshapes ?? {};
     const layout = this.lastLayout;
     let faceBox: [number, number, number, number] | null = null;

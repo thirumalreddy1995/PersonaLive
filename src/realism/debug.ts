@@ -323,6 +323,8 @@ export interface RealismWindowHook {
   reviewBuild: boolean;
   /** How often a pending-consent persona was activated through this hook (logged each time). */
   pendingBypassUses(): number;
+  /** R5 §2: the guided enrollment dialog's last state (null when it was never opened). */
+  enrollment(): EnrollmentDebugSnapshot | null;
   scheduleCaptures(times: number[]): boolean;
   scheduleBurst(start: number, count: number, scale: number): boolean;
   pending(): { captures: number; burst: number } | null;
@@ -391,6 +393,40 @@ let appHooks: RealismAppHooks | null = null;
 let pendingBypassUses = 0;
 
 /**
+ * R5 §2: what the guided enrollment dialog shows, for the review tools (tools/realism/enroll.ts).
+ * The tools read the shots from here and export them as a review-only persona; the signed consent
+ * record is never part of it.
+ */
+export interface EnrollmentDebugSnapshot {
+  phase: 'consent' | 'capture' | 'review' | 'saved';
+  stepId: string | null;
+  shots: Array<{
+    stepId: string;
+    label: string;
+    dataUrl: string;
+    sha256: string;
+    pose: HeadPose;
+    matrixPose: HeadPose | null;
+    expression: { mar: number; smile: number; browElevation: number };
+    quality: { sharpness: number; meanLuma: number; clippedShare: number };
+  }>;
+  /** The live shot check of the current step (null without a camera frame). */
+  checks: { face: boolean; pose: boolean; expression: boolean; sharpness: boolean; exposure: boolean } | null;
+  hint: string | null;
+  /** The live values the check ran on. */
+  live: { yaw: number; pitch: number; mar: number; smile: number; sharpness: number | null; meanLuma: number | null } | null;
+  savedPersonaId: string | null;
+  error: string | null;
+}
+
+let enrollmentSnapshot: EnrollmentDebugSnapshot | null = null;
+
+/** Called by the guided enrollment dialog; a no-op unless the realism surface is on. */
+export function publishEnrollment(snapshot: EnrollmentDebugSnapshot): void {
+  if (isRealismDebugEnabled()) enrollmentSnapshot = snapshot;
+}
+
+/**
  * Installs `window.__personaLiveRealism` once and applies `?rf=` flag overrides from the URL.
  * Calling it again only refreshes the app hooks.
  */
@@ -420,6 +456,7 @@ export function installRealismWindowHook(app?: RealismAppHooks): RealismWindowHo
     state: () => activeEngine?.getState() ?? null,
     reviewBuild: __PL_REVIEW_BUILD__,
     pendingBypassUses: () => pendingBypassUses,
+    enrollment: () => enrollmentSnapshot,
     scheduleCaptures: (times) => {
       if (!activeEngine) return false;
       activeEngine.scheduleCaptures(times);

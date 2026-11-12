@@ -21,7 +21,7 @@ import {
 } from 'lucide-react';
 import { TransformationSettings, AuthorizedPersona, FacialMetrics, HeadPose, EngineStatus } from '../types/index.ts';
 import { RealtimeFacialEngine } from '../utils/facialEngine.ts';
-import { setEnrollmentFrameProvider } from '../utils/enrollmentSource.ts';
+import { isEnrollmentActive, setEnrollmentFrameProvider, subscribeEnrollmentActive } from '../utils/enrollmentSource.ts';
 import { isRealismDebugEnabled } from '../realism/debug.ts';
 
 export interface RecordingResult {
@@ -137,12 +137,15 @@ export const StudioViewport: React.FC<StudioViewportProps> = ({
     engineRef.current?.setSplitPosition(splitPosition);
   }, [splitPosition]);
 
+  // R5 §2: the guided enrollment reads the live tracking, so the engine runs while that dialog is open.
+  const enrollmentActive = React.useSyncExternalStore(subscribeEnrollmentActive, isEnrollmentActive, isEnrollmentActive);
   useEffect(() => {
     const engine = engineRef.current;
     if (!engine) return;
-    if (isModalOpen || !isTransforming) engine.stop();
+    if (enrollmentActive) engine.start();
+    else if (isModalOpen || !isTransforming) engine.stop();
     else engine.start();
-  }, [isTransforming, isModalOpen]);
+  }, [isTransforming, isModalOpen, enrollmentActive]);
 
   // Recording timer
   useEffect(() => {

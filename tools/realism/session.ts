@@ -23,6 +23,8 @@ export interface SystemLoad {
   /** GPU utilisation in percent: nvidia-smi when present, else the Windows GPU engine counters. */
   gpuPercent: number | null;
   gpuSource: string;
+  /** Mains or battery (a laptop on battery throttles CPU and GPU: frame times are not comparable); null when unknown or no battery. */
+  power: 'ac' | 'battery' | null;
   at: string;
 }
 
@@ -60,11 +62,15 @@ export function systemLoad(): SystemLoad {
       gpuSource = 'nvidia-smi';
     } else gpuSource += `, nvidia-smi ${nv}%`;
   }
-  return { processes, chromeProcesses, cpuPercent, gpuPercent, gpuSource, at: new Date().toISOString() };
+  // Win32_Battery.BatteryStatus: 1 = discharging, 2 = on AC (also 6..9 while charging).
+  const bat = run('powershell -NoProfile -Command "(Get-CimInstance Win32_Battery | Select-Object -First 1).BatteryStatus"');
+  const batStatus = bat && /\d/.test(bat) ? Number(bat.trim()) : null;
+  const power = batStatus === null ? null : batStatus === 1 || batStatus === 4 || batStatus === 5 ? 'battery' : 'ac';
+  return { processes, chromeProcesses, cpuPercent, gpuPercent, gpuSource, power, at: new Date().toISOString() };
 }
 
 export function describeLoad(l: SystemLoad): string {
-  return `processes ${l.processes ?? '?'} (chrome ${l.chromeProcesses ?? '?'}), cpu ${l.cpuPercent ?? '?'}%, gpu ${l.gpuPercent ?? '?'}% (${l.gpuSource})`;
+  return `processes ${l.processes ?? '?'} (chrome ${l.chromeProcesses ?? '?'}), cpu ${l.cpuPercent ?? '?'}%, gpu ${l.gpuPercent ?? '?'}% (${l.gpuSource})${l.power === 'battery' ? ', ON BATTERY (frame times are throttled)' : l.power === 'ac' ? ', on mains' : ''}`;
 }
 
 async function waitForHttp(url: string, timeoutMs: number) {
@@ -111,6 +117,8 @@ export interface BrowserOptions {
   headed: boolean;
   /** Ask Chrome for the high-performance (discrete) GPU on hybrid-graphics laptops. */
   highPerformanceGpu?: boolean;
+  /** Further Chrome switches (the enrollment tool's fake camera). */
+  extraArgs?: string[];
 }
 
 export async function launchBrowser(opts: BrowserOptions): Promise<Browser> {
@@ -122,6 +130,7 @@ export async function launchBrowser(opts: BrowserOptions): Promise<Browser> {
   ];
   if (opts.software) chromeArgs.push('--use-gl=angle', '--use-angle=swiftshader', '--enable-unsafe-swiftshader');
   if (opts.highPerformanceGpu) chromeArgs.push('--force_high_performance_gpu');
+  if (opts.extraArgs) chromeArgs.push(...opts.extraArgs);
   const channels = opts.browser === 'chromium' ? [undefined] : [opts.browser, undefined];
   let lastError: unknown = null;
   for (const channel of channels) {

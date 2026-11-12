@@ -22,6 +22,8 @@
  *   --category <men|women>              category for personas given as a folder without a manifest (default men)
  *   --frames                            write the frame PNGs in grid mode too
  *   --regions                           also write t<sec>-regions.png: the metric patches drawn on driver and output
+ *   --enrolled <dir>          an enrollment exported by realism:enroll (enrollment.json and its shots): loaded as a
+ *                             review-only persona with its reference keyframes, in place of the default persona
  *   --flags <string>          realism flag overrides, e.g. "oralCavity=0,syntheticSuite=off" or the preset "r0"
  *   --settings <string>       transformation settings overrides, e.g. "temporalSmoothing=20,blendStrength=100"
  *   --run <name>              output folder name (default: <date>-<flags>)
@@ -48,6 +50,7 @@ import { SheetRow, blank, blit, compositeOnChecker, contactSheet, crop, decodeIm
 import { REVIEW_DIR, ROOT, describeLoad, driveAppShell, hookState, launchBrowser, sleep, startPreview, systemLoad, waitForHookState, webglRenderer } from './session.ts';
 import { regionsSheet } from './regions.ts';
 import { PersonaEntry, loadPersonaSet } from './personaSet.ts';
+import type { EnrollmentExport } from './enrollExport.ts';
 import { IdentityFrame, IdentitySummary, flipHorizontal, identityAvailable, runIdentity, summarizeIdentity } from './identity.ts';
 
 const CLIP_EXTENSIONS = ['.webm', '.mp4', '.mov', '.mkv', '.y4m'];
@@ -56,6 +59,7 @@ const CLIP_LABELS = ['A', 'B', 'C', 'D', 'E'];
 interface Args {
   identity: boolean;
   personaPhoto: string | null;
+  enrolled: string | null;
   clips: string[];
   personas: string | null;
   category: 'men' | 'women';
@@ -94,6 +98,7 @@ function parseArgs(argv: string[]): Args {
     highPerformanceGpu: false,
     identity: true,
     personaPhoto: null,
+    enrolled: null,
   };
   for (let i = 0; i < argv.length; i++) {
     const a = argv[i];
@@ -149,6 +154,9 @@ function parseArgs(argv: string[]): Args {
         break;
       case '--personaPhoto':
         args.personaPhoto = path.resolve(next());
+        break;
+      case '--enrolled':
+        args.enrolled = path.resolve(next());
         break;
       case '--no-identity':
         args.identity = false;
@@ -352,6 +360,15 @@ function localPersonaManifest(): Array<{ id: string; name: string; category: str
   } catch {
     return [];
   }
+}
+
+/** An enrollment exported by tools/realism/enroll.ts (frontal shot first). */
+function readEnrollmentExport(dir: string): EnrollmentExport {
+  const file = path.join(dir, 'enrollment.json');
+  if (!fs.existsSync(file)) throw new Error(`${file} not found: run \`npm run realism:enroll\` first`);
+  const e = JSON.parse(fs.readFileSync(file, 'utf8')) as EnrollmentExport;
+  if (!e.shots?.length || e.shots[0].stepId !== 'frontal') throw new Error(`${file} has no frontal shot`);
+  return e;
 }
 
 /** The default persona's photo: --personaPhoto, else the first entry of references/personas.json. */
@@ -864,7 +881,28 @@ async function main() {
       // --- Default persona: full frame dump per clip ----------------------------------------------
       // The local persona's consent record may be pending (R3c item 6): the app's gate then never
       // auto-selects it, so the review loads it explicitly through the dev hook, flagged as pending.
-      const localPhoto = args.persona ? null : defaultPersonaPhoto(args.personaPhoto);
+      const enrolled = args.enrolled ? readEnrollmentExport(args.enrolled) : null;
+      if (enrolled && !reviewBuild) throw new Error('an exported enrollment is a review-only persona: the review needs a review build (npm run build:review)');
+      if (enrolled) {
+        const dir = args.enrolled!;
+        const shotUrl = (file: string) => imageDataUrl(path.join(dir, file));
+        const before = await hookState(page);
+        await page.evaluate((spec) => window.__personaLiveRealism!.loadPersona(spec), {
+          name: enrolled.name,
+          category: enrolled.category,
+          dataUrl: shotUrl(enrolled.shots[0].file),
+          id: 'persona-enrolled-review',
+          role: 'Exported enrollment (realism review)',
+          consent: 'pending' as const,
+          references: enrolled.shots.map((s) => ({ label: s.label, dataUrl: shotUrl(s.file), pose: s.pose, matrixPose: s.matrixPose, expression: s.expression })),
+        });
+        if (before?.personaStatus === 'ready') await waitForHookState(page, 'persona reload', (s) => s?.personaStatus !== 'ready', 10000).catch(() => null);
+        await waitForHookState(page, 'enrolled persona ready', (s) => ['ready', 'no-face', 'error'].includes(s?.personaStatus ?? ''), 120000);
+        app.persona = `enrolled:${path.basename(dir)} (${enrolled.shots.length} shots${enrolled.complete ? '' : ', incomplete'})`;
+        app.pendingBypassUses = await page.evaluate(() => window.__personaLiveRealism?.pendingBypassUses() ?? 0);
+        console.log(`  persona: ${app.persona}; review-only, loaded with a pending consent record`);
+      }
+      const localPhoto = args.persona || enrolled ? null : defaultPersonaPhoto(args.personaPhoto);
       if (localPhoto && !reviewBuild) throw new Error('the local persona has a pending consent record: the review needs a review build (npm run build:review)');
       if (localPhoto) {
         const manifest = localPersonaManifest();
@@ -894,7 +932,7 @@ async function main() {
           writeFrames: true,
           defaultFrames: 8,
           pageErrors,
-          personaPhoto: args.identity ? defaultPersonaPhoto(args.personaPhoto) : null,
+          personaPhoto: !args.identity ? null : enrolled ? path.join(args.enrolled!, enrolled.shots[0].file) : defaultPersonaPhoto(args.personaPhoto),
         });
         printSummary(clip.label, report.summary);
         const { tile: _tile, ...rest } = report;
