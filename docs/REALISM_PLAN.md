@@ -517,6 +517,62 @@ Where the extension is in (A, C, D) the margin is level or a little higher. On B
 
 **Recommendation: keep `foreheadExtension` off.** Where it activates it does what it was built for (alignment from ~27% to 1.6–2.6% of face height on A and D, jitter under 0.4 px). Three things block a default-on: the persona is degraded whenever the flag is on and the calibration has not completed, the calibration does not complete on two of five clips, and the clip E criterion is unmeasured. Sharpness outliers on three grid personas need an explanation too. Proposed before a re-measure: find and fix the pre-calibration softening, relax the calibration (wider pitch band or a pitch offset learned at rest, fewer samples, tolerate brief breaks), re-record clip E without the hand on the hairline.
 
+### R4b fixes and re-measure (2026-11-12, later): default still off
+Fixes in `c6caf2d`, measured from the rebuilt frozen `dist-r4b`: `--flags r4` → `--flags r4,foreheadExtension=1`, three runs each on clips A, B and the re-recorded E (`r4c-base1..3`, `r4c-ext1..3`) and on personas p21, p04, p01d (`r4c-pg-base1..3`, `r4c-pg-ext1..3`). Same machine and caveats as the report above. Clip E is a new 36.9 s recording (a hand still rests on the top of the head in it, clear of the hairline).
+
+**What was fixed**
+- Inactive extension renders as r4: the foreshortening weights come from the base triangles only (the collapsed extension triangles had zero screen area against a non-zero UV area and faded the upper oval, i.e. the persona's forehead); the hair exclusion in the driver low pass scales with the extension strength; the lowered alpha on filled hair applies only above the oval. Unit test: weights equal the r4 weights collapsed, half grown, grown, and at ±25° / ±40° yaw.
+- Calibration: pitch band ±18° (yaw ±10°), 400 ms dwell, 12 samples; up to 250 ms outside the band and measurements with fewer than 5 columns pause the collection instead of restarting it.
+- Contour: `smoothHairlineRatios` (3-tap median, then no interior column more than 0.05 below the mean of its neighbours, ends at most 0.4 below their neighbour) on the wearer and persona ratios. Clip A's column 5 went from 1.33 to 1.55.
+
+**Before → after per clip (run 1 / 2 / 3)**
+
+| Clip | Extension active | Hairline alignment (% face height), captures | Over the burst | Jitter (px/frame) | Forehead tone step gap vs driver (ΔE) | Texture slide (px/frame), gap vs driver in brackets |
+|---|---|---|---|---|---|---|
+| A | 3 of 3 | 27.0 / 27.0 / 27.0 → 2.0 / 2.4 / 2.3 | 27.1 / 27.3 / 26.9 → 2.1 / 2.2 / 2.0 | 0.14 / 0.21 / 0.10 → 0.21 / 0.15 / 0.14 | −0.27 / −0.24 / −0.27 → −0.61 / −0.65 / −0.79 | 0.20 / 0.16 / 0.06 → 0.12 / 0.06 / 0.11 (0.01 / 0.00 / 0.00 → −0.04 / −0.01 / −0.04) |
+| B | 2 of 3 | 18.6 / 20.3 / 18.7 → 25.2 (inactive) / 5.0 / 5.4 | no upright burst frames | not measurable | −0.07 / −0.34 / −0.48 → −0.34 / −0.79 / −0.46 | 1.37 / 1.81 / 1.91 → 3.48 / 1.52 / 1.89 (0.83 / 0.55 / 1.43 → 0.96 / 0.98 / 1.15) |
+| E | 3 of 3 | 31.7 / 31.7 / 31.6 → 1.7 / 1.9 / 1.9 | 32.1 / 32.4 / 32.2 → 1.3 / 1.1 / 1.2 | 0.35 / 0.53 / 0.63 → 0.36 / 0.21 / 0.17 | 0.11 / 0.14 / 0.08 → −1.73 / −1.77 / −1.60 | 0.78 / 0.59 / 0.53 → 0.87 / 0.85 / 0.85 (0.29 / 0.09 / 0.00 → 0.28 / 0.29 / 0.40) |
+
+**Acceptance (clip E)**
+- Forehead tone step within ΔE 2 of the driver's own: met (−1.6 to −1.8), but it moved from about +0.1 and now sits near the limit.
+- Hairline alignment < 2%, jitter < 1 px: met in all three runs (1.7–1.9% over the captures, 1.1–1.3% over the burst; 0.17–0.36 px). Clip A is at 2.0–2.4%.
+- Texture slide ~0: the output slides 0.85–0.87 px/frame against the driver's own 0.45–0.60, a gap of 0.28–0.40 px (r4: 0.00–0.29). Inside the tool's 0.5 px tolerance, not zero, and slightly up.
+- No band across the forehead: met on A and E by eye. Brows on the brow line: yes by eye.
+
+**Identity guard (trend only; run 1 / 2 / 3)**
+- A: margin 0.13 / 0.14 / 0.14 → 0.14 / 0.26 / 0.18.
+- E: 0.03 / 0.04 / 0.04 → 0.16 / 0.15 / 0.15.
+- B: −0.38 / −0.48 / −0.22 → −0.14 / −0.28 / −0.09; inside the clip's own bistable range (below), so no conclusion.
+
+**p21, p04, p01d: interior sharpness gap (run 1 / 2 / 3)**
+
+| Persona | Clip A | Clip B | Clip E |
+|---|---|---|---|
+| p21 | 6.29 / 8.87 / 3.07 → 2.04 / 15.03 / 0.01 | −0.09 / −0.08 / −0.24 → −0.09 / −0.34 / −0.30 | −0.50 / 0.27 / −0.47 → 3.00 / −0.41 / 0.67 |
+| p04 | −0.03 / −0.11 / −0.16 → −0.19 / 0.19 / 0.04 | −0.13 / −0.14 / −0.33 → −0.13 / −0.11 / 0.02 | −0.33 / −0.47 / −0.37 → −0.11 / −0.16 / −0.53 |
+| p01d | 1.60 / 1.29 / 1.91 → 1.45 / 0.88 / −0.33 | −0.22 / −0.24 / −0.26 → −0.32 / −0.31 / −0.28 | −0.35 / −0.30 / −0.37 → −0.26 / −0.41 / −0.13 |
+
+The spikes are not caused by the flag: p21 on clip A spikes in r4 in all three runs (3.1–8.9), and p01d on clip A sits at 1.3–1.9 in r4. p04 shows no spike in either configuration. p21 is unstable in both (0.01 to 15.0 with the flag, one 3.0 on clip E). On these personas the extension was active in 9 of 9 runs on A and E, 8 of 9 on B; hairline alignment 2.5–3.1% on A, 1.8–2.6% on E, jitter 0.14–0.52 px.
+
+**Clip A notch (from 12.9 s)**: gone. The top edge of the persona layer is level across the forehead where it had a raised corner and a dip. A step of a few pixels remains about a third of the way across.
+
+**What still looks fake (ranked, by eye)**
+1. Flag on, clip E: an orange patch on the upper middle of the forehead near the hairline in about half the captures. It is the persona's filled forehead (p12's hair covers five of nine columns, so that skin is invented by the fill) stretched over a tall wearer forehead (hairline ratio 2.0 against the persona's 1.6).
+2. A faint vertical tone seam in the persona's forehead where filled skin meets photographed skin (clip A).
+3. The persona is harder and darker than the soft webcam frame in both configurations.
+4. Clip B at 20–36° yaw: eyes and nose smear in both configurations.
+
+**Logged for R5/R6: camera-match blur is bistable on clip B (R4, not R4b)**
+Over 30 extra runs of clip B (r4 on the new build, r4 on the previous commit, flag on, flag on without the hair exclusion) every configuration fell into one of two states: blur bias near 2 with identity margin about −0.2, or blur pinned at 4.0 with margin about −0.55. r4 on the previous commit gave −0.64 / −0.52 / −0.56 in the afternoon against −0.10 to −0.16 in the morning. The "flag is worse on B" result in the report above was this, not the flag. Trigger not found; the loop was not changed. p21's sharpness instability on clip A may be related.
+
+**Deviations**
+- The 28-persona grid was not rerun on the fixed build; the grid numbers in the report above are from the unfixed build.
+- Calibration still missed on clip B in 2 of 12 runs (the head starts turning about 1.5 s in); the output is then the r4 forehead.
+- The dev server cannot run the segmenter, so diagnostic variants were separate builds, since deleted.
+- Verification: `npm test` 163 pass, `npm run lint` clean, `npm run build` and `npm run build:review` complete.
+
+**Recommendation: not yet.** The measured blockers are cleared: an inactive extension equals r4, calibration completes on A and E every time, clip E meets alignment, jitter and tone step, the notch is gone and the sharpness spikes are pre-existing. Two things remain before the default changes: the orange patch on the upper forehead on clip E (item 1, a by-eye failure of "natural"), and the rule that a default changes only after a grid comparison, which has not been run on the fixed build.
+
 ---
 
 ## Phase R5 — Head turns, references, and performance
