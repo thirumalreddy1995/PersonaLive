@@ -80,6 +80,28 @@ export const RELIGHT_RADIUS_SHARE = 0.02;
 /** Soft pass-through edges: the fade spans this many camera-blur radii (R3 item 4), clamped to 1..12 px. */
 export const SOFT_HOLE_RADII = 1.5;
 
+/** R5 §4: the camera frame to composite under the persona (see MeshWarpRenderer.compositeBase). */
+export interface BaseFrame {
+  source: TexImageSource;
+  /** Where the source sits on the canvas: [offsetX, offsetY, drawWidth, drawHeight] in canvas pixels. */
+  srcMap: [number, number, number, number];
+  mirror: boolean;
+  /** Colour outside the frame (0..1 per channel); the 2D path's canvas fill. */
+  background?: [number, number, number];
+}
+
+interface BasePass {
+  program: WebGLProgram;
+  aPosition: number;
+  uTexture: WebGLUniformLocation | null;
+  uResolution: WebGLUniformLocation | null;
+  uSrcMap: WebGLUniformLocation | null;
+  uMirror: WebGLUniformLocation | null;
+  uBackground: WebGLUniformLocation | null;
+  quad: WebGLBuffer;
+  texture: WebGLTexture;
+}
+
 export interface WarpFrameOptions {
   /** Flat [x, y, ...] pixel positions for 468+ vertices in output canvas space. */
   positions: Float32Array;
@@ -509,6 +531,29 @@ void main() {
 }`;
 
 /** Simple textured quad, used to downsample a source into a small framebuffer for readback. */
+// R5 §4: the camera frame as a full-canvas quad (cover-fitted and optionally mirrored like the 2D drawImage).
+const BASE_VERTEX_ES1 = `
+attribute vec2 aPosition;
+void main() {
+  gl_Position = vec4(aPosition, 0.0, 1.0);
+}`;
+const BASE_FRAGMENT_ES1 = `
+precision highp float;
+uniform sampler2D uTexture;
+uniform vec2 uResolution;
+uniform vec4 uSrcMap;
+uniform float uMirror;
+uniform vec3 uBackground;
+void main() {
+  float x = gl_FragCoord.x;
+  float y = uResolution.y - gl_FragCoord.y;
+  float sx = uMirror > 0.5 ? uResolution.x - x : x;
+  vec2 uv = vec2((sx - uSrcMap.x) / uSrcMap.z, (y - uSrcMap.y) / uSrcMap.w);
+  float inside = step(0.0, uv.x) * step(uv.x, 1.0) * step(0.0, uv.y) * step(uv.y, 1.0);
+  vec3 c = texture2D(uTexture, clamp(uv, 0.0, 1.0)).rgb;
+  gl_FragColor = vec4(mix(uBackground, c, inside), 1.0);
+}`;
+
 const COPY_VERTEX_ES1 = `
 attribute vec2 aPosition;
 varying vec2 vUv;
@@ -889,6 +934,10 @@ export class MeshWarpRenderer {
   private keyCache: KeyframeTextureCache<PersonaSource, KeyEntry> | null = null;
   private keyPair: { a: KeyframeSpec; b: KeyframeSpec | null; mix: number } | null = null;
   private uv2Uploaded: Float32Array | null = null;
+  /** R5 §4: the base-frame program (created on first use) and the driver frame the relight pass uploaded this frame. */
+  private basePass: BasePass | null = null;
+  private basePassFailed = false;
+  private driverFresh: TexImageSource | null = null;
   private relightFailed = false;
   private pending: PendingReadback[] = [];
 
@@ -1271,6 +1320,7 @@ export class MeshWarpRenderer {
     this.paintMesh(gl, r, rl, rl.driver, 0, o);
     this.blurTarget(gl, rl, rl.driver, lowPassSigma(o.faceWidthPx, share));
     rl.frames++;
+    this.driverFresh = o.source;
     if (o.globalTone) {
       if (!rl.personaMean && rl.persona && !pair) rl.personaMean = this.readMean(gl, rl.persona);
       if (!rl.driverMean || rl.frames % MEAN_TONE_EVERY === 0) {
@@ -1382,6 +1432,12 @@ export class MeshWarpRenderer {
     this.keyCache?.clear(true);
     this.keyCache = null;
     this.uv2Uploaded = null;
+    if (this.basePass) {
+      gl.deleteProgram(this.basePass.program);
+      gl.deleteBuffer(this.basePass.quad);
+      gl.deleteTexture(this.basePass.texture);
+      this.basePass = null;
+    }
     gl.deleteBuffer(r.positionBuffer);
     gl.deleteBuffer(r.uvBuffer);
     gl.deleteBuffer(r.uv2Buffer);
@@ -1436,6 +1492,8 @@ export class MeshWarpRenderer {
     this.keyCache?.clear(false);
     this.keyCache = null;
     this.uv2Uploaded = null;
+    this.basePass = null;
+    this.driverFresh = null;
     for (const p of this.pending) p.resolve(null);
     this.pending = [];
     console.warn('WebGL context lost; persona overlay paused until the context is restored.');
@@ -1661,6 +1719,79 @@ export class MeshWarpRenderer {
     return this.personaImage !== null && this.personaUv !== null && this.topology !== null;
   }
 
+  /** True when the camera frame can be composited under the persona in this canvas (R5 §4). */
+  get supportsBaseComposite(): boolean {
+    return this.gl !== null && !this.contextLost && !this.basePassFailed;
+  }
+
+  /**
+   * R5 §4 (flag singleGlComposite): draws the camera frame UNDER the persona already rendered into
+   * this canvas (destination-over blending), so the canvas holds the finished frame and the 2D
+   * layers are not needed. Call it after render() and after any readback of the persona layer:
+   * until then the canvas is the transparent persona layer the camera-match and auto-radius loops
+   * read. The driver frame uploaded by the relight pass this frame is reused; otherwise it is
+   * uploaded here. Returns false (and draws nothing) when the pass is unavailable.
+   */
+  compositeBase(base: BaseFrame): boolean {
+    const gl = this.gl;
+    const r = this.resources;
+    if (!gl || !r || this.contextLost || this.basePassFailed || gl.isContextLost()) return false;
+    if (!this.basePass) {
+      try {
+        const program = this.compileProgram(gl, BASE_VERTEX_ES1, BASE_FRAGMENT_ES1);
+        const quad = gl.createBuffer()!;
+        gl.bindBuffer(gl.ARRAY_BUFFER, quad);
+        gl.bufferData(gl.ARRAY_BUFFER, new Float32Array([-1, -1, 1, -1, -1, 1, 1, 1]), gl.STATIC_DRAW);
+        this.basePass = {
+          program,
+          aPosition: gl.getAttribLocation(program, 'aPosition'),
+          uTexture: gl.getUniformLocation(program, 'uTexture'),
+          uResolution: gl.getUniformLocation(program, 'uResolution'),
+          uSrcMap: gl.getUniformLocation(program, 'uSrcMap'),
+          uMirror: gl.getUniformLocation(program, 'uMirror'),
+          uBackground: gl.getUniformLocation(program, 'uBackground'),
+          quad,
+          texture: gl.createTexture()!,
+        };
+      } catch (err) {
+        console.warn('Single GL compositing unavailable on this GPU; keeping the 2D layers.', err);
+        this.basePassFailed = true;
+        return false;
+      }
+    }
+    const bp = this.basePass;
+    this.resetSharedState(gl);
+    gl.viewport(0, 0, this._canvas.width, this._canvas.height);
+    gl.useProgram(bp.program);
+    gl.activeTexture(gl.TEXTURE0);
+    const reuse = this.driverFresh === base.source && !!r.relight;
+    if (reuse && r.relight) {
+      gl.bindTexture(gl.TEXTURE_2D, r.relight.driverTexture);
+    } else {
+      gl.bindTexture(gl.TEXTURE_2D, bp.texture);
+      gl.texImage2D(gl.TEXTURE_2D, 0, gl.RGBA, gl.RGBA, gl.UNSIGNED_BYTE, base.source);
+      gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_WRAP_S, gl.CLAMP_TO_EDGE);
+      gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_WRAP_T, gl.CLAMP_TO_EDGE);
+      gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MAG_FILTER, gl.LINEAR);
+      gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MIN_FILTER, gl.LINEAR);
+    }
+    gl.uniform1i(bp.uTexture, 0);
+    gl.uniform2f(bp.uResolution, this._canvas.width, this._canvas.height);
+    gl.uniform4f(bp.uSrcMap, base.srcMap[0], base.srcMap[1], Math.max(1, base.srcMap[2]), Math.max(1, base.srcMap[3]));
+    gl.uniform1f(bp.uMirror, base.mirror ? 1 : 0);
+    const bg = base.background ?? [0, 0, 0];
+    gl.uniform3f(bp.uBackground, bg[0], bg[1], bg[2]);
+    gl.bindBuffer(gl.ARRAY_BUFFER, bp.quad);
+    gl.enableVertexAttribArray(bp.aPosition);
+    gl.vertexAttribPointer(bp.aPosition, 2, gl.FLOAT, false, 0, 0);
+    // Destination-over: the frame fills what the premultiplied persona layer left transparent.
+    gl.enable(gl.BLEND);
+    gl.blendFunc(gl.ONE_MINUS_DST_ALPHA, gl.ONE);
+    gl.drawArrays(gl.TRIANGLE_STRIP, 0, 4);
+    gl.blendFunc(gl.ONE, gl.ONE_MINUS_SRC_ALPHA);
+    return true;
+  }
+
   /** Renders the warped persona into this.canvas (transparent background). */
   render(opts: WarpFrameOptions) {
     if (!this.hasPersona) return;
@@ -1718,6 +1849,7 @@ export class MeshWarpRenderer {
     // R4: the masks go to unit 3 first, so the driver low pass can leave hair out (R4b §5).
     this.bindSegmentation(gl, r, opts.segmentation);
     // R3: the low-pass passes run first (they switch programs, framebuffers and attribute 0).
+    this.driverFresh = null;
     const relit = opts.relight ? this.relightPasses(gl, r, opts.relight) : false;
     gl.useProgram(r.program);
     gl.bindBuffer(gl.ARRAY_BUFFER, r.positionBuffer);

@@ -44,6 +44,7 @@ import { foreshortenWeights } from './foreshorten.ts';
 import { KeyframeCrossfader } from './keyframeBlend.ts';
 import { driverPoseFromMatrix } from './headPose.ts';
 import { FramePacer, type PacedTick, type PacedVideo } from './framePacing.ts';
+import { useSingleGlComposite } from './compositePath.ts';
 import { FACE_OVAL_RING } from './personaDelight.ts';
 import { READBACK_SIZE } from './meshWarpRenderer.ts';
 import { CameraMatchState, initialCameraMatch, stepCameraMatch, CAMERA_MATCH_WARM_UPDATES, cameraMatchDue } from './cameraMatch.ts';
@@ -934,23 +935,47 @@ export class RealtimeFacialEngine {
     if (kinematics && realismFlags.get().restMouth) this.restMouth.push(kinematics.mar, timestamp, kinematics.yaw, kinematics.pitch);
 
     // --- 3. Compose base frame --------------------------------------------------------------
-    ctx.fillStyle = '#0b1220';
-    ctx.fillRect(0, 0, W, H);
-
     const drawBase = (x: number, y: number, w: number, h: number) => {
       if (src && layout) this.drawSource(ctx, src.source, layout, x, y, w, h);
       else this.drawStandby(ctx, x, y, w, h);
     };
 
     const overlayReady = !!(kinematics && this.faceVisible && this.lastFace && this.warp.hasPersona && this.status.persona === 'ready');
+    let singleGl = false;
     if (overlayReady && kinematics && src && layout) {
       profiler.begin('warp');
       this.renderPersonaOverlay(layout, src.source, src.width, src.height, kinematics, timestamp);
       profiler.end('warp');
       profiler.begin('overlay');
-      this.composeOverlayLayer();
+      // R5 §4 (flag singleGlComposite): the camera frame goes under the persona inside the WebGL canvas.
+      singleGl = useSingleGlComposite({
+        flag: realismFlags.get().singleGlComposite,
+        viewMode: settings.viewMode,
+        overlayReady: true,
+        webgl: this.warp.supportsBaseComposite,
+        overlayPasses: this.overlayNeeds2dPasses(),
+      });
+      if (singleGl) {
+        // The review tool still gets the persona layer on its own, on the frames it captures.
+        if (this.captureDueNow()) {
+          this.overlayCtx.clearRect(0, 0, this.overlayLayer.width, this.overlayLayer.height);
+          this.overlayCtx.drawImage(this.warp.canvas, 0, 0, this.overlayLayer.width, this.overlayLayer.height);
+        }
+        singleGl = this.warp.compositeBase({
+          source: src.source as TexImageSource,
+          srcMap: [layout.offsetX, layout.offsetY, layout.drawWidth, layout.drawHeight],
+          mirror: layout.mirror,
+          background: [0x0b / 255, 0x12 / 255, 0x20 / 255],
+        });
+      }
+      if (!singleGl) this.composeOverlayLayer();
       profiler.end('overlay');
       this.overlayDrawnThisFrame = true;
+    }
+    this.singleGlThisFrame = singleGl;
+    if (!singleGl) {
+      ctx.fillStyle = '#0b1220';
+      ctx.fillRect(0, 0, W, H);
     }
     const drawOverlay = (x: number, y: number, w: number, h: number) => {
       if (!overlayReady) return;
@@ -989,8 +1014,16 @@ export class RealtimeFacialEngine {
       this.drawLabel(ctx, '● AI TRANSFORMED', paneW + gap + 16, py + 16, '#38bdf8');
       this.paneTransform = { x: paneW + gap, y: py, scale };
     } else if (settings.viewMode === 'transformed-only') {
-      drawBase(0, 0, W, H);
-      drawOverlay(0, 0, W, H);
+      if (singleGl) {
+        // One copy of the finished frame; the 2D post pass (off by default) still draws on top.
+        ctx.drawImage(this.warp.canvas, 0, 0, W, H);
+        profiler.begin('post');
+        this.drawRealisticPostPass(ctx, 0, 0, W, H, metrics);
+        profiler.end('post');
+      } else {
+        drawBase(0, 0, W, H);
+        drawOverlay(0, 0, W, H);
+      }
     } else if (settings.viewMode === 'pip') {
       drawBase(0, 0, W, H);
       drawOverlay(0, 0, W, H);
@@ -1644,6 +1677,20 @@ export class RealtimeFacialEngine {
    * passes there. `destination-out` on this layer erases persona alpha so the driver's hairline
    * shows through after compositing; on the opaque output canvas it would only darken pixels.
    */
+  /** True when the persona layer needs a 2D pass this frame (the geometric hairline fades, used without segmentation masks). */
+  private overlayNeeds2dPasses(): boolean {
+    const flags = realismFlags.get();
+    const segDrives = this.segActive && (this.settings.segmentationStrength ?? 1) > 0.5;
+    const stackedFades = !segDrives && this.foreheadStrength === 0;
+    return stackedFades && (flags.foreheadHarmonize || flags.hairlineSoften);
+  }
+
+  /** True when the review tool captures this frame (a scheduled capture time has passed, or a burst is running). */
+  private captureDueNow(): boolean {
+    const t = this.captureClock();
+    return (this.captureTimes.length > 0 && t >= this.captureTimes[0]) || (!!this.burstPlan && t >= this.burstPlan.start);
+  }
+
   private composeOverlayLayer() {
     const octx = this.overlayCtx;
     const W = this.overlayLayer.width;
