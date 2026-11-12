@@ -211,6 +211,10 @@ interface FrameReport {
   mar: number;
   pose: { yaw: number; pitch: number; roll: number };
   keyframeId: string | null;
+  /** R5: the keyframe fading out with its share of the mix, and the head pose from MediaPipe's matrix. */
+  keyframeSecondaryId: string | null;
+  keyframeMix: number;
+  matrixPose: { yaw: number; pitch: number; roll: number } | null;
   syntheticTeeth: boolean;
   outputFaceDetected: boolean;
   skinTone: M.SkinToneMatch | null;
@@ -282,6 +286,7 @@ export interface ClipSummary {
   hairlineAlignmentNote: string;
   /** R4b forehead extension state at the end of the clip (flag foreheadExtension), null when off. */
   forehead: RealismDebugState['forehead'];
+  r5: RealismDebugState['r5'] | null;
   performance: RealismDebugState['profile'] & { window: string; software: boolean };
   renderer: RealismDebugState['renderer'];
   cameraMatch: RealismDebugState['cameraMatch'];
@@ -486,6 +491,9 @@ async function captureClip(page: Page, args: Args, o: CaptureOptions): Promise<C
       mar: c.mar,
       pose: c.pose,
       keyframeId: c.keyframeId,
+      keyframeSecondaryId: c.keyframeSecondaryId ?? null,
+      keyframeMix: c.keyframeMix ?? 0,
+      matrixPose: c.matrixPose ?? null,
       syntheticTeeth: c.syntheticTeeth,
       outputFaceDetected: !!outputLms,
       skinTone: M.skinToneMatch(output, driver, lms),
@@ -639,6 +647,8 @@ async function captureClip(page: Page, args: Args, o: CaptureOptions): Promise<C
     hairlineAlignmentNote: 'persona top edge (alpha 50%) vs the hair-mask boundary on upright frontal captures; needs the segmentation flag. stepPx is between capture times; hairlineJitter is the same offset between consecutive burst frames.',
     hairlineJitter,
     forehead: finalState.forehead ?? null,
+    // R5: real keyframes and their uploads, loop pacing, compositing path (see RealismDebugState.r5).
+    r5: finalState.r5 ?? null,
     performance: { ...finalState.profile, window: 'last 300 frames of the replay', software: args.software },
     renderer: finalState.renderer,
     cameraMatch: finalState.cameraMatch,

@@ -45,6 +45,7 @@ import { KeyframeCrossfader } from './keyframeBlend.ts';
 import { driverPoseFromMatrix } from './headPose.ts';
 import { FramePacer, type PacedTick, type PacedVideo } from './framePacing.ts';
 import { useSingleGlComposite } from './compositePath.ts';
+import type { EnrollmentFrame } from './enrollmentSource.ts';
 import { FACE_OVAL_RING } from './personaDelight.ts';
 import { READBACK_SIZE } from './meshWarpRenderer.ts';
 import { CameraMatchState, initialCameraMatch, stepCameraMatch, CAMERA_MATCH_WARM_UPDATES, cameraMatchDue } from './cameraMatch.ts';
@@ -214,6 +215,8 @@ export class RealtimeFacialEngine {
   private matrixPose: HeadPose | null = null;
   /** R5 §4: true when this frame was composited in the single GL pass (flag singleGlComposite). */
   private singleGlThisFrame = false;
+  /** Layout of the last rendered frame (for mapping the face box back to the source, R5 §2). */
+  private lastLayout: SourceLayout | null = null;
   private settings: TransformationSettings;
   private splitPosition = 50;
 
@@ -561,6 +564,41 @@ export class RealtimeFacialEngine {
     return this.status;
   }
 
+  /**
+   * R5 §2: what the guided enrollment reads from the live tracker. Null unless the source is a
+   * running webcam: a clip or the demo image is not the person at the camera.
+   */
+  public getEnrollmentFrame(): EnrollmentFrame | null {
+    const v = this.videoElement;
+    if (!v || this.videoKind !== 'webcam' || v.readyState < 2 || v.videoWidth === 0) return null;
+    const bs = this.lastFace?.blendshapes ?? {};
+    const layout = this.lastLayout;
+    let faceBox: [number, number, number, number] | null = null;
+    if (this.faceVisible && layout) {
+      const fb = pointBounds(this.smoothed.subarray(0, 468 * 2));
+      let u0 = (fb.minX - layout.offsetX) / layout.drawWidth;
+      let u1 = (fb.minX + fb.width - layout.offsetX) / layout.drawWidth;
+      if (layout.mirror) {
+        const m0 = 1 - u1;
+        u1 = 1 - u0;
+        u0 = m0;
+      }
+      const v0 = (fb.minY - layout.offsetY) / layout.drawHeight;
+      const v1 = (fb.minY + fb.height - layout.offsetY) / layout.drawHeight;
+      faceBox = [clamp(u0, 0, 1), clamp(v0, 0, 1), clamp(u1 - u0, 0, 1), clamp(v1 - v0, 0, 1)];
+    }
+    return {
+      video: v,
+      faceVisible: this.faceVisible,
+      pose: { ...this.lastPose },
+      matrixPose: this.faceVisible && this.matrixPose ? { ...this.matrixPose } : null,
+      mar: this.lastMar,
+      smile: ((bs.mouthSmileLeft ?? 0) + (bs.mouthSmileRight ?? 0)) / 2,
+      browElevation: bs.browInnerUp ?? 0,
+      faceBox,
+    };
+  }
+
   // ---------------------------------------------------------------------------------------------
   // Persona preparation
   // ---------------------------------------------------------------------------------------------
@@ -870,6 +908,7 @@ export class RealtimeFacialEngine {
     const src = this.getSource();
     const layout: SourceLayout | null = src ? coverLayout(src.width, src.height, W, H, src.mirror) : null;
     const profiler = this.profiler;
+    this.lastLayout = layout;
     this.overlayDrawnThisFrame = false;
     this.syntheticTeethThisFrame = false;
 
@@ -2125,6 +2164,9 @@ export class RealtimeFacialEngine {
         isSmiling: this.lastMetrics?.isSmiling ?? false,
         syntheticTeeth: this.syntheticTeethThisFrame,
         keyframeId: this.currentKeyframeId,
+        keyframeSecondaryId: this.keyframeSecondaryId,
+        keyframeMix: this.keyframeMix,
+        matrixPose: this.matrixPose ? { ...this.matrixPose } : null,
       });
     }
     const plan = this.burstPlan;

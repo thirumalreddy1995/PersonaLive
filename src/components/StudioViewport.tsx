@@ -21,6 +21,7 @@ import {
 } from 'lucide-react';
 import { TransformationSettings, AuthorizedPersona, FacialMetrics, HeadPose, EngineStatus } from '../types/index.ts';
 import { RealtimeFacialEngine } from '../utils/facialEngine.ts';
+import { setEnrollmentFrameProvider } from '../utils/enrollmentSource.ts';
 import { isRealismDebugEnabled } from '../realism/debug.ts';
 
 export interface RecordingResult {
@@ -113,8 +114,11 @@ export const StudioViewport: React.FC<StudioViewportProps> = ({
     // right after this one on mount.
     void engine.init();
     engine.start();
+    // R5 §2: the guided enrollment reads the live tracking of this engine.
+    setEnrollmentFrameProvider(() => engine.getEnrollmentFrame());
 
     return () => {
+      setEnrollmentFrameProvider(null);
       engine.dispose();
       engineRef.current = null;
     };

@@ -102,6 +102,14 @@ persona layer's top edge and the hair-mask boundary across the forehead (px and 
 upright frontal captures only; `stepPx` is the change between capture times, not video frames).
 The extension lands about 3 s into a clip, so earlier captures show the R4 forehead.
 
+R5 flags (all off): `keyframeCrossfade` (persona-reload; a persona with enrollment `references` gets one GPU
+texture per shot and a 150 ms cross-fade on a switch), `guidedEnrollment` (the capture flow in the library),
+`videoFramePacing` (`requestVideoFrameCallback`, else rAF with a changed-frame check), `singleGlComposite`
+(camera frame and persona in one WebGL pass, plain transformed view only), `matrixHeadPose` (keyframe
+selection by the pose from MediaPipe's matrix). `summary.r5` holds the keyframe uploads (stays at the
+keyframe count however often the bank switches), the pacing mode, skipped ticks and whether the single GL
+path ran; frames carry `matrixPose`, `keyframeSecondaryId` and `keyframeMix`.
+
 `--settings temporalSmoothing=20,blendStrength=100` overrides the inspector settings for the run (the
 same keys as `TransformationSettings`; `?rs=` on the page URL does the same in a browser). The rigid
 forehead can be tuned the same way: `rigidPoseMinCutoff` / `rigidPoseBeta` (One Euro on the head

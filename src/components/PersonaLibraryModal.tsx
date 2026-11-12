@@ -13,6 +13,8 @@ import {
 } from 'lucide-react';
 import { AuthorizedPersona, CATEGORY_LABEL, PersonaCategory, consentPending } from '../types/index.ts';
 import { ConsentForm } from './ConsentForm.tsx';
+import { GuidedEnrollmentModal } from './GuidedEnrollmentModal.tsx';
+import { realismFlags } from '../realism/flags.ts';
 import { generateConsentHash, QualityAssessmentResult } from '../utils/faceMath.ts';
 import { localPersonas } from '../utils/localPersonas.ts';
 import { assessReference, FACE_HEIGHT_RECOMMENDED_PX, ReferenceGate } from '../utils/photoAssessment.ts';
@@ -56,6 +58,13 @@ export const PersonaLibraryModal: React.FC<PersonaLibraryModalProps> = ({
 }) => {
   const [activeTab, setActiveTab] = useState<'library' | 'enroll'>('library');
   const [consentFormFor, setConsentFormFor] = useState<string | null>(null);
+  // R5 §2 (flag guidedEnrollment): the guided capture at the webcam.
+  const guidedEnrollment = React.useSyncExternalStore(
+    (onChange) => realismFlags.subscribe(onChange),
+    () => realismFlags.get().guidedEnrollment,
+    () => realismFlags.get().guidedEnrollment
+  );
+  const [enrollmentOpen, setEnrollmentOpen] = useState(false);
 
   // Enrollment Form State
   const [name, setName] = useState('');
@@ -210,13 +219,35 @@ export const PersonaLibraryModal: React.FC<PersonaLibraryModalProps> = ({
             </div>
           </div>
 
-          <button
-            onClick={onClose}
-            className="text-slate-400 hover:text-slate-200 p-1.5 rounded-lg hover:bg-slate-800 transition-colors"
-          >
-            <X className="w-5 h-5" />
-          </button>
+          <div className="flex items-center gap-2">
+            {guidedEnrollment && (
+              <button
+                onClick={() => setEnrollmentOpen(true)}
+                className="px-3 py-1.5 rounded-lg bg-sky-950 border border-sky-800 text-sky-300 hover:bg-sky-900 text-xs font-medium"
+                title="The person whose face will be used sits at the webcam, gives consent and is guided through seven reference photos"
+                data-testid="open-guided-enrollment"
+              >
+                Guided capture at the webcam
+              </button>
+            )}
+            <button
+              onClick={onClose}
+              className="text-slate-400 hover:text-slate-200 p-1.5 rounded-lg hover:bg-slate-800 transition-colors"
+            >
+              <X className="w-5 h-5" />
+            </button>
+          </div>
         </div>
+        <GuidedEnrollmentModal
+          isOpen={guidedEnrollment && enrollmentOpen}
+          defaultCategory={subjectCategory ?? null}
+          onClose={() => setEnrollmentOpen(false)}
+          onComplete={(persona) => {
+            setEnrollmentOpen(false);
+            onAddPersona(persona);
+            setActiveTab('library');
+          }}
+        />
 
         {/* Tab Navigation */}
         <div className="flex border-b border-slate-800 px-6 bg-slate-950/50">

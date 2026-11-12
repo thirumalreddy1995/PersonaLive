@@ -136,6 +136,10 @@ export interface RealismFrameCapture {
   isSmiling: boolean;
   syntheticTeeth: boolean;
   keyframeId: string | null;
+  /** R5: the keyframe fading out and its share of the mix (0 when no cross-fade runs), and the matrix head pose. */
+  keyframeSecondaryId: string | null;
+  keyframeMix: number;
+  matrixPose: HeadPose | null;
 }
 
 export interface RealismBurstFrame {
@@ -261,6 +265,9 @@ export interface SerializedCapture {
   isSmiling: boolean;
   syntheticTeeth: boolean;
   keyframeId: string | null;
+  keyframeSecondaryId: string | null;
+  keyframeMix: number;
+  matrixPose: HeadPose | null;
 }
 
 export interface SerializedBurst {
@@ -294,6 +301,11 @@ export interface LoadPersonaSpec {
    * the local realism review with a warning, the production gate never does.
    */
   consent?: 'review-synthetic' | 'pending';
+  /**
+   * R5: reference shots of the same face (frontal first) for the keyframe cross-fade, with the
+   * pose and expression each was taken at. They share the persona's consent record.
+   */
+  references?: Array<{ label: string; dataUrl: string; pose: HeadPose; matrixPose?: HeadPose | null; expression: { mar: number; smile: number; browElevation: number } }>;
 }
 
 export interface RealismWindowHook {
@@ -441,6 +453,9 @@ export function installRealismWindowHook(app?: RealismAppHooks): RealismWindowHo
         isSmiling: c.isSmiling,
         syntheticTeeth: c.syntheticTeeth,
         keyframeId: c.keyframeId,
+        keyframeSecondaryId: c.keyframeSecondaryId,
+        keyframeMix: c.keyframeMix,
+        matrixPose: c.matrixPose,
       }));
     },
     takeBurst: () => {
@@ -534,6 +549,14 @@ export function installRealismWindowHook(app?: RealismAppHooks): RealismWindowHo
         role: spec.role ?? (spec.consent === 'pending' ? 'Local persona (realism review)' : 'Synthetic test persona, no real person'),
         category: spec.category,
         imageUrl: spec.dataUrl,
+        references: spec.references?.map((r, i) => ({
+          id: `${id}-ref${i}`,
+          label: r.label,
+          imageUrl: r.dataUrl,
+          pose: r.pose,
+          matrixPose: r.matrixPose ?? null,
+          expression: r.expression,
+        })),
         createdAt: timestamp.slice(0, 10),
         qualityScore: 0,
         metrics: {

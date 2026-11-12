@@ -611,6 +611,35 @@ Over 30 extra runs of clip B (r4 on the new build, r4 on the previous commit, fl
 - 30 FPS at 720p with p95 frame time < 40 ms on this machine, for both personas.
 - No visible pop when keyframes switch on clip B.
 
+### R5 status (2026-11-12): implemented behind flags, not yet measured
+Branch `realism/r5-keyframes-perf`. `foreheadExtension` stays off (R4b decision); the upper-forehead orange patch and the camera-match bistability on clip B are carried into R5/R6 as open items. Nothing below changes a default: all five flags are off and `--flags r4` renders as before.
+
+- **Flags:** `keyframeCrossfade` (persona-reload), `guidedEnrollment`, `videoFramePacing`, `singleGlComposite`, `matrixHeadPose`. Every preset (`r0`…`r4`) sets them to 0.
+- **§1 Secondary keyframe (`keyframeCrossfade`)**
+  - `src/utils/keyframeBlend.ts`: `KeyframeTextureCache` (one GPU resource per keyframe source, uploaded on first use, counted) and `KeyframeCrossfader` (150 ms smoothstep from the old keyframe to the new one; a switch back reverses the running fade, a third keyframe fades from the dominant one).
+  - Renderer: `setKeyframePair(a, b, mix)`, `warmKeyframes`, `clearKeyframes`, `keyframeUploads`. The fragment shader samples `uTexture`/`uTexture2` with `vUv`/`vUv2` and mixes by `uKeyMix`; each keyframe has its own relight low pass (render-to-texture), mixed the same way. A switch binds textures and a small UV buffer; no `texImage2D`.
+  - Engine: a persona's `references` (enrollment shots) become bank keyframes through the same crop and de-light as the persona photo; all are uploaded when the persona is prepared.
+  - Tests: "switching keyframes uploads nothing" (cache plus fader over 500 frames), fade shape, reversal. Scratch GL check (headless Chrome, WebGL2 and WebGL1): 3 uploads at warm-up, 0 over 60 switches with and without relight, mix 0 / 0.5 / 1 gives the expected colours, no GL error.
+- **§2 Guided enrollment (`guidedEnrollment`)**
+  - Library → "Guided capture at the webcam". Consent first (name, scope, "I am the person at this camera"), then seven shots: frontal, yaw ±25°, pitch ±15°, open mouth, smile. Each is checked live for pose (relative to the frontal shot), expression, blur (Laplacian variance of the face crop) and exposure, and taken after a 600 ms still hold. Saving signs a consent record listing the SHA-256 of all seven photos and stores it locally; photo upload is unchanged.
+  - Only a live webcam qualifies (`getEnrollmentFrame` returns nothing for a clip or the demo image).
+  - `src/utils/enrollment.ts` is pure and unit-tested: steps, `evaluateShot`, `ShotHold`, image statistics, `buildEnrollmentConsent` (throws without the attestation, a name, live-call consent or a hash), `enrollmentPersona` (throws when the record does not cover every shot).
+  - Not exercised end to end: it needs a person at a webcam.
+- **§3 Frame pacing (`videoFramePacing`)**: `src/utils/framePacing.ts` (`FramePacer`): `requestVideoFrameCallback` when present, otherwise `requestAnimationFrame` with a changed-frame check; a 250 ms watchdog keeps the loop alive when no video frame arrives. Unit-tested with a fake browser (30 camera frames at a 60 Hz display → 30 ticks).
+- **§4 Single GL composite (`singleGlComposite`)**: `compositeBase` draws the camera frame under the persona in the WebGL canvas (destination-over, after the persona-layer readbacks), then one `drawImage` to the output and the watermark last. Plain transformed view only; split, side-by-side and picture-in-picture keep the 2D path, as does a frame that needs the geometric hairline passes. Scratch GL check against the 2D compositing: ±1/255 at 1:1 scale, up to 9/255 at hard edges where the camera frame is rescaled.
+- **§5 Head pose (`matrixHeadPose`)**: `src/utils/headPose.ts` (`matrixToEuler`, R = Ry·Rx·Rz, scale removed, both storage orders, gimbal lock; `driverPoseFromMatrix` in the display convention). Unit-tested against `eulerToMatrix` round trips and the quaternion path of `rigidPose`. Used for keyframe selection; enrollment stores both poses per shot.
+- **Review tool:** captures carry `matrixPose`, `keyframeSecondaryId`, `keyframeMix`; `summary.r5` records keyframe uploads, pacing mode, skipped ticks and whether the single GL path ran; `loadPersona` accepts `references`.
+- **Verification:** `npm test` 191 pass, `npm run lint` clean, `npm run build` and `npm run build:review` complete (review build kept in `dist-r5/`, `dist/` is the production build).
+- **Smoke run only (clip A, once, flags off and on; not a measurement):** no page errors; `videoFramePacing` and `singleGlComposite` engage. Two things to look at first in the capture suite:
+  - With all four runtime flags on the loop processed 383 frames against 741 (17 against 35 fps). The suspect is `requestVideoFrameCallback` on the hidden video element; the flags have to be measured one at a time.
+  - Tracking takes about 24 ms of a 26 ms frame on this GPU; compositing is about 0.3 ms. The single GL pass therefore cannot move the frame time much here, and the 40 ms p95 target depends on the tracker.
+  - Matrix and landmark pose agree in sign for yaw and pitch on the four frames checked (small angles only); roll is 0 for an upright head where the landmark estimate reads ±180°.
+- **Deviations**
+  - The cross-fade is time-based on a switch (150 ms), not driven by the bank's blend weight: that weight never drops below 0.65, which would leave a permanent ghost of the second keyframe.
+  - Real keyframes skip the persona inpaint and the per-keyframe forehead calibration (R4b is off); they get the crop and de-light only.
+  - The keyframe path cannot be captured headlessly yet: there is no persona with enrollment shots on this machine.
+  - In the single GL path the debug panel's "persona layer" preview is refreshed only on captured frames.
+
 ---
 
 ## Phase R6 — Tuning pass
