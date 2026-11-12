@@ -1938,7 +1938,19 @@ export class RealtimeFacialEngine {
     if (plan && t >= plan.start) {
       if (!this.burst) this.burst = { start: plan.start, scale: plan.scale, frames: [] };
       const snap = this.snapshot(plan.scale, src, layout);
-      this.burst.frames.push({ t, frameIndex: this.frameIndex, output: snap.output, driver: snap.driver, landmarks: snap.landmarks });
+      this.burst.frames.push({
+        t,
+        frameIndex: this.frameIndex,
+        output: snap.output,
+        driver: snap.driver,
+        landmarks: snap.landmarks,
+        // R4b: the persona layer and the masks of this very frame, for the frame-to-frame hairline jitter.
+        overlay: this.overlayDrawnThisFrame ? snap.overlay : null,
+        masks: this.segActive ? { width: this.masks.width, height: this.masks.height, data: Uint8ClampedArray.from(this.masks.data), rect: [...this.masks.rect] as NormRect } : null,
+        mirror: layout.mirror,
+        layout: { offsetX: layout.offsetX * plan.scale, offsetY: layout.offsetY * plan.scale, drawWidth: layout.drawWidth * plan.scale, drawHeight: layout.drawHeight * plan.scale },
+        pose: { ...this.lastPose },
+      });
       if (this.burst.frames.length >= plan.count) this.burstPlan = null;
     }
   }

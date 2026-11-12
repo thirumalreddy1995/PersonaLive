@@ -1123,6 +1123,58 @@ export function foreheadHairline(
   return { meanPx: abs / n, pctFaceHeight: (100 * abs) / n / faceHeight, signedPx: signed / n, columns: n };
 }
 
+/**
+ * True when a frame is upright and frontal enough for the hairline metric (image columns stand in
+ * for the forehead axis). The app's head pose reports the eye-line angle, which is near ±180° for
+ * an upright face in a mirrored frame and near 0° in an unmirrored one, so the roll is folded.
+ */
+export function uprightFrontal(pose: { yaw: number; roll: number }, maxRoll = 10, maxYaw = 15): boolean {
+  const r = Math.abs(pose.roll) % 180;
+  return Math.min(r, 180 - r) <= maxRoll && Math.abs(pose.yaw) <= maxYaw;
+}
+
+export interface HairlineJitter {
+  /** Mean |change| of the signed persona-edge-to-hair-boundary offset between consecutive frames, in full-resolution pixels. */
+  jitterPx: number;
+  /** Largest such change (full-resolution pixels). */
+  maxStepPx: number;
+  /** Frames with a measurement, and consecutive pairs the jitter is taken over. */
+  frames: number;
+  pairs: number;
+  /** Mean alignment error over the burst (full-resolution pixels and % of face height). */
+  meanPx: number;
+  pctFaceHeight: number;
+}
+
+/**
+ * Frame-to-frame hairline jitter over a burst of consecutive video frames (plan R4b: < 1 px).
+ * `frames[i]` is the hairline measurement of burst frame i (null when the frame is not upright and
+ * frontal or has no usable column); only pairs of adjacent measured frames count. `scale` is the
+ * burst's downscale, so the result is in full-resolution output pixels. Null without such a pair.
+ */
+export function hairlineJitter(frames: ReadonlyArray<ForeheadHairline | null>, scale: number): HairlineJitter | null {
+  const s = scale > 0 ? scale : 1;
+  let sum = 0, max = 0, pairs = 0;
+  for (let i = 1; i < frames.length; i++) {
+    const a = frames[i - 1], b = frames[i];
+    if (!a || !b) continue;
+    const d = Math.abs(b.signedPx - a.signedPx) / s;
+    sum += d;
+    if (d > max) max = d;
+    pairs++;
+  }
+  if (!pairs) return null;
+  const measured = frames.filter((f): f is ForeheadHairline => !!f);
+  return {
+    jitterPx: sum / pairs,
+    maxStepPx: max,
+    frames: measured.length,
+    pairs,
+    meanPx: measured.reduce((acc, f) => acc + f.meanPx, 0) / measured.length / s,
+    pctFaceHeight: measured.reduce((acc, f) => acc + f.pctFaceHeight, 0) / measured.length,
+  };
+}
+
 /** Mean absolute frame-to-frame change of a per-frame scalar series (e.g. mean edge position). */
 export function jitter(series: number[]): number {
   if (series.length < 2) return 0;

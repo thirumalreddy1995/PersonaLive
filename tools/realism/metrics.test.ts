@@ -9,6 +9,8 @@ import {
   flicker,
   foreheadToneStep,
   hairlineAlignment,
+  hairlineJitter,
+  uprightFrontal,
   hairBoundaryEdge,
   foreheadHairline,
   jitter,
@@ -346,6 +348,30 @@ test('personaTopEdge, hairlineAlignment and jitter', () => {
   assert.equal(hairlineAlignment([null], [1]), null);
   assert.equal(jitter([10, 11, 9, 9]), 1);
   assert.equal(jitter([5]), 0);
+});
+
+test('uprightFrontal folds the eye-line roll (0° and ±180° are both upright)', () => {
+  assert.equal(uprightFrontal({ yaw: 2, roll: -178.6 }), true);
+  assert.equal(uprightFrontal({ yaw: 2, roll: 176.7 }), true);
+  assert.equal(uprightFrontal({ yaw: -3, roll: 4 }), true);
+  assert.equal(uprightFrontal({ yaw: 0, roll: 160 }), false);
+  assert.equal(uprightFrontal({ yaw: 0, roll: 90 }), false);
+  assert.equal(uprightFrontal({ yaw: 20, roll: 180 }), false);
+});
+
+test('hairlineJitter counts only adjacent measured frames and reports full-resolution pixels', () => {
+  const h = (signedPx: number) => ({ meanPx: Math.abs(signedPx), pctFaceHeight: Math.abs(signedPx) / 2, signedPx, columns: 10 });
+  // Half-scale burst: offsets 1, 1.5, (gap), 3, 2 → steps 0.5 and 1 at half scale = 1 and 2 px at full resolution.
+  const j = hairlineJitter([h(1), h(1.5), null, h(3), h(2)], 0.5);
+  assert.ok(j);
+  assert.equal(j.pairs, 2);
+  assert.equal(j.frames, 4);
+  assert.equal(j.jitterPx, 1.5);
+  assert.equal(j.maxStepPx, 2);
+  assert.equal(j.meanPx, (1 + 1.5 + 3 + 2) / 4 / 0.5);
+  assert.equal(j.pctFaceHeight, (0.5 + 0.75 + 1.5 + 1) / 4);
+  assert.equal(hairlineJitter([h(1), null, h(2)], 1), null);
+  assert.equal(hairlineJitter([], 1), null);
 });
 
 // --- Relative targets -----------------------------------------------------------------------------

@@ -132,6 +132,14 @@ export interface RealismBurstFrame {
   output: HTMLCanvasElement;
   driver: HTMLCanvasElement;
   landmarks: Float32Array;
+  /** The persona layer at the burst scale (null when no persona was drawn). */
+  overlay: HTMLCanvasElement | null;
+  /** Segmentation masks in use on this frame (null when off). */
+  masks: { width: number; height: number; data: Uint8ClampedArray; rect: [number, number, number, number] } | null;
+  mirror: boolean;
+  /** Where the source frame sits on the burst-scaled canvas. */
+  layout: { offsetX: number; offsetY: number; drawWidth: number; drawHeight: number };
+  pose: HeadPose;
 }
 
 export interface RealismBurst {
@@ -246,7 +254,19 @@ export interface SerializedCapture {
 export interface SerializedBurst {
   start: number;
   scale: number;
-  frames: Array<{ t: number; frameIndex: number; outputPng: string; driverPng: string; landmarks: number[] }>;
+  frames: Array<{
+    t: number;
+    frameIndex: number;
+    outputPng: string;
+    driverPng: string;
+    landmarks: number[];
+    overlayPng: string | null;
+    masksPng: string | null;
+    masksRect: [number, number, number, number] | null;
+    mirror: boolean;
+    layout: { offsetX: number; offsetY: number; drawWidth: number; drawHeight: number };
+    pose: HeadPose;
+  }>;
 }
 
 export interface LoadPersonaSpec {
@@ -423,6 +443,12 @@ export function installRealismWindowHook(app?: RealismAppHooks): RealismWindowHo
           outputPng: png(f.output),
           driverPng: png(f.driver),
           landmarks: Array.from(f.landmarks),
+          overlayPng: f.overlay ? png(f.overlay) : null,
+          masksPng: f.masks ? masksPng(f.masks) : null,
+          masksRect: f.masks ? f.masks.rect : null,
+          mirror: f.mirror,
+          layout: f.layout,
+          pose: f.pose,
         })),
       };
     },
