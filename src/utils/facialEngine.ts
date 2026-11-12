@@ -10,7 +10,7 @@
  *      with edge feathering, lighting adaptation and optional real-eye pass-through.
  *   6. Composite into the selected view mode and stamp the mandatory AI-transformed watermark.
  */
-import { AuthorizedPersona, EngineStatus, FacialMetrics, HeadPose, TransformationSettings } from '../types/index.ts';
+import { AuthorizedPersona, EngineStatus, FacialMetrics, HeadPose, PersonaReference, TransformationSettings } from '../types/index.ts';
 import { OneEuroFilter } from './faceMath.ts';
 import { RigidPoseStabilizer, StabilizerOptions, poseAngles } from './rigidPose.ts';
 import { cropUvs, planCrop } from './personaCrop.ts';
@@ -41,6 +41,9 @@ import {
 } from './foreheadExtension.ts';
 import { dilateMask, inpaintMasked } from './inpaint.ts';
 import { foreshortenWeights } from './foreshorten.ts';
+import { KeyframeCrossfader } from './keyframeBlend.ts';
+import { driverPoseFromMatrix } from './headPose.ts';
+import { FramePacer, type PacedTick, type PacedVideo } from './framePacing.ts';
 import { FACE_OVAL_RING } from './personaDelight.ts';
 import { READBACK_SIZE } from './meshWarpRenderer.ts';
 import { CameraMatchState, initialCameraMatch, stepCameraMatch, CAMERA_MATCH_WARM_UPDATES, cameraMatchDue } from './cameraMatch.ts';
@@ -72,7 +75,7 @@ import {
 } from './faceTracker.ts';
 import { FacialLightingZones, MeshWarpRenderer, pairedFaceStats, readbackWindow, type FaceStats } from './meshWarpRenderer.ts';
 import { OralCavityRenderer, extractOralApertureMetrics } from './oralCavityRenderer.ts';
-import { MultiReferenceBank } from './multiReferenceBank.ts';
+import { MultiReferenceBank, type ReferenceKeyframe } from './multiReferenceBank.ts';
 import { CranialBoundaryBlender } from './cranialBoundaryBlender.ts';
 import { WATERMARK_TEXT, watermarkMetrics } from './watermark.ts';
 import { realismFlags } from '../realism/flags.ts';
@@ -191,7 +194,25 @@ export class RealtimeFacialEngine {
   // Loop & settings
   private isRunning = false;
   private disposed = false;
-  private animationFrameId: number | null = null;
+  /** R5 §3: schedules the loop on video frames (flag videoFramePacing) or animation frames. */
+  private pacer = new FramePacer({
+    requestAnimationFrame: (cb) => requestAnimationFrame(cb),
+    cancelAnimationFrame: (h) => cancelAnimationFrame(h),
+  });
+  /** Ticks skipped because the video frame had not changed (videoFramePacing fallback). */
+  private framesSkipped = 0;
+  private lastPacing: PacedTick | null = null;
+  /** R5 §1: enrollment shots of the active persona and the cross-fade between the bank's keyframes. */
+  private personaRefs: PersonaReference[] = [];
+  private realKeyframes = false;
+  private keyFader = new KeyframeCrossfader();
+  private keyUv = new Map<string, Float32Array>();
+  private keyframeMix = 0;
+  private keyframeSecondaryId: string | null = null;
+  /** R5 §5: head pose from MediaPipe's transformation matrix, in the driver convention (null without a matrix). */
+  private matrixPose: HeadPose | null = null;
+  /** R5 §4: true when this frame was composited in the single GL pass (flag singleGlComposite). */
+  private singleGlThisFrame = false;
   private settings: TransformationSettings;
   private splitPosition = 50;
 
@@ -337,7 +358,19 @@ export class RealtimeFacialEngine {
 
     // Flags that change how the persona is prepared take effect by re-preparing it.
     this.flagsUnsubscribe = realismFlags.subscribe((_flags, changed) => {
-      if ((changed.includes('syntheticSuite') || changed.includes('personaCrop') || changed.includes('personaDelight') || changed.includes('symmetricDelight') || changed.includes('personaInpaint')) && this.personaImage) void this.preparePersona();
+      if (
+        (changed.includes('syntheticSuite') ||
+          changed.includes('personaCrop') ||
+          changed.includes('personaDelight') ||
+          changed.includes('symmetricDelight') ||
+          changed.includes('personaInpaint') ||
+          // R5: real keyframes are loaded with the persona, and their stored pose depends on the pose source.
+          changed.includes('keyframeCrossfade') ||
+          changed.includes('matrixHeadPose')) &&
+        this.personaImage
+      )
+        void this.preparePersona();
+      if (changed.includes('videoFramePacing')) this.pacer.reset();
       if (changed.includes('autoRadius')) {
         this.autoRadius = initialAutoRadius();
         this.autoRadiusTrace = [];
@@ -432,6 +465,9 @@ export class RealtimeFacialEngine {
     if (!persona) {
       this.personaId = null;
       this.personaImage = null;
+      this.personaRefs = [];
+      this.realKeyframes = false;
+      this.referenceBank.clear();
       this.currentKeyframeId = null;
       this.warp.clearPersona();
       this.patchStatus({ persona: 'none' });
@@ -439,6 +475,7 @@ export class RealtimeFacialEngine {
     }
     if (persona.id === this.personaId && this.status.persona === 'ready') return;
     this.personaId = persona.id;
+    this.personaRefs = persona.references ?? [];
     this.patchStatus({ persona: 'preparing' });
 
     const token = this.personaPrepareToken;
@@ -504,10 +541,7 @@ export class RealtimeFacialEngine {
 
   public stop() {
     this.isRunning = false;
-    if (this.animationFrameId !== null) {
-      cancelAnimationFrame(this.animationFrameId);
-      this.animationFrameId = null;
-    }
+    this.pacer.cancel();
   }
 
   public dispose() {
@@ -548,42 +582,11 @@ export class RealtimeFacialEngine {
       const face = faces[0];
       // R4b: whether this persona is prepared for the extended topology.
       const foreheadOn = this.foreheadOn;
-      // R2 §2: crop to the face oval × 1.6, cap the long edge, recompute UVs (flag personaCrop).
-      let texture: HTMLImageElement | HTMLCanvasElement = img;
-      let uv = face.landmarks;
-      if (realismFlags.get().personaCrop) {
-        const plan = planCrop(face.landmarks, img.naturalWidth, img.naturalHeight, this.settings.personaTextureSize);
-        const crop = document.createElement('canvas');
-        crop.width = plan.width;
-        crop.height = plan.height;
-        const cctx = crop.getContext('2d')!;
-        cctx.imageSmoothingEnabled = true;
-        cctx.imageSmoothingQuality = 'high';
-        cctx.drawImage(img, plan.sx, plan.sy, plan.sw, plan.sh, 0, 0, plan.width, plan.height);
-        texture = crop;
-        uv = cropUvs(face.landmarks, img.naturalWidth, img.naturalHeight, plan);
-      }
-      // R3b (flag personaDelight): divide the photo's smooth shading field out of the skin.
-      this.personaDelightRange = null;
-      if (realismFlags.get().personaDelight) {
-        const lit = document.createElement('canvas');
-        lit.width = texture instanceof HTMLImageElement ? texture.naturalWidth : texture.width;
-        lit.height = texture instanceof HTMLImageElement ? texture.naturalHeight : texture.height;
-        const lctx = lit.getContext('2d', { willReadFrequently: true })!;
-        lctx.drawImage(texture, 0, 0, lit.width, lit.height);
-        const pixels = lctx.getImageData(0, 0, lit.width, lit.height);
-        const pts = new Float32Array(468 * 2);
-        for (let i = 0; i < 468; i++) {
-          pts[i * 2] = uv[i * 2] * lit.width;
-          pts[i * 2 + 1] = uv[i * 2 + 1] * lit.height;
-        }
-        const res = delightPersona(pixels.data, lit.width, lit.height, pts);
-        if (res) {
-          lctx.putImageData(pixels, 0, 0);
-          texture = lit;
-          this.personaDelightRange = res.range;
-        }
-      }
+      // R2 §2 crop and R3b de-light (shared with the R5 keyframes, see photoTexture).
+      const prepared = this.photoTexture(img, face.landmarks);
+      let texture: HTMLImageElement | HTMLCanvasElement = prepared.texture;
+      let uv = prepared.uv;
+      this.personaDelightRange = prepared.delightRange;
       // R4 (flag personaInpaint): segment the photo and inpaint hair and glasses inside the face oval.
       this.personaInpaintShare = null;
       const warnings: string[] = [];
@@ -655,10 +658,29 @@ export class RealtimeFacialEngine {
       // Synthesize calibrated multi-angle, multi-expression identity suite for Person A.
       // With the syntheticSuite flag off the bank stays empty and the warp uses the one real photo.
       this.referenceBank.clear();
+      this.realKeyframes = false;
+      this.keyFader.reset();
+      this.keyUv.clear();
+      this.keyframeMix = 0;
+      this.keyframeSecondaryId = null;
+      this.warp.clearKeyframes();
       if (realismFlags.get().syntheticSuite) {
         const suite = MultiReferenceBank.synthesizeSuiteFromMaster(img, face.landmarks, this.personaMean);
         for (const kf of suite) {
           this.referenceBank.addKeyframe(kf);
+        }
+      }
+      // R5 §1 (flag keyframeCrossfade): the enrollment shots become real keyframes, one GPU texture each.
+      if (realismFlags.get().keyframeCrossfade && this.personaRefs.length > 1 && this.warp.supportsKeyframePair) {
+        const keyframes = await this.loadReferenceKeyframes(this.personaRefs);
+        if (this.disposed || token !== this.personaPrepareToken) return;
+        if (keyframes.length > 1) {
+          this.referenceBank.clear();
+          for (const kf of keyframes) this.referenceBank.addKeyframe(kf);
+          this.realKeyframes = true;
+          // Every keyframe is uploaded now, so no later switch uploads anything.
+          this.warp.setKeyframePair({ image: keyframes[0].source, uv: this.keyframeUv(keyframes[0]) }, null, 0);
+          this.warp.warmKeyframes(keyframes.map((k) => k.source));
         }
       }
 
@@ -681,28 +703,130 @@ export class RealtimeFacialEngine {
   // Frame loop
   // ---------------------------------------------------------------------------------------------
 
-  private loop = () => {
+  private loop = (_now?: number, tick?: PacedTick) => {
     if (!this.isRunning) return;
-    const frameStart = performance.now();
-    try {
-      this.renderFrame(frameStart);
-    } catch (err) {
-      console.error('Render frame failed', err);
-    }
-    const frameEnd = performance.now();
-    this.profiler.frame(frameEnd - frameStart, frameEnd);
+    if (tick) this.lastPacing = tick;
+    // R5 §3: with videoFramePacing a tick without a new camera frame is skipped (a stalled source still gets one).
+    if (!tick || tick.newFrame || tick.stalled) {
+      const frameStart = performance.now();
+      try {
+        this.renderFrame(frameStart);
+      } catch (err) {
+        console.error('Render frame failed', err);
+      }
+      const frameEnd = performance.now();
+      this.profiler.frame(frameEnd - frameStart, frameEnd);
 
-    this.latencyHistory.push(frameEnd - frameStart);
-    if (this.latencyHistory.length > 30) this.latencyHistory.shift();
+      this.latencyHistory.push(frameEnd - frameStart);
+      if (this.latencyHistory.length > 30) this.latencyHistory.shift();
 
-    this.frameCount++;
-    if (frameEnd - this.lastFpsCalcTime >= 500) {
-      this.currentFps = (this.frameCount * 1000) / (frameEnd - this.lastFpsCalcTime);
-      this.frameCount = 0;
-      this.lastFpsCalcTime = frameEnd;
+      this.frameCount++;
+      if (frameEnd - this.lastFpsCalcTime >= 500) {
+        this.currentFps = (this.frameCount * 1000) / (frameEnd - this.lastFpsCalcTime);
+        this.frameCount = 0;
+        this.lastFpsCalcTime = frameEnd;
+      }
+    } else {
+      this.framesSkipped++;
     }
-    this.animationFrameId = requestAnimationFrame(this.loop);
+    const paced = realismFlags.get().videoFramePacing;
+    const v = this.videoElement;
+    const video = paced && v && v.readyState >= 2 && v.videoWidth > 0 ? (v as unknown as PacedVideo) : null;
+    this.pacer.schedule(video, paced, this.loop);
   };
+
+  /**
+   * Crops a persona photo to the face (R2 §2, flag personaCrop) and divides its smooth shading
+   * out (R3b, flag personaDelight). Used for the persona photo and for every R5 keyframe, so they
+   * all go through the same preparation.
+   */
+  private photoTexture(img: HTMLImageElement, landmarks: Float32Array): { texture: HTMLImageElement | HTMLCanvasElement; uv: Float32Array; delightRange: number | null } {
+    let texture: HTMLImageElement | HTMLCanvasElement = img;
+    let uv = landmarks;
+    let delightRange: number | null = null;
+    if (realismFlags.get().personaCrop) {
+      const plan = planCrop(landmarks, img.naturalWidth, img.naturalHeight, this.settings.personaTextureSize);
+      const crop = document.createElement('canvas');
+      crop.width = plan.width;
+      crop.height = plan.height;
+      const cctx = crop.getContext('2d')!;
+      cctx.imageSmoothingEnabled = true;
+      cctx.imageSmoothingQuality = 'high';
+      cctx.drawImage(img, plan.sx, plan.sy, plan.sw, plan.sh, 0, 0, plan.width, plan.height);
+      texture = crop;
+      uv = cropUvs(landmarks, img.naturalWidth, img.naturalHeight, plan);
+    }
+    if (realismFlags.get().personaDelight) {
+      const lit = document.createElement('canvas');
+      lit.width = texture instanceof HTMLImageElement ? texture.naturalWidth : texture.width;
+      lit.height = texture instanceof HTMLImageElement ? texture.naturalHeight : texture.height;
+      const lctx = lit.getContext('2d', { willReadFrequently: true })!;
+      lctx.drawImage(texture, 0, 0, lit.width, lit.height);
+      const pixels = lctx.getImageData(0, 0, lit.width, lit.height);
+      const pts = new Float32Array(468 * 2);
+      for (let i = 0; i < 468; i++) {
+        pts[i * 2] = uv[i * 2] * lit.width;
+        pts[i * 2 + 1] = uv[i * 2 + 1] * lit.height;
+      }
+      const res = delightPersona(pixels.data, lit.width, lit.height, pts);
+      if (res) {
+        lctx.putImageData(pixels, 0, 0);
+        texture = lit;
+        delightRange = res.range;
+      }
+    }
+    return { texture, uv, delightRange };
+  }
+
+  /**
+   * R5 §1: turns the enrollment shots into bank keyframes. Each photo is analysed and prepared
+   * like the persona photo; the pose and expression stored with the shot (measured live when it
+   * was taken) position it in the bank. A shot whose face cannot be found is skipped.
+   */
+  private async loadReferenceKeyframes(refs: PersonaReference[]): Promise<ReferenceKeyframe[]> {
+    const useMatrix = realismFlags.get().matrixHeadPose;
+    const out: ReferenceKeyframe[] = [];
+    for (const ref of refs) {
+      try {
+        const img = await new Promise<HTMLImageElement>((resolve, reject) => {
+          const el = new Image();
+          el.crossOrigin = 'anonymous';
+          el.onload = () => resolve(el);
+          el.onerror = () => reject(new Error(`could not load ${ref.label}`));
+          el.src = ref.imageUrl;
+        });
+        const { faces } = await this.tracker.detectImage(img);
+        if (this.disposed || faces.length === 0) continue;
+        const { texture, uv } = this.photoTexture(img, faces[0].landmarks);
+        const size = texture instanceof HTMLImageElement ? { width: texture.naturalWidth, height: texture.naturalHeight } : { width: texture.width, height: texture.height };
+        out.push({
+          id: ref.id,
+          label: ref.label,
+          pose: useMatrix && ref.matrixPose ? { ...ref.matrixPose } : { ...ref.pose },
+          expression: { ...ref.expression },
+          landmarks: uv,
+          source: texture,
+          meanColor: this.personaMean,
+          width: size.width,
+          height: size.height,
+        });
+      } catch (err) {
+        console.warn('Reference shot skipped', ref.label, err);
+      }
+    }
+    return out;
+  }
+
+  /** A keyframe's UVs for the current topology; the same array every frame (its identity marks a change for the renderer). */
+  private keyframeUv(kf: ReferenceKeyframe): Float32Array {
+    const key = `${kf.id}:${this.foreheadOn ? 'ext' : 'base'}`;
+    const cached = this.keyUv.get(key);
+    if (cached) return cached;
+    // On the extended topology (R4b) a keyframe has no forehead rings: they stay collapsed.
+    const uv = this.foreheadOn ? this.collapsedExtension(kf.landmarks) : kf.landmarks;
+    this.keyUv.set(key, uv);
+    return uv;
+  }
 
   private getSource(): { source: HTMLVideoElement | HTMLCanvasElement; width: number; height: number; mirror: boolean } | null {
     const v = this.videoElement;
@@ -783,6 +907,7 @@ export class RealtimeFacialEngine {
     }
     this.segActive = segFlags.segmentation && this.segmenter.ready && this.masks.updates > 0;
     if (tracked && layout) {
+      this.matrixPose = driverPoseFromMatrix(tracked.transform, layout.mirror);
       this.ingestLandmarks(tracked.landmarks, layout, timestamp, tracked.transform);
       this.lastFace = tracked;
       this.faceVisible = true;
@@ -1074,22 +1199,35 @@ export class RealtimeFacialEngine {
     // 6. Multi-Conditioning Identity Bank Querying: aligns reference perspective & expression
     if (this.referenceBank.getKeyframes().length > 0) {
       const smileScore = ((bs.mouthSmileLeft ?? 0) + (bs.mouthSmileRight ?? 0)) / 2 + s.manualSmileBias * 0.6;
+      // R5 §5 (flag matrixHeadPose): select by the pose from MediaPipe's transformation matrix when it is there.
+      const mp = flags.matrixHeadPose ? this.matrixPose : null;
       const queryResult = this.referenceBank.query({
-        yaw: k.yaw,
-        pitch: k.pitch,
-        roll: k.roll,
+        yaw: mp ? mp.yaw : k.yaw,
+        pitch: mp ? mp.pitch : k.pitch,
+        roll: mp ? mp.roll : k.roll,
         mar: k.mar,
         smile: smileScore,
         browElevation: bs.browInnerUp ?? 0,
       });
 
-      // UVs only change when the bank picks a different keyframe; skip the per-frame GPU upload otherwise.
-      if (queryResult.primary.id !== this.currentKeyframeId) {
+      if (this.realKeyframes && flags.keyframeCrossfade) {
+        // R5 §1: both keyframes are already on the GPU; a switch changes the bound pair and the mix, nothing is uploaded.
+        const fade = this.keyFader.update(queryResult.primary.id, timestamp);
+        const all = this.referenceBank.getKeyframes();
+        const a = all.find((kf) => kf.id === fade.primary) ?? queryResult.primary;
+        const b = fade.secondary ? all.find((kf) => kf.id === fade.secondary) ?? null : null;
+        this.warp.setKeyframePair({ image: a.source, uv: this.keyframeUv(a) }, b ? { image: b.source, uv: this.keyframeUv(b) } : null, fade.secondaryWeight);
+        this.currentKeyframeId = a.id;
+        this.currentKeyframeSource = a.source;
+        this.keyframeSecondaryId = b ? b.id : null;
+        this.keyframeMix = b ? fade.secondaryWeight : 0;
+      } else if (queryResult.primary.id !== this.currentKeyframeId) {
+        // UVs only change when the bank picks a different keyframe; skip the per-frame GPU upload otherwise.
         // On the extended topology (R4b) a bank keyframe has no forehead rings: they stay collapsed.
         this.warp.updateUVs(this.foreheadOn ? this.collapsedExtension(queryResult.primary.landmarks) : queryResult.primary.landmarks);
         this.currentKeyframeId = queryResult.primary.id;
       }
-      if (queryResult.primary.source !== this.currentKeyframeSource) {
+      if (!(this.realKeyframes && flags.keyframeCrossfade) && queryResult.primary.source !== this.currentKeyframeSource) {
         this.warp.updateTexture(queryResult.primary.source);
         this.currentKeyframeSource = queryResult.primary.source;
       }
@@ -2035,6 +2173,16 @@ export class RealtimeFacialEngine {
           isSmiling: this.lastMetrics?.isSmiling ?? false,
           keyframeId: this.currentKeyframeId,
           keyframeCount: this.referenceBank.getKeyframes().length,
+          r5: {
+            realKeyframes: this.realKeyframes,
+            keyframeUploads: this.warp.keyframeUploads,
+            keyframeSecondaryId: this.keyframeSecondaryId,
+            keyframeMix: this.keyframeMix,
+            matrixPose: this.matrixPose ? { ...this.matrixPose } : null,
+            pacing: this.lastPacing ? this.lastPacing.mode : null,
+            framesSkipped: this.framesSkipped,
+            singleGl: this.singleGlThisFrame,
+          },
           personaStatus: this.status.persona,
           framesRendered: this.frameIndex - this.frameIndexAtReset,
           syntheticTeethFrames: this.syntheticTeethFrames,

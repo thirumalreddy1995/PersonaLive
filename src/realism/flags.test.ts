@@ -93,6 +93,12 @@ test('the r4 preset is the R4 defaults with the R4b forehead extension off', () 
   assert.equal(defaultRealismFlags().foreheadExtension, false);
   for (const preset of ['r0', 'r1', 'r2', 'r3', 'r3c']) assert.equal(parseRealismFlagString(preset).flags.foreheadExtension, false, preset);
   assert.equal(parseRealismFlagString('r4,foreheadExtension=1').flags.foreheadExtension, true);
+  // R5 flags are opt-in until measured: off by default and in every preset.
+  for (const key of ['keyframeCrossfade', 'guidedEnrollment', 'videoFramePacing', 'singleGlComposite', 'matrixHeadPose'] as const) {
+    assert.equal(defaultRealismFlags()[key], false, key);
+    for (const preset of ['r0', 'r1', 'r2', 'r3', 'r3c', 'r4']) assert.equal(parseRealismFlagString(preset).flags[key], false, `${preset} ${key}`);
+    assert.equal(parseRealismFlagString(`r4,${key}=1`).flags[key], true);
+  }
   // Until R4b's defaults are decided, r4 equals the registry defaults.
   assert.deepEqual(flags, defaultRealismFlags());
 });

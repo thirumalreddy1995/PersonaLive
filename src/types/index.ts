@@ -23,6 +23,24 @@ export interface AuthorizedPersona {
     singleFaceVerified: boolean;
   };
   consent: ConsentRecord;
+  /**
+   * R5: reference shots of the same person from the guided enrollment (frontal, yaw, pitch, open
+   * mouth, smile). The first is the neutral frontal one, which is also `imageUrl`. Covered by the
+   * same consent record (their hashes are in `consent.imageHashes`).
+   */
+  references?: PersonaReference[];
+}
+
+/** One enrollment shot with the pose and expression measured when it was taken. */
+export interface PersonaReference {
+  id: string;
+  label: string;
+  imageUrl: string;
+  /** Head pose from the landmark estimate, in the driver convention of an un-mirrored photo. */
+  pose: HeadPose;
+  /** Head pose from MediaPipe's transformation matrix (degrees, same convention), when it was available. */
+  matrixPose?: HeadPose | null;
+  expression: { mar: number; smile: number; browElevation: number };
 }
 
 /** Version of the consent form whose fields a record carries. */

@@ -18,6 +18,7 @@
  */
 import { closedLipMaskForZone, featherBandWeights, toneWeights, type FaceTopology } from './faceMesh.ts';
 import type { PackedMasks } from './segmentation.ts';
+import { KeyframeTextureCache } from './keyframeBlend.ts';
 
 export interface FacialLightingZones {
   forehead: [number, number, number];
@@ -146,6 +147,7 @@ attribute float aDelight;
 attribute vec2 aFeatherBands;
 attribute float aForeshorten;
 attribute vec2 aForehead;
+attribute vec2 aUv2;
 
 uniform vec2 uResolution;
 uniform float uForeheadExt;
@@ -168,11 +170,14 @@ varying float vDelight;
 varying vec2 vFeatherBands;
 varying float vForeshorten;
 varying float vHairline;
+varying vec2 vUv2;
 
 void main() {
   vec2 clip = vec2(aPosition.x / uResolution.x * 2.0 - 1.0, 1.0 - aPosition.y / uResolution.y * 2.0);
   gl_Position = vec4(clip, 0.0, 1.0);
   vUv = aUv;
+  // R5: the second keyframe's UVs for the same vertex (equal to aUv when no cross-fade runs).
+  vUv2 = aUv2;
   // R4b: with the forehead extension active the forehead is opaque up to the hairline ring.
   vFeather = mix(aFeather, aForehead.x, uForeheadExt);
   vHairline = aForehead.y;
@@ -209,6 +214,10 @@ precision highp float;
 uniform sampler2D uTexture;
 uniform sampler2D uDriverLow;
 uniform sampler2D uPersonaLow;
+// R5 keyframe cross-fade: the second keyframe's texture and low pass, and its share of the mix (0 = off).
+uniform sampler2D uTexture2;
+uniform sampler2D uPersonaLow2;
+uniform float uKeyMix;
 uniform vec2 uResolution;
 uniform float uOpacity;
 uniform float uUnsharp;
@@ -253,6 +262,7 @@ varying float vDelight;
 varying vec2 vFeatherBands;
 varying float vForeshorten;
 varying float vHairline;
+varying vec2 vUv2;
 
 // Per-pixel, per-frame hash in [0, 1).
 float hash12(vec2 p) {
@@ -279,15 +289,23 @@ float soften(float v, float radiusPx) {
 #endif
 }
 
+// The persona colour at this fragment plus a UV offset: one keyframe, or two mixed by uKeyMix (R5 §1).
+vec4 personaTex(vec2 off, vec2 off2) {
+  vec4 a = texture2D(uTexture, vUv + off, uLodBias);
+  if (uKeyMix <= 0.0) return a;
+  return mix(a, texture2D(uTexture2, vUv2 + off2, uLodBias), uKeyMix);
+}
+
 void main() {
   // Camera match: a mip LOD bias blurs the persona toward the camera's softness (R2 §4).
-  vec4 c = texture2D(uTexture, vUv, uLodBias);
+  vec4 c = personaTex(vec2(0.0), vec2(0.0));
 #ifdef HAS_DERIVATIVES
   // Directional motion blur along the head's screen velocity (realism flag motionBlur, R3 item 3).
   if (dot(uMotionBlur, uMotionBlur) > 0.25) {
     vec2 uvStep = (dFdx(vUv) * uMotionBlur.x + dFdy(vUv) * uMotionBlur.y) / 4.0;
+    vec2 uvStep2 = (dFdx(vUv2) * uMotionBlur.x + dFdy(vUv2) * uMotionBlur.y) / 4.0;
     vec4 acc = vec4(0.0);
-    for (int i = -2; i <= 2; i++) acc += texture2D(uTexture, vUv + uvStep * float(i), uLodBias);
+    for (int i = -2; i <= 2; i++) acc += personaTex(uvStep * float(i), uvStep2 * float(i));
     c = acc / 5.0;
   }
 #endif
@@ -296,10 +314,10 @@ void main() {
   // 1. Unsharp mask with a texel-sized kernel: the fixed-offset R0 version (flag shaderUnsharp)
   //    and the camera-match sharpen amount share it.
   vec2 d = uTexelSize;
-  vec4 t0 = texture2D(uTexture, vUv + vec2(-d.x, 0.0), uLodBias);
-  vec4 t1 = texture2D(uTexture, vUv + vec2( d.x, 0.0), uLodBias);
-  vec4 t2 = texture2D(uTexture, vUv + vec2(0.0, -d.y), uLodBias);
-  vec4 t3 = texture2D(uTexture, vUv + vec2(0.0,  d.y), uLodBias);
+  vec4 t0 = personaTex(vec2(-d.x, 0.0), vec2(-d.x, 0.0));
+  vec4 t1 = personaTex(vec2( d.x, 0.0), vec2( d.x, 0.0));
+  vec4 t2 = personaTex(vec2(0.0, -d.y), vec2(0.0, -d.y));
+  vec4 t3 = personaTex(vec2(0.0,  d.y), vec2(0.0,  d.y));
   vec3 blurred = (t0.rgb + t1.rgb + t2.rgb + t3.rgb) * 0.25;
   vec3 highPass = c.rgb - blurred;
   vec3 microSkin = c.rgb + highPass * (0.35 * uUnsharp + uSharpen);
@@ -314,6 +332,8 @@ void main() {
   float hasLow = 0.0;
   if (uRelight > 0.5) {
     vec4 pl = texture2D(uPersonaLow, vUv);
+    // R5: each keyframe has its own low pass, mixed like the colour so a switch is not a tone step.
+    if (uKeyMix > 0.0) pl = mix(pl, texture2D(uPersonaLow2, vUv2), uKeyMix);
     vec4 dl = texture2D(uDriverLow, gl_FragCoord.xy / uResolution);
     if (pl.a > 0.05 && dl.a > 0.05) {
       // Symmetric de-light (flag symmetricDelight): per-vertex gain removing the photo's asymmetric mid-band light.
@@ -517,10 +537,28 @@ export function derivativesPreamble(es3: boolean, extensionAvailable: boolean): 
   return extensionAvailable ? '#extension GL_OES_standard_derivatives : enable\n#define HAS_DERIVATIVES 1\n' : '';
 }
 
+/** R5: one persona keyframe as the renderer draws it. `uv` must cover every vertex of the current topology. */
+export interface KeyframeSpec {
+  image: PersonaSource;
+  uv: Float32Array;
+}
+
+/** GPU side of a cached keyframe: its texture (uploaded once) and its relight low pass. */
+interface KeyEntry {
+  tex: WebGLTexture;
+  size: { width: number; height: number };
+  low: LowPassTarget | null;
+  lowShare: number;
+  lowUv: Float32Array | null;
+  mean: [number, number, number] | null;
+}
+
 interface GLResources {
   program: WebGLProgram;
   positionBuffer: WebGLBuffer;
   uvBuffer: WebGLBuffer;
+  /** R5: UVs of the keyframe that is fading out. */
+  uv2Buffer: WebGLBuffer;
   featherBuffer: WebGLBuffer;
   lipBuffer: WebGLBuffer;
   lipZoneBuffer: WebGLBuffer;
@@ -546,6 +584,10 @@ interface GLResources {
     aFeatherBands: number;
     aForeshorten: number;
     aForehead: number;
+    aUv2: number;
+    uTexture2: WebGLUniformLocation | null;
+    uPersonaLow2: WebGLUniformLocation | null;
+    uKeyMix: WebGLUniformLocation | null;
     uResolution: WebGLUniformLocation | null;
     uTexture: WebGLUniformLocation | null;
     uFaceBounds: WebGLUniformLocation | null;
@@ -843,6 +885,10 @@ export class MeshWarpRenderer {
   /** The persona low-pass must be rebuilt (new persona, UVs, texture or topology). */
   private personaLowDirty = true;
   private personaLowShare = RELIGHT_RADIUS_SHARE;
+  /** R5 keyframe cross-fade: one GPU texture per keyframe source, and the pair drawn this frame (null = single persona). */
+  private keyCache: KeyframeTextureCache<PersonaSource, KeyEntry> | null = null;
+  private keyPair: { a: KeyframeSpec; b: KeyframeSpec | null; mix: number } | null = null;
+  private uv2Uploaded: Float32Array | null = null;
   private relightFailed = false;
   private pending: PendingReadback[] = [];
 
@@ -996,6 +1042,7 @@ export class MeshWarpRenderer {
       program,
       positionBuffer: buffer(),
       uvBuffer: buffer(),
+      uv2Buffer: buffer(),
       featherBuffer: buffer(),
       lipBuffer: buffer(),
       lipZoneBuffer: buffer(),
@@ -1021,6 +1068,10 @@ export class MeshWarpRenderer {
         aFeatherBands: gl.getAttribLocation(program, 'aFeatherBands'),
         aForeshorten: gl.getAttribLocation(program, 'aForeshorten'),
         aForehead: gl.getAttribLocation(program, 'aForehead'),
+        aUv2: gl.getAttribLocation(program, 'aUv2'),
+        uTexture2: u('uTexture2'),
+        uPersonaLow2: u('uPersonaLow2'),
+        uKeyMix: u('uKeyMix'),
         uResolution: u('uResolution'),
         uTexture: u('uTexture'),
         uFaceBounds: u('uFaceBounds'),
@@ -1177,11 +1228,38 @@ export class MeshWarpRenderer {
     const pw = Math.max(1, Math.ceil(this.personaSize.width / RELIGHT_SCALE));
     const ph = Math.max(1, Math.ceil(this.personaSize.height / RELIGHT_SCALE));
     const share = o.radiusShare ?? RELIGHT_RADIUS_SHARE;
-    const personaStale = this.personaLowDirty || !rl.persona || rl.persona.width !== pw || rl.persona.height !== ph || share !== this.personaLowShare;
-    rl.persona = this.ensureTarget(gl, rl.persona, pw, ph);
+    const pair = this.keyPair;
+    const personaStale = !pair && (this.personaLowDirty || !rl.persona || rl.persona.width !== pw || rl.persona.height !== ph || share !== this.personaLowShare);
+    if (!pair) rl.persona = this.ensureTarget(gl, rl.persona, pw, ph);
 
     gl.disable(gl.BLEND);
-    if (personaStale) {
+    if (pair) {
+      // R5: every keyframe keeps its own low pass (render-to-texture, no upload), rebuilt only when its UVs or the radius change.
+      const keys = this.keys(gl);
+      const prepare = (spec: KeyframeSpec, uvBuffer: WebGLBuffer): KeyEntry => {
+        const e = keys.get(spec.image);
+        const w = Math.max(1, Math.ceil(e.size.width / RELIGHT_SCALE));
+        const h = Math.max(1, Math.ceil(e.size.height / RELIGHT_SCALE));
+        const stale = !e.low || e.low.width !== w || e.low.height !== h || e.lowShare !== share || e.lowUv !== spec.uv;
+        e.low = this.ensureTarget(gl, e.low, w, h);
+        if (stale) {
+          this.paintMesh(gl, r, rl, e.low, 1, o, e.tex, uvBuffer);
+          this.blurTarget(gl, rl, e.low, lowPassSigma(uvWidth(spec.uv) * e.size.width, share));
+          e.lowShare = share;
+          e.lowUv = spec.uv;
+          e.mean = null;
+        }
+        return e;
+      };
+      const ea = prepare(pair.a, r.uvBuffer);
+      if (pair.b) prepare(pair.b, r.uv2Buffer);
+      if (!o.globalTone) rl.personaMean = null;
+      else {
+        if (!ea.mean && ea.low) ea.mean = this.readMean(gl, ea.low);
+        rl.personaMean = ea.mean;
+      }
+    }
+    if (personaStale && rl.persona) {
       this.paintMesh(gl, r, rl, rl.persona, 1, o);
       this.blurTarget(gl, rl, rl.persona, lowPassSigma(this.personaUvWidth * this.personaSize.width, share));
       this.personaLowDirty = false;
@@ -1194,7 +1272,7 @@ export class MeshWarpRenderer {
     this.blurTarget(gl, rl, rl.driver, lowPassSigma(o.faceWidthPx, share));
     rl.frames++;
     if (o.globalTone) {
-      if (!rl.personaMean) rl.personaMean = this.readMean(gl, rl.persona);
+      if (!rl.personaMean && rl.persona && !pair) rl.personaMean = this.readMean(gl, rl.persona);
       if (!rl.driverMean || rl.frames % MEAN_TONE_EVERY === 0) {
         const m = this.readMean(gl, rl.driver);
         if (m) rl.driverMean = blendMean(rl.driverMean, m, MEAN_TONE_ALPHA);
@@ -1216,7 +1294,7 @@ export class MeshWarpRenderer {
     return meanChroma(target.pixels, target.width, target.height);
   }
 
-  private paintMesh(gl: WebGLRenderingContext, r: GLResources, rl: RelightResources, target: LowPassTarget, mode: 0 | 1, o: RelightOptions) {
+  private paintMesh(gl: WebGLRenderingContext, r: GLResources, rl: RelightResources, target: LowPassTarget, mode: 0 | 1, o: RelightOptions, personaTexture?: WebGLTexture, uvBuffer?: WebGLBuffer) {
     const topo = this.topology!;
     gl.bindFramebuffer(gl.FRAMEBUFFER, target.fbo[0]);
     gl.viewport(0, 0, target.width, target.height);
@@ -1226,7 +1304,7 @@ export class MeshWarpRenderer {
     gl.bindBuffer(gl.ARRAY_BUFFER, r.positionBuffer);
     gl.enableVertexAttribArray(rl.paint.aPosition);
     gl.vertexAttribPointer(rl.paint.aPosition, 2, gl.FLOAT, false, 0, 0);
-    gl.bindBuffer(gl.ARRAY_BUFFER, r.uvBuffer);
+    gl.bindBuffer(gl.ARRAY_BUFFER, uvBuffer ?? r.uvBuffer);
     gl.enableVertexAttribArray(rl.paint.aUv);
     gl.vertexAttribPointer(rl.paint.aUv, 2, gl.FLOAT, false, 0, 0);
     gl.uniform1f(rl.paint.uMode, mode);
@@ -1239,7 +1317,7 @@ export class MeshWarpRenderer {
     gl.uniform1i(rl.paint.uSegMask, 3);
     gl.uniform4f(rl.paint.uSegRect, this.segRect[0], this.segRect[1], Math.max(1e-4, this.segRect[2]), Math.max(1e-4, this.segRect[3]));
     gl.activeTexture(gl.TEXTURE0);
-    gl.bindTexture(gl.TEXTURE_2D, mode === 0 ? rl.driverTexture : r.texture);
+    gl.bindTexture(gl.TEXTURE_2D, mode === 0 ? rl.driverTexture : personaTexture ?? r.texture);
     gl.uniform1i(rl.paint.uTexture, 0);
     gl.bindBuffer(gl.ELEMENT_ARRAY_BUFFER, r.indexBuffer);
     gl.drawElements(gl.TRIANGLES, topo.triangles.length, gl.UNSIGNED_SHORT, 0);
@@ -1301,8 +1379,12 @@ export class MeshWarpRenderer {
   }
 
   private deleteResources(gl: WebGLRenderingContext | WebGL2RenderingContext, r: GLResources) {
+    this.keyCache?.clear(true);
+    this.keyCache = null;
+    this.uv2Uploaded = null;
     gl.deleteBuffer(r.positionBuffer);
     gl.deleteBuffer(r.uvBuffer);
+    gl.deleteBuffer(r.uv2Buffer);
     gl.deleteBuffer(r.featherBuffer);
     gl.deleteBuffer(r.lipBuffer);
     gl.deleteBuffer(r.lipZoneBuffer);
@@ -1350,6 +1432,10 @@ export class MeshWarpRenderer {
     event.preventDefault();
     this.contextLost = true;
     this.resources = null;
+    // The keyframe textures went with the context; they are uploaded again on first use.
+    this.keyCache?.clear(false);
+    this.keyCache = null;
+    this.uv2Uploaded = null;
     for (const p of this.pending) p.resolve(null);
     this.pending = [];
     console.warn('WebGL context lost; persona overlay paused until the context is restored.');
@@ -1365,7 +1451,7 @@ export class MeshWarpRenderer {
       if (this.eyeFadeWeights) this.uploadEyeFade(gl, this.resources, this.eyeFadeWeights);
       this.uploadDelight(gl, this.resources, this.delightGains);
       this.segUploaded = false;
-      if (this.personaImage) this.uploadTexture(gl, this.resources, this.personaImage);
+      if (this.personaImage) this.uploadTexture(gl, this.resources.texture, this.personaImage);
       if (this.personaUv) this.uploadUvs(gl, this.resources, this.personaUv, gl.STATIC_DRAW);
       console.info('WebGL context restored; persona overlay resumed.');
     } catch (err) {
@@ -1427,9 +1513,10 @@ export class MeshWarpRenderer {
    * filtering, so minified skin texture is sampled instead of aliased and the camera-match LOD
    * bias has levels to blur into.
    */
-  private uploadTexture(gl: WebGLRenderingContext, r: GLResources, image: PersonaSource) {
+  private uploadTexture(gl: WebGLRenderingContext, texture: WebGLTexture, image: PersonaSource) {
     const { width, height } = sourceSize(image);
-    gl.bindTexture(gl.TEXTURE_2D, r.texture);
+    gl.activeTexture(gl.TEXTURE0);
+    gl.bindTexture(gl.TEXTURE_2D, texture);
     gl.pixelStorei(gl.UNPACK_FLIP_Y_WEBGL, false);
     gl.pixelStorei(gl.UNPACK_PREMULTIPLY_ALPHA_WEBGL, false);
     gl.texImage2D(gl.TEXTURE_2D, 0, gl.RGBA, gl.RGBA, gl.UNSIGNED_BYTE, image);
@@ -1471,13 +1558,16 @@ export class MeshWarpRenderer {
    * @param uv flat normalized [u, v, ...] landmark positions inside the image (y down, 0..1)
    */
   setPersona(image: PersonaSource, uv: Float32Array) {
+    // A single persona texture: leave keyframe-pair mode (the cached keyframes stay until clearKeyframes).
+    this.keyPair = null;
+    this.uv2Uploaded = null;
     this.personaImage = image;
     this.personaUv = uv;
     this.personaSize = sourceSize(image);
     this.personaUvWidth = uvWidth(uv);
     this.personaLowDirty = true;
     if (this.gl && this.resources && this.glReady) {
-      this.uploadTexture(this.gl, this.resources, image);
+      this.uploadTexture(this.gl, this.resources.texture, image);
       this.uploadUvs(this.gl, this.resources, uv, this.gl.STATIC_DRAW);
     }
   }
@@ -1485,6 +1575,66 @@ export class MeshWarpRenderer {
   clearPersona() {
     this.personaImage = null;
     this.personaUv = null;
+    this.clearKeyframes();
+  }
+
+  /** R5: the per-keyframe texture cache of this context (created on first use). */
+  private keys(gl: WebGLRenderingContext): KeyframeTextureCache<PersonaSource, KeyEntry> {
+    if (!this.keyCache) {
+      this.keyCache = new KeyframeTextureCache<PersonaSource, KeyEntry>(
+        (image) => {
+          const tex = gl.createTexture()!;
+          this.uploadTexture(gl, tex, image);
+          return { tex, size: sourceSize(image), low: null, lowShare: -1, lowUv: null, mean: null };
+        },
+        (e) => {
+          gl.deleteTexture(e.tex);
+          if (e.low) this.deleteTarget(gl, e.low);
+        }
+      );
+    }
+    return this.keyCache;
+  }
+
+  /** True when two keyframes can be sampled and mixed in the shader (any WebGL context). */
+  get supportsKeyframePair(): boolean {
+    return this.gl !== null && !this.contextLost;
+  }
+
+  /** R5: uploads every keyframe texture now (persona load), so no later switch uploads anything. */
+  warmKeyframes(images: Iterable<PersonaSource>) {
+    if (this.gl && this.resources && this.glReady) this.keys(this.gl).warm(images);
+  }
+
+  /** Keyframe texture uploads since the cache was created or cleared (the R5 "a switch uploads nothing" check). */
+  get keyframeUploads(): number {
+    return this.keyCache?.uploads ?? 0;
+  }
+
+  /**
+   * R5 §1 (flag keyframeCrossfade): draws keyframe `a`, cross-faded with `b` by `mixB` (the share
+   * of `b`, 0..1). Both textures come from the per-keyframe cache, so a switch binds different
+   * textures and UVs and uploads no pixels. Pass the same Float32Array for a keyframe's UVs every
+   * frame: its identity is how a change is detected.
+   */
+  setKeyframePair(a: KeyframeSpec, b: KeyframeSpec | null, mixB: number) {
+    this.personaImage = a.image;
+    this.personaSize = sourceSize(a.image);
+    if (a.uv !== this.personaUv) {
+      this.personaUv = a.uv;
+      this.personaUvWidth = uvWidth(a.uv);
+      if (this.gl && this.resources && this.glReady) this.uploadUvs(this.gl, this.resources, a.uv, this.gl.DYNAMIC_DRAW);
+    }
+    this.keyPair = { a, b, mix: b ? Math.min(1, Math.max(0, mixB)) : 0 };
+  }
+
+  /** Leaves keyframe-pair mode and frees the cached keyframe textures (new persona, flag off). */
+  clearKeyframes() {
+    this.keyPair = null;
+    this.uv2Uploaded = null;
+    this.personaLowDirty = true;
+    if (this.resources?.relight) this.resources.relight.personaMean = null;
+    this.keyCache?.clear(this.gl !== null && !this.contextLost);
   }
 
   /**
@@ -1504,7 +1654,7 @@ export class MeshWarpRenderer {
     this.personaImage = image;
     this.personaSize = sourceSize(image);
     this.personaLowDirty = true;
-    if (this.gl && this.resources && this.glReady) this.uploadTexture(this.gl, this.resources, image);
+    if (this.gl && this.resources && this.glReady) this.uploadTexture(this.gl, this.resources.texture, image);
   }
 
   get hasPersona() {
@@ -1555,6 +1705,16 @@ export class MeshWarpRenderer {
     gl.bindBuffer(gl.ARRAY_BUFFER, r.positionBuffer);
     gl.bufferData(gl.ARRAY_BUFFER, opts.positions, gl.DYNAMIC_DRAW);
 
+    // R5: the fading-out keyframe's UVs (a small buffer; the textures are already on the GPU).
+    const pair = this.keyPair;
+    if (pair?.b && this.uv2Uploaded !== pair.b.uv) {
+      gl.bindBuffer(gl.ARRAY_BUFFER, r.uv2Buffer);
+      gl.bufferData(gl.ARRAY_BUFFER, pair.b.uv, gl.DYNAMIC_DRAW);
+      this.uv2Uploaded = pair.b.uv;
+    }
+    const keyA = pair ? this.keys(gl).get(pair.a.image) : null;
+    const keyB = pair?.b ? this.keys(gl).get(pair.b.image) : null;
+
     // R4: the masks go to unit 3 first, so the driver low pass can leave hair out (R4b §5).
     this.bindSegmentation(gl, r, opts.segmentation);
     // R3: the low-pass passes run first (they switch programs, framebuffers and attribute 0).
@@ -1567,6 +1727,12 @@ export class MeshWarpRenderer {
     gl.bindBuffer(gl.ARRAY_BUFFER, r.uvBuffer);
     gl.enableVertexAttribArray(loc.aUv);
     gl.vertexAttribPointer(loc.aUv, 2, gl.FLOAT, false, 0, 0);
+
+    if (loc.aUv2 >= 0) {
+      gl.bindBuffer(gl.ARRAY_BUFFER, keyB ? r.uv2Buffer : r.uvBuffer);
+      gl.enableVertexAttribArray(loc.aUv2);
+      gl.vertexAttribPointer(loc.aUv2, 2, gl.FLOAT, false, 0, 0);
+    }
 
     gl.bindBuffer(gl.ARRAY_BUFFER, r.featherBuffer);
     gl.enableVertexAttribArray(loc.aFeather);
@@ -1626,7 +1792,8 @@ export class MeshWarpRenderer {
 
     // R3 relighting inputs on units 1 and 2 (bound whether or not the passes ran this frame).
     const rl = r.relight;
-    gl.uniform1f(loc.uRelight, relit && rl?.driver && rl.persona ? 1 : 0);
+    const personaLow = pair ? keyA?.low ?? null : rl?.persona ?? null;
+    gl.uniform1f(loc.uRelight, relit && rl?.driver && personaLow ? 1 : 0);
     gl.uniform1f(loc.uToneMatch, opts.relight?.toneMatch ?? 0);
     const globalTone = !!opts.relight?.globalTone && !!rl?.personaMean && !!rl.driverMean;
     gl.uniform1f(loc.uGlobalTone, globalTone ? 1 : 0);
@@ -1635,22 +1802,31 @@ export class MeshWarpRenderer {
     const md = (globalTone && rl?.driverMean) || [1, 1, 1];
     gl.uniform3f(loc.uMeanChromaP, mp[0], mp[1], mp[2]);
     gl.uniform3f(loc.uMeanChromaD, md[0], md[1], md[2]);
-    if (relit && rl?.driver && rl.persona) {
+    if (relit && rl?.driver && personaLow) {
       gl.activeTexture(gl.TEXTURE1);
       gl.bindTexture(gl.TEXTURE_2D, rl.driver.tex[0]);
       gl.uniform1i(loc.uDriverLow, 1);
       gl.activeTexture(gl.TEXTURE2);
-      gl.bindTexture(gl.TEXTURE_2D, rl.persona.tex[0]);
+      gl.bindTexture(gl.TEXTURE_2D, personaLow.tex[0]);
       gl.uniform1i(loc.uPersonaLow, 2);
+      gl.activeTexture(gl.TEXTURE5);
+      gl.bindTexture(gl.TEXTURE_2D, (keyB?.low ?? personaLow).tex[0]);
     }
+    gl.uniform1i(loc.uPersonaLow2, 5);
     const mb = opts.motionBlurPx ?? [0, 0];
     gl.uniform2f(loc.uMotionBlur, mb[0], mb[1]);
     const faceWidthPx = opts.faceBounds?.[2] ?? this._canvas.width;
     const texelPx = faceWidthPx / Math.max(1, this.personaUvWidth * this.personaSize.width);
     gl.uniform1f(loc.uSoftHolesPx, opts.softHoles ? softHoleRadiusPx(opts.cameraMatch?.lodBias ?? 0, texelPx) : 0);
 
+    // Unit 0: the persona (or keyframe A); unit 4: keyframe B while a cross-fade runs.
+    const texA = keyA ? keyA.tex : r.texture;
+    gl.activeTexture(gl.TEXTURE4);
+    gl.bindTexture(gl.TEXTURE_2D, keyB ? keyB.tex : texA);
+    gl.uniform1i(loc.uTexture2, 4);
+    gl.uniform1f(loc.uKeyMix, keyB && pair ? pair.mix : 0);
     gl.activeTexture(gl.TEXTURE0);
-    gl.bindTexture(gl.TEXTURE_2D, r.texture);
+    gl.bindTexture(gl.TEXTURE_2D, texA);
     gl.uniform1i(loc.uTexture, 0);
     gl.uniform2f(loc.uResolution, this._canvas.width, this._canvas.height);
 

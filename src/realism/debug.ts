@@ -87,6 +87,18 @@ export interface RealismDebugState {
   isSmiling: boolean;
   keyframeId: string | null;
   keyframeCount: number;
+  /** R5 state: real keyframes and their uploads, the cross-fade, the matrix head pose, the loop pacing and the compositing path. */
+  r5?: {
+    realKeyframes: boolean;
+    /** Keyframe texture uploads since the persona was prepared: stays at the keyframe count however often the bank switches. */
+    keyframeUploads: number;
+    keyframeSecondaryId: string | null;
+    keyframeMix: number;
+    matrixPose: HeadPose | null;
+    pacing: 'video-frame' | 'animation-frame' | null;
+    framesSkipped: number;
+    singleGl: boolean;
+  };
   personaStatus: string;
   framesRendered: number;
   /** Frames in which OralCavityRenderer drew synthetic teeth. */
