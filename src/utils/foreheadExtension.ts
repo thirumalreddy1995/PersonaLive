@@ -41,10 +41,23 @@ export const MAX_HAIRLINE_RATIO = 2.2;
 export const STRETCH_MIN = 0.75;
 export const STRETCH_MAX = 1.35;
 
-/** Calibration: frontal band, dwell before sampling, samples per calibration, recalibration trigger. */
+/**
+ * Calibration: frontal band, dwell before sampling, samples per calibration, recalibration trigger.
+ * The pitch band is wider than the yaw band: a laptop camera sits below the face, so a wearer
+ * looking straight at the screen reads −6° to −10° of pitch, and pitch moves the hairline and the
+ * brow-to-10 span together (the ratio barely changes), while yaw hides one side of the hairline.
+ */
 export const HAIRLINE_FRONTAL_DEG = 10;
-export const HAIRLINE_DWELL_MS = 1000;
-export const HAIRLINE_SAMPLES = 20;
+export const HAIRLINE_FRONTAL_PITCH_DEG = 18;
+export const HAIRLINE_DWELL_MS = 400;
+export const HAIRLINE_SAMPLES = 12;
+/** Leaving the frontal band for at most this long (a tracker glitch, a blink of pose noise) does not restart a calibration. */
+export const HAIRLINE_GLITCH_MS = 250;
+/** A mask measurement counts as a sample only with at least this many measured columns (a hand or hair across the forehead does not). */
+export const HAIRLINE_MIN_COLUMNS = 5;
+/** Contour continuity: an interior column may sit at most this far (in ratio units) below the mean of its neighbours, an end column below its neighbour. */
+export const HAIRLINE_MAX_DIP = 0.05;
+export const HAIRLINE_MAX_END_DROP = 0.4;
 export const HAIRLINE_DISAGREE_SHARE = 0.05;
 export const HAIRLINE_DISAGREE_MS = 3000;
 
@@ -239,6 +252,28 @@ export function fillAmbiguousRatios(ratios: ArrayLike<number | null>, fallback =
   return out;
 }
 
+/**
+ * Keeps the hairline contour continuous across the columns (R4b fix): a 3-tap median removes a
+ * single-column outlier, then no interior column may dip more than HAIRLINE_MAX_DIP below the mean
+ * of its neighbours and no end column more than HAIRLINE_MAX_END_DROP below its neighbour. Dips
+ * are raised, never the reverse: a ring that runs a little into the hair is removed there by the
+ * hair mask, while a ring below the hairline leaves a notch of the wearer's own skin.
+ */
+export function smoothHairlineRatios(ratios: ArrayLike<number>): number[] {
+  const n = ratios.length;
+  const r = Array.from({ length: n }, (_, i) => ratios[i]);
+  if (n < 3) return r;
+  const m = r.map((v, i) => (i === 0 || i === n - 1 ? v : median([r[i - 1], v, r[i + 1]])));
+  const out = [...m];
+  // Two passes so a raised column can support its neighbour.
+  for (let pass = 0; pass < 2; pass++) {
+    for (let i = 1; i < n - 1; i++) out[i] = Math.max(out[i], (out[i - 1] + out[i + 1]) / 2 - HAIRLINE_MAX_DIP);
+  }
+  out[0] = Math.max(out[0], out[1] - HAIRLINE_MAX_END_DROP);
+  out[n - 1] = Math.max(out[n - 1], out[n - 2] - HAIRLINE_MAX_END_DROP);
+  return out.map((v) => Math.min(MAX_HAIRLINE_RATIO, Math.max(MIN_HAIRLINE_RATIO, v)));
+}
+
 function median(values: number[]): number {
   const v = [...values].sort((a, b) => a - b);
   const mid = v.length >> 1;
@@ -282,8 +317,13 @@ export function stretchClamp(wearer: ArrayLike<number>, persona: ArrayLike<numbe
   return { wearer: w, persona: p, clamped };
 }
 
+/** The frontal band of the calibration: |yaw| under HAIRLINE_FRONTAL_DEG and |pitch| under HAIRLINE_FRONTAL_PITCH_DEG. */
+export function isHairlineFrontal(yaw: number, pitch: number): boolean {
+  return Math.abs(yaw) < HAIRLINE_FRONTAL_DEG && Math.abs(pitch) < HAIRLINE_FRONTAL_PITCH_DEG;
+}
+
 export interface HairlineSampleInfo {
-  /** |yaw| and |pitch| under HAIRLINE_FRONTAL_DEG. */
+  /** Inside the frontal band (isHairlineFrontal). */
   frontal: boolean;
   /** Milliseconds, monotonic. */
   t: number;
@@ -292,15 +332,19 @@ export interface HairlineSampleInfo {
 }
 
 /**
- * Wearer hairline calibration (R4b §1): once the face has been frontal for ~1 s, the per-column
- * median of ~20 mask measurements becomes the stored ratios. They are not touched per frame.
- * While frontal, a disagreement with the hair mask of more than 5% of face height for over 3 s
- * starts a new calibration (the stored ratios stay in use until it completes).
+ * Wearer hairline calibration (R4b §1): once the face has been frontal for HAIRLINE_DWELL_MS, the
+ * per-column median of HAIRLINE_SAMPLES mask measurements, made continuous across the columns,
+ * becomes the stored ratios (about 1.5 s at ten masks a second). They are not touched per frame.
+ * Leaving the frontal band for up to HAIRLINE_GLITCH_MS, or a measurement with too few columns
+ * (a hand across the forehead), pauses the collection instead of restarting it. While frontal, a
+ * disagreement with the hair mask of more than 5% of face height for over 3 s starts a new
+ * calibration (the stored ratios stay in use until it completes).
  */
 export class HairlineCalibrator {
   private stored: number[] | null = null;
   private samples: Array<Array<number | null>> = [];
   private frontalSince: number | null = null;
+  private offSince: number | null = null;
   private disagreeSince: number | null = null;
   private collecting = true;
   /** Bumps whenever the stored ratios change. */
@@ -328,6 +372,7 @@ export class HairlineCalibrator {
     this.stored = null;
     this.samples = [];
     this.frontalSince = null;
+    this.offSince = null;
     this.disagreeSince = null;
     this.collecting = true;
     this.calibrations = 0;
@@ -348,19 +393,27 @@ export class HairlineCalibrator {
    */
   push(sample: ArrayLike<number | null> | null, info: HairlineSampleInfo): boolean {
     if (!info.frontal) {
+      if (this.offSince === null) this.offSince = info.t;
+      // A brief excursion (tracker glitch, pose noise at the edge of the band) only pauses the hold.
+      if (info.t - this.offSince <= HAIRLINE_GLITCH_MS) return false;
       this.frontalSince = null;
       this.disagreeSince = null;
-      // A calibration is one frontal hold: leaving the frontal band restarts it.
+      // A calibration is one frontal hold: really leaving the frontal band restarts it.
       if (this.collecting) this.samples = [];
       return false;
     }
+    this.offSince = null;
     if (this.frontalSince === null) this.frontalSince = info.t;
     if (info.t - this.frontalSince < HAIRLINE_DWELL_MS || !sample) return false;
 
     if (this.collecting) {
+      // An occluded forehead (hand, hair pushed across) is not a sample, and not a reason to start over.
+      let measured = 0;
+      for (let c = 0; c < EXT_COLUMNS; c++) if (sample[c] !== null && Number.isFinite(sample[c])) measured++;
+      if (measured < HAIRLINE_MIN_COLUMNS) return false;
       this.samples.push(Array.from(sample));
       if (this.samples.length < HAIRLINE_SAMPLES) return false;
-      this.stored = fillAmbiguousRatios(medianRatios(this.samples));
+      this.stored = smoothHairlineRatios(fillAmbiguousRatios(medianRatios(this.samples)));
       this.samples = [];
       this.collecting = false;
       this.disagreeSince = null;
@@ -387,6 +440,24 @@ export class HairlineCalibrator {
     }
     return false;
   }
+}
+
+/**
+ * Foreshortening weights for the extended topology (R4b fix). The extension's triangles must not
+ * take part: collapsed (not calibrated yet) or folded away at the far silhouette they have zero
+ * screen area against a non-zero persona UV area, which read as "fully foreshortened" and faded
+ * the upper oval vertices, and with them the persona's forehead. The weights therefore come from
+ * the base triangles only (`weights` is the base computation over the extended vertex count) and
+ * each ring vertex takes its column's weight.
+ */
+export function copyColumnWeights(weights: Float32Array): Float32Array {
+  if (weights.length < EXT_VERTEX_COUNT) return weights;
+  for (let c = 0; c < EXT_COLUMNS; c++) {
+    const w = weights[HAIRLINE_COLUMNS[c]];
+    weights[EXT_MID_START + c] = w;
+    weights[EXT_HAIR_START + c] = w;
+  }
+  return weights;
 }
 
 /** Triangles of the extension (oval → mid ring → hairline ring, plus a wedge to each temple anchor). */

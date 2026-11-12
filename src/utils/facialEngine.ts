@@ -23,18 +23,20 @@ import {
   EXT_COLUMNS,
   EXT_MID_START,
   EXT_VERTEX_COUNT,
-  HAIRLINE_FRONTAL_DEG,
   HairlineCalibrator,
   STRETCH_MAX,
   STRETCH_MIN,
   TRACKED_POINT_COUNT,
+  copyColumnWeights,
   extendForehead,
   extendTopology,
   fillAmbiguousRatios,
   foreheadFrame,
   foreheadPolygon,
+  isHairlineFrontal,
   measureHairlineRatios,
   padPoints,
+  smoothHairlineRatios,
   stretchClamp,
 } from './foreheadExtension.ts';
 import { dilateMask, inpaintMasked } from './inpaint.ts';
@@ -1158,7 +1160,8 @@ export class RealtimeFacialEngine {
             radiusShare,
             globalTone: flags.relightGlobalTone,
             shadowGuard: flags.relightShadowGuard,
-            excludeHair: this.foreheadOn && this.segActive,
+            // R4b: hair leaves the driver low pass only as far as the extension is in, so an inactive extension renders as R4.
+            excludeHair: this.foreheadOn && this.segActive ? this.foreheadStrength : 0,
           }
         : undefined,
       motionBlurPx: flags.motionBlur ? [this.headVelocity.x * MOTION_BLUR_EXPOSURE, -this.headVelocity.y * MOTION_BLUR_EXPOSURE] : undefined,
@@ -1168,7 +1171,11 @@ export class RealtimeFacialEngine {
         : undefined,
       twoBand: flags.twoBandBlend && relightOn,
       forehead,
-      foreshorten: flags.foreshortenFade && this.warp.personaUvs ? (this.foreshorten = foreshortenWeights(this.warpPositions, this.warp.personaUvs, this.topology.triangles, this.topology.vertexCount, this.foreshorten ?? undefined)) : undefined,
+      // R4b: the weights come from the base triangles only; the extension rings copy their column (see copyColumnWeights).
+      foreshorten:
+        flags.foreshortenFade && this.warp.personaUvs
+          ? (this.foreshorten = copyColumnWeights(foreshortenWeights(this.warpPositions, this.warp.personaUvs, this.baseTopology.triangles, this.topology.vertexCount, this.foreshorten ?? undefined)))
+          : undefined,
     });
     this.masksDirty = false;
 
@@ -1303,7 +1310,7 @@ export class RealtimeFacialEngine {
   private updateForehead(layout: SourceLayout, k: LandmarkKinematics, timestamp: number): { strength: number; featherPx: number } {
     const s = this.settings;
     const masksDrive = this.segActive && (s.segmentationStrength ?? 1) > 0.5;
-    const frontal = Math.abs(k.yaw) < HAIRLINE_FRONTAL_DEG && Math.abs(k.pitch) < HAIRLINE_FRONTAL_DEG;
+    const frontal = isHairlineFrontal(k.yaw, k.pitch);
     let sample: Array<number | null> | null = null;
     if (masksDrive && this.segUpdates !== this.hairlineSegSeen) {
       this.hairlineSegSeen = this.segUpdates;
@@ -1388,7 +1395,7 @@ export class RealtimeFacialEngine {
         // Hair right on the oval is a fringe: it is filled below and the column takes its neighbours' ratio.
         { startsInHair: 'ambiguous' }
       );
-      ratios = fillAmbiguousRatios(measured);
+      ratios = smoothHairlineRatios(fillAmbiguousRatios(measured));
       extendForehead(pts, ratios);
       forehead = foreheadPolygon(pts);
     }
@@ -1428,7 +1435,8 @@ export class RealtimeFacialEngine {
           mask[y * tw + x] = 1;
           filled++;
         }
-        if (hair && hairFill && mask[y * tw + x]) hairFill[y * tw + x] = 1;
+        // Only above the oval: inside it the texture stays exactly what R4 (personaInpaint) renders.
+        if (hair && hairFill && inForehead && mask[y * tw + x]) hairFill[y * tw + x] = 1;
       }
     }
     if (!filled) return { canvas: c, share: 0, ratios, measured };

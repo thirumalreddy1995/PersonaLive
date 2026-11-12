@@ -13,8 +13,15 @@ import {
   FOREHEAD_TOP,
   GLABELLA,
   HAIRLINE_COLUMNS,
+  HAIRLINE_DWELL_MS,
+  HAIRLINE_GLITCH_MS,
+  HAIRLINE_MAX_DIP,
+  HAIRLINE_MAX_END_DROP,
   HAIRLINE_SAMPLES,
   HairlineCalibrator,
+  copyColumnWeights,
+  isHairlineFrontal,
+  smoothHairlineRatios,
   MAX_HAIRLINE_RATIO,
   TEMPLE_ANCHOR_LEFT,
   TEMPLE_ANCHOR_RIGHT,
@@ -326,21 +333,33 @@ test('HairlineCalibrator calibrates once from a frontal hold and leaves the rati
   const sample = [1.3, 1.4, 1.45, 1.5, 1.5, 1.5, 1.45, 1.4, 1.3];
   const info = (t: number, frontal = true) => ({ frontal, t, spanOverFaceHeight: 0.3 });
   assert.equal(cal.ratios, null);
-  // The first second of a frontal hold is dwell: nothing is sampled.
+  // The start of a frontal hold is dwell: nothing is sampled.
   let t = 0;
-  for (; t < 1000; t += 33) assert.equal(cal.push(sample, info(t)), false);
+  for (; t < HAIRLINE_DWELL_MS; t += 33) assert.equal(cal.push(sample, info(t)), false);
   assert.equal(cal.sampleCount, 0);
   // Frames without a new mask do not count.
   cal.push(null, info(t));
   assert.equal(cal.sampleCount, 0);
-  // Turning away before the calibration completes restarts it.
-  for (let i = 0; i < 5; i++, t += 133) cal.push(sample, info(t));
+  for (let i = 0; i < 5; i++, t += 100) cal.push(sample, info(t));
   assert.equal(cal.sampleCount, 5);
+  // A brief excursion out of the frontal band (one or two frames) pauses the hold and keeps the samples...
   cal.push(sample, info(t, false));
+  cal.push(sample, info(t + 33, false));
+  assert.equal(cal.sampleCount, 5);
+  t += 66;
+  cal.push(sample, info(t));
+  assert.equal(cal.sampleCount, 6);
+  t += 100;
+  // ... and so does an occluded forehead (too few measured columns): not a sample, not a restart.
+  cal.push([null, null, null, null, null, 1.5, 1.45, null, null], info(t));
+  assert.equal(cal.sampleCount, 6);
+  t += 100;
+  // Really turning away before the calibration completes restarts it.
+  for (const start = t; t <= start + HAIRLINE_GLITCH_MS + 66; t += 33) cal.push(sample, info(t, false));
   assert.equal(cal.sampleCount, 0);
-  t += 33;
-  for (const start = t; t < start + 1000; t += 33) cal.push(sample, info(t));
-  // 20 mask samples, some with ambiguous or noisy columns.
+  for (const start = t; t < start + HAIRLINE_DWELL_MS; t += 33) cal.push(sample, info(t));
+  assert.equal(cal.sampleCount, 0);
+  // The mask samples, some with ambiguous or noisy columns.
   let changed = false;
   for (let i = 0; i < HAIRLINE_SAMPLES; i++, t += 133) {
     const s: Array<number | null> = [...sample];
@@ -446,22 +465,68 @@ test('extendTopology adds two rings above the upper oval and makes the forehead 
   }
 });
 
-test('a collapsed extension never fades the face interior through the foreshortening weights', () => {
-  const topo = extendTopology(buildFaceTopology(TESSELLATION, OVAL, 468));
-  const screen = face(0, 0, 0, 20);
+test('the extension never changes the foreshortening weights of the tracked mesh, collapsed, grown or folded', () => {
+  const base = buildFaceTopology(TESSELLATION, OVAL, 468);
+  const topo = extendTopology(base);
   const uv = face(0, 0, 0, 0.03, 0.5, 0.5);
   extendForehead(uv, RATIOS);
-  // Not calibrated yet: the extension sits on the oval.
-  extendForehead(screen, RATIOS, 0);
-  const collapsed = foreshortenWeights(screen, uv, topo.triangles, topo.vertexCount);
-  for (let v = 0; v < 468; v++) {
-    const touchesExtension = HAIRLINE_COLUMNS.includes(v) || v === TEMPLE_ANCHOR_LEFT || v === TEMPLE_ANCHOR_RIGHT;
-    if (!touchesExtension) assert.equal(collapsed[v], 1, `vertex ${v}`);
+  // The engine's computation: base triangles over the extended vertex count, rings copy their column.
+  const weights = (screen: Float32Array) => copyColumnWeights(foreshortenWeights(screen, uv, base.triangles, topo.vertexCount));
+  for (const [yaw, strength] of [[0, 0], [0, 0.5], [0, 1], [25, 0], [25, 1], [-40, 0], [-40, 1]]) {
+    const screen = face(yaw, 0, 0, 20);
+    extendForehead(screen, RATIOS, strength);
+    const w = weights(screen);
+    // What R4 renders: the base topology on its own.
+    const r4 = foreshortenWeights(screen, uv, base.triangles, 478);
+    for (let v = 0; v < 468; v++) assert.equal(w[v], r4[v], `yaw ${yaw} strength ${strength} vertex ${v}`);
+    for (let c = 0; c < EXT_COLUMNS; c++) {
+      assert.equal(w[EXT_MID_START + c], w[HAIRLINE_COLUMNS[c]]);
+      assert.equal(w[EXT_HAIR_START + c], w[HAIRLINE_COLUMNS[c]]);
+    }
   }
-  // Calibrated: everything is at rest size.
-  extendForehead(screen, RATIOS, 1);
-  const full = foreshortenWeights(screen, uv, topo.triangles, topo.vertexCount);
-  for (let v = 0; v < EXT_VERTEX_COUNT; v++) if (!(v >= 468 && v < 478)) assert.equal(full[v], 1, `vertex ${v}`);
+  // Frontal, not calibrated: nothing fades, the upper oval included (the regression: the collapsed
+  // extension triangles used to zero these vertices and fade the persona's forehead).
+  const frontal = face(0, 0, 0, 20);
+  extendForehead(frontal, RATIOS, 0);
+  const w = weights(frontal);
+  for (const v of [...HAIRLINE_COLUMNS, TEMPLE_ANCHOR_LEFT, TEMPLE_ANCHOR_RIGHT]) assert.equal(w[v], 1, `upper oval vertex ${v}`);
+  // The old computation over the extended triangle list is what faded them.
+  const old = foreshortenWeights(frontal, uv, topo.triangles, topo.vertexCount);
+  assert.equal(old[10], 0);
+  // A buffer for the base topology is left alone.
+  const short = new Float32Array(478).fill(0.5);
+  assert.equal(copyColumnWeights(short), short);
+});
+
+test('smoothHairlineRatios removes a single-column notch and never lowers the contour below its neighbours', () => {
+  // The wearer calibration measured on clip A (2026-11-12): column 5 dips between its neighbours.
+  const measured = [1.042, 1.395, 1.472, 1.601, 1.508, 1.326, 1.551, 1.439, 1.121];
+  const s = smoothHairlineRatios(measured);
+  assert.equal(s.length, measured.length);
+  for (let i = 1; i < s.length - 1; i++) {
+    assert.ok(s[i] >= (s[i - 1] + s[i + 1]) / 2 - HAIRLINE_MAX_DIP - 1e-9, `column ${i} dips: ${s.join(', ')}`);
+  }
+  assert.ok(s[5] > 1.45, `the notch column is raised: ${s[5]}`);
+  // Ends stay within the allowed drop of their neighbour, and everything inside the ratio limits.
+  assert.ok(s[0] >= s[1] - HAIRLINE_MAX_END_DROP - 1e-9 && s[8] >= s[7] - HAIRLINE_MAX_END_DROP - 1e-9);
+  for (const v of s) assert.ok(v >= 1 && v <= MAX_HAIRLINE_RATIO);
+  // A single spike is removed too, and a smooth arch is left as it is.
+  const spike = smoothHairlineRatios([1.3, 1.4, 1.45, 2.1, 1.5, 1.5, 1.45, 1.4, 1.3]);
+  assert.ok(spike[3] <= 1.5 + 1e-9);
+  const arch = [1.3, 1.4, 1.45, 1.5, 1.5, 1.5, 1.45, 1.4, 1.3];
+  assert.deepEqual(smoothHairlineRatios(arch), arch);
+  // A steep temple is pulled up to the allowed drop.
+  const steep = smoothHairlineRatios([1.0, 1.6, 1.6, 1.6, 1.6, 1.6, 1.6, 1.6, 1.0]);
+  assert.ok(Math.abs(steep[0] - 1.2) < 1e-9 && Math.abs(steep[8] - 1.2) < 1e-9);
+});
+
+test('isHairlineFrontal: a narrow yaw band and a pitch band that covers a laptop camera below the face', () => {
+  assert.equal(isHairlineFrontal(2, -8), true);
+  assert.equal(isHairlineFrontal(-9, -17), true);
+  assert.equal(isHairlineFrontal(0, 12), true);
+  assert.equal(isHairlineFrontal(11, 0), false);
+  assert.equal(isHairlineFrontal(0, -19), false);
+  assert.ok(HAIRLINE_SAMPLES <= 12 && HAIRLINE_DWELL_MS <= 500);
 });
 
 test('padPoints and foreheadPolygon', () => {

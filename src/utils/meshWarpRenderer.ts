@@ -59,7 +59,7 @@ export interface RelightOptions {
    * R4b §5: leave the wearer's hair out of the driver low pass (needs the segmentation masks of the
    * same frame); the masked blur then fills those pixels from the surrounding skin.
    */
-  excludeHair?: boolean;
+  excludeHair?: number | boolean;
 }
 
 /** Frames between driver mean-tone readbacks (a small synchronous readPixels of the 1/RELIGHT_SCALE-scale low pass). */
@@ -463,9 +463,9 @@ void main() {
   vec3 c = texture2D(uTexture, clamp(vTex, 0.0, 1.0)).rgb;
   // R4b §5: hair pixels of the driver frame stay out (coverage 0); the masked blur fills them from the skin around.
   float a = 1.0;
-  if (uSegOn > 0.5) {
+  if (uSegOn > 0.0) {
     vec2 mu = (vTex - uSegRect.xy) / uSegRect.zw;
-    if (mu.x >= 0.0 && mu.x <= 1.0 && mu.y >= 0.0 && mu.y <= 1.0) a = 1.0 - smoothstep(0.3, 0.7, texture2D(uSegMask, mu).r);
+    if (mu.x >= 0.0 && mu.x <= 1.0 && mu.y >= 0.0 && mu.y <= 1.0) a = 1.0 - uSegOn * smoothstep(0.3, 0.7, texture2D(uSegMask, mu).r);
   }
   gl_FragColor = vec4(pow(max(c, vec3(0.0)), vec3(2.2)) * a, a);
 }`;
@@ -1234,8 +1234,8 @@ export class MeshWarpRenderer {
     gl.uniform4f(rl.paint.uSrcMap, o.srcMap[0], o.srcMap[1], Math.max(1, o.srcMap[2]), Math.max(1, o.srcMap[3]));
     gl.uniform1f(rl.paint.uMirror, o.mirror ? 1 : 0);
     // R4b §5: the driver paint leaves hair out when this frame's masks are on unit 3 (see bindSegmentation).
-    const excludeHair = mode === 0 && !!o.excludeHair && this.segBound;
-    gl.uniform1f(rl.paint.uSegOn, excludeHair ? 1 : 0);
+    const excludeHair = mode === 0 && this.segBound ? Math.min(1, Math.max(0, Number(o.excludeHair ?? 0))) : 0;
+    gl.uniform1f(rl.paint.uSegOn, excludeHair);
     gl.uniform1i(rl.paint.uSegMask, 3);
     gl.uniform4f(rl.paint.uSegRect, this.segRect[0], this.segRect[1], Math.max(1e-4, this.segRect[2]), Math.max(1e-4, this.segRect[3]));
     gl.activeTexture(gl.TEXTURE0);
