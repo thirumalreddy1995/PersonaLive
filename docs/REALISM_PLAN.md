@@ -431,6 +431,7 @@ out      = detail * rebuild(shadeLum, tone)
 - Brows sit on the wearer's brow line.
 
 ### R4b status (2026-11-11): implemented behind a flag, not yet measured
+- Superseded for the measurement by the R4b report (2026-11-12) below; this block describes the implementation.
 - **Not measured, so nothing above is claimed as met and no default changed.** The checkout this session ran on has no driver clips (`realism-review/clips/`), no persona test set (`realism-review/personas/`), no `references/personas.json` or reference photo, no `realism-review/before/`, and no identity venv or models. `npm run build` also cannot run there: Windows Application Control blocks Tailwind's native binary (`@tailwindcss/oxide-win32-x64-msvc`, "An Application Control policy has blocked this file") and the package's WASM fallback never returns. The policy was left alone. `npm ci`, `npm test` (159 pass) and `npm run lint` pass.
 - Flag `foreheadExtension` (off; persona-reload; needs `segmentation` on and WebGL). Preset `r4` = the R4 defaults with this flag off. Settings: `hairlineFeather` (0.025 of face height), `foreheadStretchMin` / `foreheadStretchMax` (0.75 / 1.35), `foreheadRecalibrate` (a counter; the inspector's "Recalibrate forehead" button bumps it and is shown only while the flag is on).
 - What it does (`src/utils/foreheadExtension.ts`, pure, 16 unit tests):
@@ -450,6 +451,71 @@ out      = detail * rebuild(shadeLum, tone)
   - Hairline jitter: `stepPx` is the change between capture times. Frame-to-frame jitter needs the overlay and masks in the burst, which the burst does not carry.
   - `twoBandBlend` (off) fades the extension out, since its bands are 0 on the new rings. The Canvas 2D fallback keeps the base mesh.
 - To finish the phase on a machine with the review material: `npm run build:review`, then `realism:capture --clip all` with `--flags r4` and with `--flags r4,foreheadExtension=1` (same frozen build, same session), `realism:compare`, the 28-persona grid for both, the identity delta against `r4-final`, and contact sheets of A, B and E. The extension lands about 3 s into a clip (segmenter ready, 1 s frontal, 20 masks), so captures before that show the R4 forehead.
+
+### R4b report (2026-11-12): measured, default stays off
+Machine and material differ from R0–R4, so nothing here is a delta against a tracked run: clips A–E were recorded on this machine on 2026-11-12 (720p, 60 fps), the default persona is the synthetic face p12 (pending consent record, review build), the 28-persona set is a fresh `realism:personas` selection (the earlier `--replace` swaps are not reproducible here), and the GPU is an Intel UHD at 20–33 fps with other load. All comparisons are `--flags r4` (before) against `--flags r4,foreheadExtension=1` (after) from the frozen `dist-r4b` build, three runs each (`r4b-base`, `-base2`, `-base3`; `r4b-ext`, `-ext2`, `-ext3`), plus one grid each (`r4b-grid-base`, `r4b-grid-ext`).
+
+**Before → after per clip (three runs each, shown as run 1 / 2 / 3)**
+
+| Clip | Extension active | Hairline alignment over the burst (% face height) | Hairline jitter (px/frame) | Forehead tone step Δ vs driver (ΔE) | Texture slide (px/frame) |
+|---|---|---|---|---|---|
+| A | yes, all runs | 27.0 / 26.9 / 26.9 → 2.6 / 2.6 / 2.5 | 0.26 / 0.16 / 0.13 → 0.28 / 0.34 / 0.21 | −0.26 / −0.25 / −0.29 → −0.06 / 0.15 / 0.19 | 0.18 / 0.13 / 0.12 → 0.23 / 0.13 / 0.15 |
+| B | never | no upright burst frames | not measured | −0.44 / −0.20 / −0.30 → −0.23 / −0.33 / −0.40 | 2.09 / 1.37 / 0.89 → 1.36 / 1.37 / 1.58 |
+| C | yes, all runs | 26.5 / 26.6 / 26.1 → 2.4 / 4.3 / 3.1 | 2.41 / 2.87 / 2.87 → 1.36 / 4.13 / 2.14 | −0.18 / −0.37 / −0.15 → −0.67 / −0.38 / −0.19 | 2.71 / 2.45 / 3.21 → 2.46 / 2.56 / 2.06 |
+| D | yes, all runs | 29.7 / 29.7 / 29.2 → 1.8 / 1.6 / 1.8 | 0.46 / 0.23 / 0.35 → 0.23 / 0.17 / 0.39 | −0.30 / −0.38 / −0.28 → −1.15 / −1.05 / −1.16 | 0.30 / 0.24 / 0.33 → 0.32 / 0.28 / 0.36 |
+| E | never | extension inactive | extension inactive | 0.03 / −0.08 / −0.35 → −0.14 / −0.07 / −0.02 | 3.47 / 3.08 / 5.51 → 0.96 / 2.38 / 2.52 (driver's own 3.49 / 2.49 / 4.20 → 0.33 / 2.37 / 2.32) |
+
+Alignment over the eight capture times is higher than over the burst (A 6.0, C 13.0, D 2.2–4.6) because the first capture falls before the extension lands and C has the hand and hair over the forehead.
+
+**Acceptance**
+- Forehead tone step within ΔE 2 of the driver's own: met on every clip, with and without the flag (largest gap −1.16 on D). It does not separate the two configurations; on D the flag moves it from −0.3 to −1.1.
+- Hairline alignment < 2% with < 1 px jitter: met on D (1.6–1.8%, 0.17–0.39 px); A misses the alignment (2.5–2.6%) and meets the jitter; C misses both. Not measurable on B and E.
+- Texture slide ~0 on clip E: **not measured**. The extension never became active on E in any run, so E shows the R4 forehead in both configurations and its slide differences are run-to-run noise.
+- No band across the forehead, brows on the wearer's brow line: by eye on the A and D sheets, yes once the extension is in; not measured.
+
+**Identity guard (trend only; r4 → flag on, three runs each)**
+
+| Clip | Margin (persona − wearer) | Output ↔ persona |
+|---|---|---|
+| A | 0.14 / 0.11 / 0.14 → 0.12 / 0.20 / 0.21 | 0.55 / 0.53 / 0.55 → 0.51 / 0.55 / 0.56 |
+| B | −0.10 / −0.16 / −0.15 → −0.23 / −0.32 / −0.34 | 0.40 / 0.39 / 0.39 → 0.33 / 0.28 / 0.26 |
+| C | 0.05 / 0.01 / 0.06 → 0.08 / 0.13 / 0.13 | 0.50 / 0.47 / 0.50 → 0.49 / 0.53 / 0.53 |
+| D | 0.10 / 0.13 / −0.04 → 0.18 / 0.11 / 0.18 | 0.55 / 0.56 / 0.49 → 0.57 / 0.54 / 0.57 |
+| E | −0.28 / −0.03 / −0.24 → −0.02 / 0.04 / −0.12 | 0.27 / 0.45 / 0.28 → 0.46 / 0.50 / 0.39 |
+
+Where the extension is in (A, C, D) the margin is level or a little higher. On B it is lower in all three runs with no overlap. E spans 0.25 within one configuration, so it shows nothing. No delta against `r4-final` exists (different clips and persona).
+
+**Grid, 28 personas × 5 clips (one run each; means include B and E, where the extension is inactive)**
+
+| Metric | Median | Worst 10% |
+|---|---|---|
+| Hairline alignment (% face height) | 26.5 → 14.7 | 27.1 → 15.8 |
+| Hairline jitter (px/frame) | 1.64 → 1.40 | 2.19 → 2.17 |
+| Forehead tone step Δ (ΔE) | −0.16 → −0.57 | −0.06 → 0.05 |
+| Texture slide (px/frame) | 1.28 → 1.44 | 1.63 → 1.74 |
+| Identity margin deficit | 0.33 → 0.25 | 0.50 → 0.48 |
+| Output ↔ wearer cosine | 0.61 → 0.55 | 0.72 → 0.68 |
+| Sharpness gap, interior skin | 0.29 → 0.30 | 0.52 → 2.70 |
+
+"No persona may regress" is not met: `realism:compare` lists 60 persona-metric regressions. Its noise thresholds come from the earlier machine and are too tight for this one, but three are far outside any noise: interior sharpness gap p21 −0.27 → 8.90, p04 −0.10 → 2.46, p01d 1.15 → 2.39. Hairline jitter rises on p09 (1.80 → 3.56), p04, p19 and p23.
+
+**Contact sheets** (local, not tracked): `realism-review/out/r4b-sheets/A-base-vs-ext.png`, `B-base-vs-ext.png`, `B-base3-vs-ext3.png`, `E-base-vs-ext.png` (r4 left, flag on right); per-clip sheets under each run folder.
+
+**What still looks fake (ranked, by eye)**
+1. Flag on, extension not yet calibrated: the persona is visibly fainter and blurrier than with the flag off (all of clip B; the first capture of clip A). The camera-match blur bias runs higher (B mean 3.1–3.6 against 2.0–2.4). Cause not established.
+2. The persona is harder and darker than the soft webcam frame (deep eye sockets, strong beard edge) in both configurations.
+3. With the extension in, the hairline edge has an irregular notch on one side of the forehead (clip A from 12.9 s).
+4. Clip B at 20–36° yaw: eyes and nose smear in both configurations.
+5. Clip E: the hand on the head and a face close to the camera; the R4 forehead band stays because the extension never lands.
+
+**Findings and deviations**
+- Calibration is too strict for this setup: it needs about 3 s of unbroken frontal hold (1 s dwell plus 20 masks at ~10 masks/s) inside ±10° yaw and pitch. The resting pitch here reads −6° to −10°, clip B starts turning at once and on clip E a hand covers the hairline. It never completed on B or E in three runs. Likely causes, not confirmed by a trace.
+- The upright filter in the hairline metric rejected every frame (the app's roll is the eye-line angle, ±180° upright in a mirrored frame); fixed with `uprightFrontal` and a unit test.
+- Frame-to-frame jitter is now measured: burst frames carry the persona layer and masks (`summary.hairlineJitter`, grid and compare rows, unit test). The compare noise value for it (0.3 px) is a placeholder; A and D repeat within ~0.2 px, C within ~2.8 px.
+- `realism-review/before/` was skipped as agreed. The SFHQ-T2I files were fetched from the public Kaggle endpoint without a login.
+- Verification: `npm test` 161 pass, `npm run lint` clean, `npm run build` and `npm run build:review` complete.
+
+**Recommendation: keep `foreheadExtension` off.** Where it activates it does what it was built for (alignment from ~27% to 1.6–2.6% of face height on A and D, jitter under 0.4 px). Three things block a default-on: the persona is degraded whenever the flag is on and the calibration has not completed, the calibration does not complete on two of five clips, and the clip E criterion is unmeasured. Sharpness outliers on three grid personas need an explanation too. Proposed before a re-measure: find and fix the pre-calibration softening, relax the calibration (wider pitch band or a pitch offset learned at rest, fewer samples, tolerate brief breaks), re-record clip E without the hand on the hairline.
 
 ---
 
