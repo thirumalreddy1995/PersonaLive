@@ -3,7 +3,10 @@ import assert from 'node:assert/strict';
 import {
   AUTO_RADIUS_MAX,
   AUTO_RADIUS_MIN,
+  AUTO_RADIUS_STEP_DOWN,
   AUTO_RADIUS_STEP_UP,
+  ILLUM_RADIUS_MAX,
+  ILLUM_RADIUS_MIN,
   initialAutoRadius,
   measureShading,
   patchMeanLab,
@@ -91,4 +94,21 @@ test('patchMeanLab and measureShading read cheek and neck patches and skip trans
   const clear = new Uint8Array(size * size * 4);
   const through = measureShading(clear, mapping, patches, { data, mapping })!;
   assert.ok(Math.abs(through.side - m.side) < 1e-6 && Math.abs(through.neck! - m.neck!) < 1e-6);
+});
+
+test('the illumination radius loop: starts at the top, steps down in proportion to a large excess, stays in its bounds', () => {
+  let s = initialAutoRadius(ILLUM_RADIUS_MAX);
+  const far = { sideOut: 0, sideDrv: 0, neckOut: 16, neckDrv: 27 };
+  const opts = { min: ILLUM_RADIUS_MIN, max: ILLUM_RADIUS_MAX, proportional: true };
+  s = stepAutoRadius(s, far, opts);
+  // An 11 ΔE excess steps down 4.4× the base step (capped at 5×), not 1×.
+  assert.ok(Math.abs(s.radius - (ILLUM_RADIUS_MAX - AUTO_RADIUS_STEP_DOWN * 4.4)) < 1e-9, `radius ${s.radius}`);
+  for (let i = 0; i < 40; i++) s = stepAutoRadius(s, far, opts);
+  assert.equal(s.radius, ILLUM_RADIUS_MIN, 'never below the minimum');
+  const ok = { sideOut: 1, sideDrv: 1, neckOut: 27, neckDrv: 27 };
+  for (let i = 0; i < 200; i++) s = stepAutoRadius(s, ok, opts);
+  assert.equal(s.radius, ILLUM_RADIUS_MAX, 'back to the top once in line, never above it');
+  // Without the options the R3c loop is unchanged: a 1× step down within its own bounds.
+  const r3c = stepAutoRadius(initialAutoRadius(0.05), far);
+  assert.ok(Math.abs(r3c.radius - (0.05 - AUTO_RADIUS_STEP_DOWN)) < 1e-9);
 });

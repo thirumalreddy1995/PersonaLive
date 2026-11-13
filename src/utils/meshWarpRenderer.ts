@@ -19,6 +19,7 @@
 import { closedLipMaskForZone, featherBandWeights, skinPaintWeights, toneWeights, type FaceTopology } from './faceMesh.ts';
 import type { PackedMasks } from './segmentation.ts';
 import { KeyframeTextureCache } from './keyframeBlend.ts';
+import { toneBudgetFloor, toneClampFor } from './photoLighting.ts';
 
 export interface CameraMatchOptions {
   /** Mip level-of-detail bias (≥ 0 blurs the persona by sampling coarser mip levels). */
@@ -64,6 +65,12 @@ export interface RelightOptions {
   specular?: boolean;
   /** R6b: 0..1 share of the unblurred persona taken on dark, non-red pixels (beard and hair strands). */
   hairDetail?: number;
+  /**
+   * R6b tone budget (needs illumination): the largest CIEDE2000 difference between the face's mean
+   * skin and the wearer's. Where the persona's own tone is further away, the brightness and hue
+   * matches rise just enough (toneBudgetFloor). 0 or omitted = off.
+   */
+  toneBudget?: number;
 }
 
 /** Frames between driver mean-tone readbacks (a small synchronous readPixels of the 1/RELIGHT_SCALE-scale low pass). */
@@ -164,6 +171,12 @@ export interface WarpFrameOptions {
   skinTint?: number;
   /** R6b (flag jawExtension): a wider face-skin ramp in the outer band, so the jaw push fades instead of being cut. */
   softFaceEdge?: boolean;
+  /**
+   * R6b (flag jawExtension): in the lower face, the persona also leaves wherever the masks call a
+   * pixel body skin at least as likely as face skin (a hand under the chin is often labelled half
+   * face skin, which the everywhere-rule for confident hands does not catch).
+   */
+  handGuard?: boolean;
 }
 
 /** Face-region pixel statistics from an asynchronous readback. */
@@ -267,6 +280,9 @@ uniform vec3 uMeanD;
 uniform float uSpecular;
 uniform float uHairDetail;
 uniform float uSoftFaceEdge;
+uniform float uToneFloor;
+uniform float uToneClamp;
+uniform float uHandGuard;
 uniform vec2 uMotionBlur;
 uniform float uSoftHolesPx;
 uniform sampler2D uSegMask;
@@ -323,6 +339,19 @@ vec4 personaTex(vec2 off, vec2 off2) {
   vec4 a = texture2D(uTexture, vUv + off, uLodBias);
   if (uKeyMix <= 0.0) return a;
   return mix(a, texture2D(uTexture2, vUv2 + off2, uLodBias), uKeyMix);
+}
+
+// R4 §1–2: how much of the persona a set of mask weights (R hair, G body skin, B face skin, A
+// accessories) keeps. Face-skin limits the persona only in the outer band (the interior is face by
+// construction); confident hair, hand (body skin) and accessory pixels remove it everywhere.
+// R6b (jaw extension): a wider face-skin ramp, so the pushed beard fades where the wearer's face-skin
+// mask ends instead of being cut. R6b hand guard: in the lower face, body skin at least as likely as
+// face skin is a hand (knuckles under the chin, which the segmenter labels about half face, half
+// body skin: equal weights must count).
+float segKeepAt(vec4 m) {
+  float faceSkin = mix(1.0, smoothstep(mix(0.05, 0.0, uSoftFaceEdge), mix(0.3, 0.65, uSoftFaceEdge), m.b), 1.0 - clamp(vFeatherBands.x, 0.0, 1.0));
+  float keep = faceSkin * (1.0 - smoothstep(0.5, 0.85, m.r)) * (1.0 - smoothstep(0.45, 0.8, m.g)) * (1.0 - smoothstep(0.45, 0.8, m.a));
+  return keep * (1.0 - uHandGuard * smoothstep(0.5, 0.65, vNormPos.y) * smoothstep(-0.12, 0.0, m.g - m.b) * smoothstep(0.3, 0.45, m.g));
 }
 
 // R6b: the persona colour without the camera-match blur (for hair detail).
@@ -406,12 +435,27 @@ void main() {
       // the skin tone match. The hue part is for skin only: beard, hair and brows take only the
       // brightness (a neutral beard turns olive otherwise), and the lips keep their own colour.
       float tw = clamp(vToneWeight, 0.0, 1.0);
-      float eC = clamp(uToneMatch * mix(0.35, 1.0, tw), 0.0, 1.0);
-      float eL = mix(ILLUM_LUMA_CENTRE, ILLUM_LUMA_BOUNDARY, tw);
+      // The tone budget (uToneFloor) raises both only as far as the face's mean skin needs to stay
+      // within the budget of the wearer's (a far darker or lighter persona, or a colour cast).
+      float eC = max(clamp(uToneMatch * mix(0.35, 1.0, tw), 0.0, 1.0), uToneFloor);
+      float eL = max(mix(ILLUM_LUMA_CENTRE, ILLUM_LUMA_BOUNDARY, tw), uToneFloor);
       float lr = clamp(luma(uMeanD) / max(luma(uMeanP), 0.002), 0.25, 4.0);
       vec3 cr = clamp((uMeanD / max(luma(uMeanD), 0.002)) / max(uMeanP / max(luma(uMeanP), 0.002), vec3(0.002)), vec3(0.25), vec3(4.0));
       float skinP = smoothstep(0.16, 0.28, (P.r - P.b) / max(P.r + P.g + P.b, 1e-4)) * smoothstep(0.003, 0.015, luma(P)) * (1.0 - clamp(vLip, 0.0, 1.0));
       vec3 g = pow(lr, eL) * mix(vec3(1.0), pow(cr, vec3(eC)), skinP);
+      if (uToneClamp > 0.0) {
+        // Local tone budget: the persona's large-scale skin colour here may differ from the wearer's
+        // at the same place by at most ±uToneClamp (log, per channel). Everything finer than the low
+        // pass (form, wrinkles, beard, brows, lips, freckles) rides on top unchanged. Only where both
+        // low passes saw skin (elsewhere they fall back to the means).
+        vec3 lo = PL * ratio * g;
+        vec3 dlo = max(DL, vec3(0.002));
+        vec3 lim = clamp(lo, dlo * exp(-uToneClamp), dlo * exp(uToneClamp));
+        // Skin-like, non-lip pixels only (skinP): on lips, beard and dark detail the per-channel ratio
+        // of two skin estimates would recolour them (a lip turned purple). Bounded to 0.5..2.
+        float trust = smoothstep(0.05, 0.3, dl.a) * smoothstep(0.05, 0.3, pl.a) * skinP;
+        g *= mix(vec3(1.0), clamp(lim / max(lo, vec3(1e-4)), vec3(0.5), vec3(2.0)), trust);
+      }
       base = linearToSrgb(clamp(P * ratio * g, 0.0, 1.0));
       lowCol = linearToSrgb(clamp(PL * ratio * g, 0.0, 1.0));
       hasLow = 1.0;
@@ -481,11 +525,19 @@ void main() {
     vec2 mu = (su - uSegRect.xy) / uSegRect.zw;
     float inCrop = step(0.0, mu.x) * step(mu.x, 1.0) * step(0.0, mu.y) * step(mu.y, 1.0);
     vec4 m = texture2D(uSegMask, clamp(mu, 0.0, 1.0)) * inCrop + vec4(0.0, 0.0, 1.0, 0.0) * (1.0 - inCrop);
-    // Face-skin limits the persona only in the outer band (the interior is face by construction);
-    // confident hair, hand (body skin) and accessory pixels remove it everywhere.
-    // R6b (jaw extension): a wider ramp, so the pushed beard fades where the wearer's face-skin mask ends instead of being cut.
-    float faceSkin = mix(1.0, smoothstep(mix(0.05, 0.0, uSoftFaceEdge), mix(0.3, 0.65, uSoftFaceEdge), m.b), 1.0 - clamp(vFeatherBands.x, 0.0, 1.0));
-    float keep = faceSkin * (1.0 - smoothstep(0.5, 0.85, m.r)) * (1.0 - smoothstep(0.45, 0.8, m.g)) * (1.0 - smoothstep(0.45, 0.8, m.a));
+    float keep = segKeepAt(m);
+    if (uSoftFaceEdge > 0.5 && inCrop > 0.5) {
+      // R6b (jaw extension): a persona beard can reach the masks' jaw/neck and hand edges, which are as
+      // sharp as the segmenter makes them. The keep decision (not the masks: a hand must stay a hand)
+      // is averaged over a 5-tap cross (~2% of the crop), which turns those cuts into short ramps.
+      vec2 o = vec2(0.012, 0.0);
+      float acc = keep * 2.0;
+      acc += segKeepAt(texture2D(uSegMask, clamp(mu + o.xy, 0.0, 1.0)));
+      acc += segKeepAt(texture2D(uSegMask, clamp(mu - o.xy, 0.0, 1.0)));
+      acc += segKeepAt(texture2D(uSegMask, clamp(mu + o.yx, 0.0, 1.0)));
+      acc += segKeepAt(texture2D(uSegMask, clamp(mu - o.yx, 0.0, 1.0)));
+      keep = acc / 6.0;
+    }
     segKeep = mix(1.0, keep, uSegStrength);
     cranialFalloff = mix(cranialFalloff, 1.0, uSegStrength);
   }
@@ -780,6 +832,9 @@ interface GLResources {
     uSpecular: WebGLUniformLocation | null;
     uHairDetail: WebGLUniformLocation | null;
     uSoftFaceEdge: WebGLUniformLocation | null;
+    uToneFloor: WebGLUniformLocation | null;
+    uToneClamp: WebGLUniformLocation | null;
+    uHandGuard: WebGLUniformLocation | null;
     uMotionBlur: WebGLUniformLocation | null;
     uSoftHolesPx: WebGLUniformLocation | null;
     uSegMask: WebGLUniformLocation | null;
@@ -1328,6 +1383,9 @@ export class MeshWarpRenderer {
         uSpecular: u('uSpecular'),
         uHairDetail: u('uHairDetail'),
         uSoftFaceEdge: u('uSoftFaceEdge'),
+        uToneFloor: u('uToneFloor'),
+        uToneClamp: u('uToneClamp'),
+        uHandGuard: u('uHandGuard'),
         uMotionBlur: u('uMotionBlur'),
         uSoftHolesPx: u('uSoftHolesPx'),
         uSegMask: u('uSegMask'),
@@ -1477,13 +1535,18 @@ export class MeshWarpRenderer {
         const stale = !e.low || e.low.width !== w || e.low.height !== h || e.lowShare !== share || e.lowUv !== spec.uv || e.lowIllum !== illum;
         e.low = this.ensureTarget(gl, e.low, w, h);
         if (stale) {
+          // The mean skin colour barely depends on the radius: a radius step (R6b loop) keeps it, so
+          // only a new photo, new UVs or a mode change pay for the synchronous readback.
+          const keepMean = e.lowUv === spec.uv && e.lowIllum === illum && e.low.width === w && e.low.height === h;
           this.paintMesh(gl, r, rl, e.low, 1, o, e.tex, uvBuffer);
           this.blurTarget(gl, rl, e.low, lowPassSigma(uvWidth(spec.uv) * e.size.width, share));
           e.lowShare = share;
           e.lowUv = spec.uv;
           e.lowIllum = illum;
-          e.mean = null;
-          e.meanColour = null;
+          if (!keepMean) {
+            e.mean = null;
+            e.meanColour = null;
+          }
         }
         if (illum && !e.meanColour && e.low) e.meanColour = this.readMeanColour(gl, e.low);
         return e;
@@ -1497,12 +1560,14 @@ export class MeshWarpRenderer {
       }
     }
     if (personaStale && rl.persona) {
+      // A radius step alone (R6b loop) keeps the mean skin colour: no synchronous readback for it.
+      const keepMean = illum && !!rl.personaMeanColour && !this.personaLowDirty && this.personaLowIllum === illum;
       this.paintMesh(gl, r, rl, rl.persona, 1, o);
       this.blurTarget(gl, rl, rl.persona, lowPassSigma(this.personaUvWidth * this.personaSize.width, share));
       this.personaLowDirty = false;
       this.personaLowShare = share;
       this.personaLowIllum = illum;
-      rl.personaMeanColour = illum ? this.readMeanColour(gl, rl.persona) : null;
+      if (!keepMean) rl.personaMeanColour = illum ? this.readMeanColour(gl, rl.persona) : null;
       // The mean chroma barely depends on the sigma: read it once per persona, not on every radius change.
       if (!o.globalTone) rl.personaMean = null;
       else if (!rl.personaMean) rl.personaMean = this.readMean(gl, rl.persona);
@@ -1542,6 +1607,20 @@ export class MeshWarpRenderer {
     return meanColour(target.pixels, target.width, target.height);
   }
 
+  private _toneFloor = 0;
+
+  /** R6b: the tone budget's exponent floor of the last frame (0 = off or the persona's tone was within the budget). */
+  get toneFloor(): number {
+    return this._toneFloor;
+  }
+
+  /** R6b: the tone budget's exponent floor for these mean skin colours (0 = off or within the budget). */
+  private toneFloorFor(o: RelightOptions | undefined, meanP: readonly number[], meanD: readonly number[]): number {
+    const budget = o?.toneBudget ?? 0;
+    if (!o?.illumination || !(budget > 0)) return 0;
+    return toneBudgetFloor(meanP, meanD, budget, ILLUM_LUMA_CENTRE, 0.35 * Math.min(1, Math.max(0, o.toneMatch)));
+  }
+
   /** R6b: compiles the neck/ear tint program; null (tint off) if this GPU rejects it. */
   private compileTint(gl: WebGLRenderingContext | WebGL2RenderingContext): RelightResources['tint'] {
     try {
@@ -1578,7 +1657,11 @@ export class MeshWarpRenderer {
     const strength = Math.min(SKIN_TINT_MAX, Math.max(0, opts.skinTint ?? 0));
     if (!rl || !t || !o || strength <= 0 || !this.segBound || !personaMean || !rl.driverMeanColour) return;
     // At full region weight the blend (1 − a)·camera + a·camera·g' must equal camera·gain, so g' = 1 + (gain − 1) / a.
-    const gain = skinTintGain(personaMean, rl.driverMeanColour, o.toneMatch).map((g) => Math.min(3, Math.max(0.2, 1 + (g - 1) / strength)));
+    // The shared tone follows the face's: the tone budget's floor raises both matches there too.
+    const floor = this.toneFloorFor(o, personaMean, rl.driverMeanColour);
+    const gain = skinTintGain(personaMean, rl.driverMeanColour, Math.max(o.toneMatch, floor), Math.max(ILLUM_LUMA_BOUNDARY, floor)).map((g) =>
+      Math.min(3, Math.max(0.2, 1 + (g - 1) / strength))
+    );
     const fb = opts.faceBounds ?? [0, 0, this._canvas.width, this._canvas.height];
     gl.useProgram(t.program);
     gl.bindBuffer(gl.ARRAY_BUFFER, rl.quad);
@@ -2248,6 +2331,11 @@ export class MeshWarpRenderer {
     gl.uniform1f(loc.uSpecular, illum && opts.relight?.specular ? 1 : 0);
     gl.uniform1f(loc.uHairDetail, illum ? Math.min(1, Math.max(0, opts.relight?.hairDetail ?? 0)) : 0);
     gl.uniform1f(loc.uSoftFaceEdge, opts.softFaceEdge ? 1 : 0);
+    gl.uniform1f(loc.uHandGuard, opts.handGuard ? 1 : 0);
+    // R6b tone budget: the exponent floor that keeps the face's mean skin within the budget of the wearer's.
+    this._toneFloor = illum && meanP && meanD ? this.toneFloorFor(opts.relight, meanP, meanD) : 0;
+    gl.uniform1f(loc.uToneFloor, this._toneFloor);
+    gl.uniform1f(loc.uToneClamp, illum ? toneClampFor(opts.relight?.toneBudget ?? 0) : 0);
     const mpc = (illum && meanP) || [1, 1, 1];
     const mdc = (illum && meanD) || [1, 1, 1];
     gl.uniform3f(loc.uMeanP, mpc[0], mpc[1], mpc[2]);

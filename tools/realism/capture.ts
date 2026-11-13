@@ -307,6 +307,10 @@ export interface ClipSummary {
   identity: IdentitySummary | null;
   /** Max/min of the persona de-light field (flag personaDelight). */
   personaDelightRange: number | null;
+  /** R6b (flag photoLighting): the persona photo's lighting measured at load. */
+  photoLighting: RealismDebugState['photoLighting'];
+  /** R6b: the tone budget's exponent floor at the end of the clip (0 = within the budget). */
+  toneFloor: number | null;
   /** R3c auto-radius loop: the radius it settled at (end of clip), its smoothed excesses and the per-clip trace. */
   autoRadius: { radius: number; sideExcess: number | null; neckExcess: number | null; updates: number; trace: (M.TraceStats & { series: number[] }) | null } | null;
   /** The relight radius in use at the end of the clip (loop or setting). */
@@ -501,7 +505,7 @@ async function captureClip(page: Page, args: Args, o: CaptureOptions): Promise<C
       if (c.masksPng) writeDataUrlPng(path.join(o.clipDir, `${tag}-masks.png`), c.masksPng);
       fs.writeFileSync(
         path.join(o.clipDir, `${tag}-landmarks.json`),
-        JSON.stringify({ t: c.t, driver: c.landmarks, warp: c.warpPositions, output: c.outputLandmarks })
+        JSON.stringify({ t: c.t, driver: c.landmarks, warp: c.warpPositions, output: c.outputLandmarks, matrixPose: c.matrixPose ?? null, lidClosure: c.lidClosure ?? null, headDown: c.headDown ?? null })
       );
       files = { output: path.relative(ROOT, f.output), driver: path.relative(ROOT, f.driver), overlay: f.overlay ? path.relative(ROOT, f.overlay) : null };
     }
@@ -685,6 +689,8 @@ async function captureClip(page: Page, args: Args, o: CaptureOptions): Promise<C
     restMar: finalState.restMar ?? null,
     identity,
     personaDelightRange: finalState.personaDelightRange ?? null,
+    photoLighting: finalState.photoLighting ?? null,
+    toneFloor: finalState.toneFloor ?? null,
     autoRadius: finalState.autoRadius
       ? (() => {
           const wholeR = finalState.autoRadiusTrace ?? [];
@@ -733,6 +739,11 @@ function printSummary(label: string, s: ClipSummary) {
     );
   }
   if (s.personaDelightRange !== null) console.log(`    de-light field range ${fmt(s.personaDelightRange)}`);
+  if (s.photoLighting) {
+    const l = s.photoLighting;
+    console.log(`    photo lighting:    asymmetry ${fmt(l.asymmetry)} (L ${fmt(l.asymmetryL)}, ab ${fmt(l.asymmetryAb)})  strength ${fmt(l.strength)}  hue ${fmt(l.hue)} chroma ${fmt(l.chroma)} cast ${fmt(l.cast)}`);
+  }
+  if (s.toneFloor !== null && s.toneFloor !== undefined) console.log(`    tone budget floor: ${fmt(s.toneFloor)}`);
   if (s.ghostHairShare !== null || s.segmentationUpdates) console.log(`    occlusion (masks): ghost hair ${fmt(s.ghostHairShare)}  hand leak ${fmt(s.handLeakShare)}  glasses leak ${fmt(s.glassesLeakShare)}  segmenter updates ${s.segmentationUpdates ?? '-'}${s.personaInpaintShare !== null ? `  persona inpainted ${(s.personaInpaintShare * 100).toFixed(1)}%` : ''}`);
   if (s.autoRadius) console.log(`    auto radius:       ${(s.autoRadius.radius * 100).toFixed(1)}%  side excess ${fmt(s.autoRadius.sideExcess)} L  neck excess ${fmt(s.autoRadius.neckExcess)} ΔE  updates ${s.autoRadius.updates}${s.autoRadius.trace ? `  trace ${(s.autoRadius.trace.min * 100).toFixed(1)}..${(s.autoRadius.trace.max * 100).toFixed(1)}%` : ''}${s.symmetricDelight ? '  symmetric de-light on' : ''}`);
   const t = s.targets;

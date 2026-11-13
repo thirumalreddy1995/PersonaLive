@@ -15,7 +15,8 @@ import { OneEuroFilter } from './faceMath.ts';
 import { RigidPoseStabilizer, StabilizerOptions, poseAngles } from './rigidPose.ts';
 import { cropUvs, planCrop } from './personaCrop.ts';
 import { delightPersona } from './personaDelight.ts';
-import { AUTO_RADIUS_EVERY, AutoRadiusState, initialAutoRadius, measureShading, shadingPatches, stepAutoRadius } from './autoRadius.ts';
+import { TONE_BUDGET_DEFAULT, normalizePhotoLighting, type LightingAssessment } from './photoLighting.ts';
+import { AUTO_RADIUS_EVERY, AutoRadiusState, ILLUM_CHEEKS, ILLUM_RADIUS_MAX, ILLUM_RADIUS_MIN, initialAutoRadius, measureShading, shadingPatches, stepAutoRadius } from './autoRadius.ts';
 import { lumaAtScale, symmetricDelightGains, vertexBandLuma } from './faceSymmetry.ts';
 import { FaceSegmenter } from './segmenter.ts';
 import { NormRect, PackedMasks, emptyMasks, faceCropRect, insidePolygon, sampleMask, stableCrop } from './segmentation.ts';
@@ -55,6 +56,7 @@ import {
   LidClosure,
   NeutralShapeCalibrator,
   PROPORTION_MAX_SHIFT,
+  PitchBaseline,
   STABLE_POINTS,
   applyJawExtension,
   applyProportions,
@@ -62,6 +64,7 @@ import {
   fitAffine,
   hasBeard,
   jawPlan,
+  jawPoseScale,
   jawSideScale,
   silhouetteWeights,
   smoothstep,
@@ -225,6 +228,9 @@ export class RealtimeFacialEngine {
   /** Beard depth below each lower-jaw point of the persona photo (IOD units); null = no beard or flag off. */
   private jawDepths: Float32Array | null = null;
   private lidClosure = new LidClosure();
+  /** R6b: the wearer's level head pitch, for the chin-down lid cue. */
+  private pitchBaseline = new PitchBaseline();
+  private lastHeadDown: number | null = null;
   private lidBands: { topology: FaceTopology; radius: number; base: Float32Array; bands: { left: Float32Array; right: Float32Array }; weights: Float32Array } | null = null;
   private lidLast: [number, number] = [-1, -1];
   /** frameIndex when the debug counters were last reset, so framesRendered is per replay. */
@@ -303,8 +309,13 @@ export class RealtimeFacialEngine {
   private cameraMatchChangeFrame = 0;
   /** Max/min of the de-light shading field fitted on the current persona (flag personaDelight). */
   private personaDelightRange: number | null = null;
+  /** R6b (flag photoLighting): the persona photo's lighting measured at load. */
+  private personaLighting: LightingAssessment | null = null;
   /** R3c auto-radius loop state (flag autoRadius) and its per-update trace. */
   private autoRadius: AutoRadiusState = initialAutoRadius();
+  /** R6b (flag photoLighting): the illumination relight's per-persona radius loop (same readbacks). */
+  private illumRadius: AutoRadiusState = initialAutoRadius(ILLUM_RADIUS_MAX);
+  private illumLoopActive = false;
   private autoRadiusPending = false;
   private autoRadiusTrace: number[] = [];
   /** Last loop measurement, for the review tool's cross-check against the offline metric. */
@@ -413,7 +424,9 @@ export class RealtimeFacialEngine {
           changed.includes('matrixHeadPose') ||
           // R6b: the beard depth, the jaw UVs and the seam weights are measured with the persona.
           changed.includes('jawExtension') ||
-          changed.includes('seamFade')) &&
+          changed.includes('seamFade') ||
+          // R6b: the photo's lighting is measured and normalised with the persona.
+          changed.includes('photoLighting')) &&
         this.personaImage
       )
         void this.preparePersona();
@@ -484,6 +497,7 @@ export class RealtimeFacialEngine {
     this.neutralShape.reset();
     this.proportionRamp = 0;
     this.lidClosure.reset();
+    this.pitchBaseline.reset();
     // R3b: a new source gets a neutral camera match that re-measures on the first frames.
     this.cameraMatch = initialCameraMatch();
     this.cameraMatchPending = false;
@@ -676,6 +690,7 @@ export class RealtimeFacialEngine {
       let texture: HTMLImageElement | HTMLCanvasElement = prepared.texture;
       let uv = prepared.uv;
       this.personaDelightRange = prepared.delightRange;
+      this.personaLighting = prepared.lighting;
       // R4 (flag personaInpaint): segment the photo and inpaint hair and glasses inside the face oval.
       this.personaInpaintShare = null;
       const warnings: string[] = [];
@@ -762,6 +777,7 @@ export class RealtimeFacialEngine {
       this.cameraMatchWarm = CAMERA_MATCH_WARM_UPDATES;
       this.cameraMatchChangeFrame = this.frameIndex;
       this.autoRadius = initialAutoRadius();
+      this.illumRadius = initialAutoRadius(ILLUM_RADIUS_MAX);
       this.autoRadiusPending = false;
       this.autoRadiusTrace = [];
       this.personaMean = this.sampleMeanColor(img, face.landmarks, img.naturalWidth, img.naturalHeight, false);
@@ -851,10 +867,14 @@ export class RealtimeFacialEngine {
    * out (R3b, flag personaDelight). Used for the persona photo and for every R5 keyframe, so they
    * all go through the same preparation.
    */
-  private photoTexture(img: HTMLImageElement, landmarks: Float32Array): { texture: HTMLImageElement | HTMLCanvasElement; uv: Float32Array; delightRange: number | null } {
+  private photoTexture(
+    img: HTMLImageElement,
+    landmarks: Float32Array
+  ): { texture: HTMLImageElement | HTMLCanvasElement; uv: Float32Array; delightRange: number | null; lighting: LightingAssessment | null } {
     let texture: HTMLImageElement | HTMLCanvasElement = img;
     let uv = landmarks;
     let delightRange: number | null = null;
+    let lighting: LightingAssessment | null = null;
     if (realismFlags.get().personaCrop) {
       const plan = planCrop(landmarks, img.naturalWidth, img.naturalHeight, this.settings.personaTextureSize);
       const crop = document.createElement('canvas');
@@ -867,7 +887,26 @@ export class RealtimeFacialEngine {
       texture = crop;
       uv = cropUvs(landmarks, img.naturalWidth, img.naturalHeight, plan);
     }
-    if (realismFlags.get().personaDelight) {
+    if (realismFlags.get().photoLighting) {
+      // R6b: the photo's side light and coloured fill are measured and divided out with a per-photo
+      // strength (an evenly lit photo is left as it is); replaces the R3b de-light below.
+      const lit = document.createElement('canvas');
+      lit.width = texture instanceof HTMLImageElement ? texture.naturalWidth : texture.width;
+      lit.height = texture instanceof HTMLImageElement ? texture.naturalHeight : texture.height;
+      const lctx = lit.getContext('2d', { willReadFrequently: true })!;
+      lctx.drawImage(texture, 0, 0, lit.width, lit.height);
+      const pixels = lctx.getImageData(0, 0, lit.width, lit.height);
+      const pts = new Float32Array(468 * 2);
+      for (let i = 0; i < 468; i++) {
+        pts[i * 2] = uv[i * 2] * lit.width;
+        pts[i * 2 + 1] = uv[i * 2 + 1] * lit.height;
+      }
+      lighting = normalizePhotoLighting(pixels.data, lit.width, lit.height, pts);
+      if (lighting && lighting.strength >= 0.01) {
+        lctx.putImageData(pixels, 0, 0);
+        texture = lit;
+      }
+    } else if (realismFlags.get().personaDelight) {
       const lit = document.createElement('canvas');
       lit.width = texture instanceof HTMLImageElement ? texture.naturalWidth : texture.width;
       lit.height = texture instanceof HTMLImageElement ? texture.naturalHeight : texture.height;
@@ -886,7 +925,7 @@ export class RealtimeFacialEngine {
         delightRange = res.range;
       }
     }
-    return { texture, uv, delightRange };
+    return { texture, uv, delightRange, lighting };
   }
 
   /**
@@ -1593,20 +1632,29 @@ export class RealtimeFacialEngine {
       this.applyPersonaProportions(k, lipFade, smile, pitchDeg);
     }
     if (flags.jawExtension && this.jawDepths) {
-      applyJawExtension(this.warpPositions, this.jawPlanFor(), this.jawDepths);
-      // The jaw's narrow feather and face-skin band follow the turn in 0.1 steps (a re-upload of two small buffers).
+      // Tilts (roll, strong pitch) fade the push like turns: there the masks' jaw/neck line is irregular and cut it hard.
+      const rollDeg = flags.matrixHeadPose && this.matrixPose ? this.matrixPose.roll : k.roll;
+      const tilt = jawPoseScale(rollDeg, pitchDeg);
+      applyJawExtension(this.warpPositions, this.jawPlanFor(), this.jawDepths, undefined, tilt);
+      // The jaw's narrow feather and face-skin band follow the turn and tilt in 0.1 steps (a re-upload of two small buffers).
       const [sr, sl] = jawSideScale(this.smoothed);
-      const turn = Math.round(Math.min(sr, sl) * 10) / 10;
+      const turn = Math.round(Math.min(sr, sl) * tilt * 10) / 10;
       if (turn !== this.jawTurnApplied) this.applyBoundaryFeather(turn);
     }
 
     const bounds = pointBounds(this.warpPositions.subarray(0, 468 * 2));
     const strength = clamp(s.blendStrength / 100, 0, 1);
-    const drawPersonaEyes = !s.eyeGazeSync || (k.earLeft < 0.18 && k.earRight < 0.18);
+    // R6b (flag lidPassThrough): the real eyes stay through blinks and look-downs, with the lid band
+    // widened over the closing lid; otherwise nearly closed eyes switch to the persona's (R1 §6),
+    // whose open-eye lid and crease then showed as pale arcs.
+    const drawPersonaEyes = !s.eyeGazeSync || (!flags.lidPassThrough && k.earLeft < 0.18 && k.earRight < 0.18);
     // Eye pass-through ring: only while the wearer's real eyes are showing (R1 §6).
     const eyeFade = flags.eyePassThrough && !drawPersonaEyes ? 1 : 0;
-    // R6b: the ring widens over the upper lid as the lid lowers.
-    this.updateLidPassThrough(flags.lidPassThrough && eyeFade > 0, k, bs, smoothstep(8, 22, pitchDeg));
+    // R6b: the ring widens over the upper lid as the lid lowers, and with the chin down from the wearer's own level pose.
+    const yawDeg = flags.matrixHeadPose && this.matrixPose ? this.matrixPose.yaw : k.yaw;
+    this.pitchBaseline.update(pitchDeg, yawDeg);
+    this.lastHeadDown = this.pitchBaseline.headDown(pitchDeg);
+    this.updateLidPassThrough(flags.lidPassThrough && eyeFade > 0, k, bs, this.lastHeadDown);
     // Closed-lip mask (R2): persona lips end at the wearer's lip contour while the mouth is closed.
     const closedLipMask = flags.closedLipMask && s.keepRealMouth ? 1 : 0;
     this.lastLipFade = lipFade;
@@ -1616,7 +1664,18 @@ export class RealtimeFacialEngine {
     // R3c: the relight radius comes from the auto loop (flag autoRadius) or the setting; R6b's
     // illumination-only relighting uses its own large-scale radius.
     const illumination = flags.relightIllumination && relightOn;
-    const radiusShare = illumination ? ILLUMINATION_RADIUS_SHARE : flags.autoRadius && relightOn ? this.autoRadius.radius : clamp(s.relightRadius, 0.02, 0.2);
+    // R6b (flag photoLighting): under the illumination relight the radius follows its own loop
+    // (10% down to 3.5% while the output's cheek tone or side shading is out of line).
+    this.illumLoopActive = illumination && flags.photoLighting && s.illuminationRadius === undefined;
+    const radiusShare = illumination
+      ? s.illuminationRadius !== undefined
+        ? clamp(s.illuminationRadius, 0.02, 0.2)
+        : this.illumLoopActive
+          ? this.illumRadius.radius
+          : ILLUMINATION_RADIUS_SHARE
+      : flags.autoRadius && relightOn
+        ? this.autoRadius.radius
+        : clamp(s.relightRadius, 0.02, 0.2);
     if (relightOn && flags.symmetricDelight && this.delightBands && Math.abs(radiusShare - this.delightRadius) > 0.001) {
       this.warp.setDelight(symmetricDelightGains(this.delightBands[0], lumaAtScale(this.delightBands, radiusShare)));
       this.delightRadius = radiusShare;
@@ -1641,7 +1700,9 @@ export class RealtimeFacialEngine {
             srcMap: [layout.offsetX, layout.offsetY, layout.drawWidth, layout.drawHeight],
             mirror: layout.mirror,
             faceWidthPx: k.faceWidth,
-            toneMatch: clamp(s.skinToneMatch, 0, 1),
+            // R6b (flag photoLighting): a colour cast in the persona photo raises its hue match.
+            toneMatch: clamp(Math.max(s.skinToneMatch, flags.photoLighting ? this.personaLighting?.cast ?? 0 : 0), 0, 1),
+            toneBudget: illumination ? Math.max(0, s.toneBudget ?? TONE_BUDGET_DEFAULT) : 0,
             radiusShare,
             globalTone: flags.relightGlobalTone && !illumination,
             shadowGuard: flags.relightShadowGuard,
@@ -1663,12 +1724,14 @@ export class RealtimeFacialEngine {
       // R4b: the weights come from the base triangles only; the extension rings copy their column (see copyColumnWeights).
       foreshorten: vertexFade,
       softFaceEdge: flags.jawExtension && !!this.jawDepths,
+      handGuard: flags.jawExtension,
     });
     this.masksDirty = false;
 
     // R3c: the auto-radius readbacks sit between the camera-match ones.
-    if (flags.autoRadius && relightOn && !illumination && this.warp.supportsReadback && !this.autoRadiusPending && this.frameIndex % AUTO_RADIUS_EVERY === 7) {
-      this.stepAutoRadiusLoop(layout, source, k, bounds, flags.steadyCameraMatch && headSpeed > CAMERA_MATCH_HOLD_SPEED * k.faceWidth);
+    const loopOn = (flags.autoRadius && relightOn && !illumination) || this.illumLoopActive;
+    if (loopOn && this.warp.supportsReadback && !this.autoRadiusPending && this.frameIndex % AUTO_RADIUS_EVERY === 7) {
+      this.stepAutoRadiusLoop(layout, source, k, bounds, flags.steadyCameraMatch && headSpeed > CAMERA_MATCH_HOLD_SPEED * k.faceWidth, this.illumLoopActive);
     }
 
     // R2 §4: every 15 frames read the wearer's and the persona's face-region statistics back
@@ -1955,7 +2018,14 @@ export class RealtimeFacialEngine {
    * persona layer and of the driver back (asynchronously, like the camera match), measure the
    * side-shading gap and the cheek-vs-neck ΔE on both, and step the radius.
    */
-  private stepAutoRadiusLoop(layout: SourceLayout, source: CanvasImageSource, k: LandmarkKinematics, bounds: { minX: number; minY: number; width: number; height: number }, hold: boolean) {
+  private stepAutoRadiusLoop(
+    layout: SourceLayout,
+    source: CanvasImageSource,
+    k: LandmarkKinematics,
+    bounds: { minX: number; minY: number; width: number; height: number },
+    hold: boolean,
+    illum = false
+  ) {
     const W = this.canvas.width;
     const H = this.canvas.height;
     // Display rectangle: the face box widened by 10% each side and extended below the chin for the neck patch.
@@ -1977,7 +2047,7 @@ export class RealtimeFacialEngine {
     const srcRect: [number, number, number, number] = [clamp(sx0, 0, 1), clamp(sy0, 0, 1), clamp(sx1 - sx0, 0.01, 1), clamp(sy1 - sy0, 0.01, 1)];
     const outMap = { x0, y0, w: rect[2], h: rect[3], size: READBACK_SIZE, flipY: true, mirrorX: false };
     const drvMap = { x0, y0, w: rect[2], h: rect[3], size: READBACK_SIZE, flipY: false, mirrorX: layout.mirror };
-    const patches = shadingPatches(this.smoothed, k.faceWidth, k.faceHeight);
+    const patches = illum ? shadingPatches(this.smoothed, k.faceWidth, k.faceHeight, ILLUM_CHEEKS[0], ILLUM_CHEEKS[1]) : shadingPatches(this.smoothed, k.faceWidth, k.faceHeight);
     const token = this.personaPrepareToken;
     this.autoRadiusPending = true;
     const out = this.warp.readFacePixels(rect);
@@ -1992,9 +2062,11 @@ export class RealtimeFacialEngine {
         cheekOutL: mo?.cheek[0] ?? null, cheekDrvL: md?.cheek[0] ?? null,
       };
       if (!mo || !md || mo.neck === null || md.neck === null) return;
-      this.autoRadius = stepAutoRadius(this.autoRadius, { sideOut: mo.side, sideDrv: md.side, neckOut: mo.neck, neckDrv: md.neck }, { hold });
+      const sample = { sideOut: mo.side, sideDrv: md.side, neckOut: mo.neck, neckDrv: md.neck };
+      if (illum) this.illumRadius = stepAutoRadius(this.illumRadius, sample, { hold, min: ILLUM_RADIUS_MIN, max: ILLUM_RADIUS_MAX, proportional: true });
+      else this.autoRadius = stepAutoRadius(this.autoRadius, sample, { hold });
       if (this.autoRadiusTrace.length >= 1024) this.autoRadiusTrace.shift();
-      this.autoRadiusTrace.push(this.autoRadius.radius);
+      this.autoRadiusTrace.push(illum ? this.illumRadius.radius : this.autoRadius.radius);
     });
   }
 
@@ -2371,6 +2443,8 @@ export class RealtimeFacialEngine {
         keyframeSecondaryId: this.keyframeSecondaryId,
         keyframeMix: this.keyframeMix,
         matrixPose: this.matrixPose ? { ...this.matrixPose } : null,
+        lidClosure: this.lidLast[0] >= 0 ? [this.lidLast[0], this.lidLast[1]] : null,
+        headDown: this.lastHeadDown,
       });
     }
     const plan = this.burstPlan;
@@ -2438,10 +2512,14 @@ export class RealtimeFacialEngine {
           cameraMatchTrace: [...this.cameraMatchTrace],
           restMar: this.restMouth.rest,
           personaDelightRange: this.personaDelightRange,
-          autoRadius: realismFlags.get().autoRadius ? { ...this.autoRadius } : null,
+          photoLighting: this.personaLighting
+            ? (({ asymmetry, asymmetryL, asymmetryAb, hue, chroma, strength, cast }) => ({ asymmetry, asymmetryL, asymmetryAb, hue, chroma, strength, cast }))(this.personaLighting)
+            : null,
+          toneFloor: this.warp.toneFloor,
+          autoRadius: this.illumLoopActive ? { ...this.illumRadius } : realismFlags.get().autoRadius ? { ...this.autoRadius } : null,
           autoRadiusTrace: [...this.autoRadiusTrace],
           autoRadiusLast: this.autoRadiusLast,
-          relightRadius: realismFlags.get().autoRadius ? this.autoRadius.radius : this.settings.relightRadius,
+          relightRadius: this.illumLoopActive ? this.illumRadius.radius : realismFlags.get().autoRadius ? this.autoRadius.radius : this.settings.relightRadius,
           symmetricDelight: !!this.delightBands,
           segmentation: { ready: this.segmenter.ready, active: this.segActive, updates: this.segUpdates, backend: this.segmenter.backend, error: this.segmenter.error, lastMs: this.segmenter.lastMs, lastPackMs: this.segmenter.lastPackMs, bitmapMs: this.segmenter.bitmapMs, inferMs: this.segmenter.inferMs, readMs: this.segmenter.readMs, roundTripMs: this.segmenter.roundTripMs, submits: this.segmenter.submits },
           personaInpaintShare: this.personaInpaintShare,

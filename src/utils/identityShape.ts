@@ -14,7 +14,7 @@
  * Pure (no DOM), so the tests can run it.
  */
 import { CANONICAL_FACE_MODEL } from './canonicalFaceModel.ts';
-import { eyeFadeWeights, type FaceTopology } from './faceMesh.ts';
+import { BROW_LANDMARKS, eyeFadeWeights, type FaceTopology } from './faceMesh.ts';
 
 const clamp = (v: number, lo: number, hi: number) => Math.min(hi, Math.max(lo, v));
 const smooth = (e0: number, e1: number, x: number) => {
@@ -394,6 +394,21 @@ export function beardDepths(sample: RgbSampler, pts: ArrayLike<number>, opts: { 
  * 1. A side compressed to 60% of the other (a turn of roughly 35°) takes none, so the far jaw is
  * never pushed past its silhouette. [right side (33), left side (263)].
  */
+/** Roll (degrees) over which the jaw push fades out: a tilted head's jaw/neck mask line is irregular. */
+export const JAW_ROLL_FADE: readonly [number, number] = [8, 18];
+/** Pitch (degrees, either way) over which it fades: only far looks up or down. */
+export const JAW_PITCH_FADE: readonly [number, number] = [20, 35];
+
+/**
+ * 1 for a level head, 0 from a roll of ~18° or a pitch of ~35°. The roll may be an eye-line angle
+ * (defined modulo 180°: a level head can read ±180°), so it is wrapped to ±90° first.
+ */
+export function jawPoseScale(rollDeg: number, pitchDeg: number): number {
+  const r = Number.isFinite(rollDeg) ? Math.abs(((((rollDeg + 90) % 180) + 180) % 180) - 90) : 0;
+  const p = Number.isFinite(pitchDeg) ? Math.abs(pitchDeg) : 0;
+  return (1 - smooth(JAW_ROLL_FADE[0], JAW_ROLL_FADE[1], r)) * (1 - smooth(JAW_PITCH_FADE[0], JAW_PITCH_FADE[1], p));
+}
+
 export function jawSideScale(points: ArrayLike<number>): [number, number] {
   const d = (a: number, b: number) => Math.hypot(points[a * 2] - points[b * 2], points[a * 2 + 1] - points[b * 2 + 1]);
   const dR = d(168, 33);
@@ -410,11 +425,11 @@ export function jawSideScale(points: ArrayLike<number>): [number, number] {
  * hard notch. `count` points form the centroid; IOD and the turn come from the same points, so the
  * screen and each keyframe's UVs use their own scale and turn.
  */
-export function applyJawExtension(points: Float32Array, plan: JawPlan, depths: ArrayLike<number>, count = MESH_POINTS): boolean {
+export function applyJawExtension(points: Float32Array, plan: JawPlan, depths: ArrayLike<number>, count = MESH_POINTS, poseScale = 1): boolean {
   const f = eyeFrame(points);
   if (!f) return false;
   const [sideR, sideL] = jawSideScale(points);
-  const turn = Math.min(sideR, sideL);
+  const turn = Math.min(sideR, sideL) * clamp(poseScale, 0, 1);
   if (turn <= 0) return true;
   let cx = 0;
   let cy = 0;
@@ -516,7 +531,15 @@ export function hasBeard(depths: ArrayLike<number>, min = 0.05): boolean {
 // ------------------------------------------------------------------------------------------------
 
 /** How many rings past the eye pass-through radius the upper-lid band reaches when the lid is lowered. */
-export const LID_BAND_RINGS = 2.5;
+/**
+ * Rings above the eye the pass-through can widen over: 3.5 covers all the lid skin up to the brow
+ * at full weight (2.5 reached it at half weight and left a pale arc looking down). Brow vertices are
+ * never in the band.
+ */
+export const LID_BAND_RINGS = 3.5;
+const BROWS = new Set(BROW_LANDMARKS);
+/** Canonical height (cm) of the inner brow ends (55 / 285): midline band vertices stay below it. */
+const BROW_LINE_UP = 4.14;
 
 /**
  * Upper-lid band weights per eye: the part of a wider eye pass-through (radius + LID_BAND_RINGS)
@@ -533,7 +556,19 @@ export function upperLidBands(topology: FaceTopology, baseRadius: number, extra 
   for (let v = 0; v < n; v++) {
     const band = Math.max(0, wide[v] - base[v]);
     if (band <= 0) continue;
-    const isLeft = canonicalLateral(v) > 0;
+    // The brows are not eyelid: the band covers the lid skin up to the brow and stops there, so a
+    // look down never swaps the persona's brows.
+    if (BROWS.has(v)) continue;
+    const lateral = canonicalLateral(v);
+    if (Math.abs(lateral) < 0.8) {
+      // The bridge between the eyes belongs to both lids at half weight (closing both passes it
+      // through, so no island of persona skin is left there), but only below the brow line.
+      if (canonicalUp(v) <= Math.min(leftUp, rightUp) + 0.15 || canonicalUp(v) > BROW_LINE_UP) continue;
+      left[v] = band * 0.5;
+      right[v] = band * 0.5;
+      continue;
+    }
+    const isLeft = lateral > 0;
     const eyeUp = isLeft ? leftUp : rightUp;
     if (canonicalUp(v) <= eyeUp + 0.15) continue;
     (isLeft ? left : right)[v] = band;
@@ -547,6 +582,44 @@ export function lidPassThroughWeights(base: ArrayLike<number>, bands: { left: Ar
   const cr = clamp(closureRight, 0, 1);
   for (let v = 0; v < out.length; v++) out[v] = Math.min(1, (base[v] ?? 0) + cl * (bands.left[v] ?? 0) + cr * (bands.right[v] ?? 0));
   return out;
+}
+
+/** Pitch (degrees) relative to the wearer's own level pose over which the chin-down cue rises. */
+export const HEAD_DOWN_RANGE: readonly [number, number] = [6, 16];
+
+/**
+ * The wearer's level head pitch, learned slowly from near-frontal frames close to it (a webcam
+ * above or below the screen, and the pose estimate's own offset, make "level" read anywhere from
+ * about −15° to +15°). The chin-down cue is measured from it.
+ */
+export class PitchBaseline {
+  private base: number | null = null;
+  private frames = 0;
+
+  update(pitchDeg: number, yawDeg = 0): number {
+    if (!Number.isFinite(pitchDeg)) return this.base ?? 0;
+    if (this.base === null) {
+      this.base = pitchDeg;
+      this.frames = 1;
+      return this.base;
+    }
+    // Learn from near-frontal frames near the current baseline: fast at first, then slowly.
+    if (Math.abs(yawDeg) < 15 && Math.abs(pitchDeg - this.base) < 12) {
+      this.frames++;
+      this.base += (pitchDeg - this.base) * Math.max(0.01, 1 / this.frames);
+    }
+    return this.base;
+  }
+
+  /** 0..1 chin-down amount for this pitch. */
+  headDown(pitchDeg: number): number {
+    return Number.isFinite(pitchDeg) ? smooth(HEAD_DOWN_RANGE[0], HEAD_DOWN_RANGE[1], pitchDeg - (this.base ?? 0)) : 0;
+  }
+
+  reset() {
+    this.base = null;
+    this.frames = 0;
+  }
 }
 
 /**

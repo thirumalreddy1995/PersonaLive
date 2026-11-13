@@ -48,6 +48,10 @@ export interface RealismDebugState {
   restMar: number | null;
   /** Max/min of the de-light field fitted on the persona (flag personaDelight), null when off. */
   personaDelightRange: number | null;
+  /** R6b (flag photoLighting): the persona photo's lighting measured at load, null when off. */
+  photoLighting: { asymmetry: number; asymmetryL: number; asymmetryAb: number; hue: number; chroma: number; strength: number; cast: number } | null;
+  /** R6b: the tone budget's exponent floor this frame (0 = the budget did not bite). */
+  toneFloor: number;
   /** R3c auto-radius loop state (flag autoRadius), null when off. */
   autoRadius: { radius: number; sideExcess: number | null; neckExcess: number | null; updates: number } | null;
   /** The radius after every loop update over the persona's life. */
@@ -141,6 +145,9 @@ export interface RealismFrameCapture {
   keyframeSecondaryId: string | null;
   keyframeMix: number;
   matrixPose: HeadPose | null;
+  /** R6b (flag lidPassThrough): per-eye lid closure and the chin-down amount this frame, null when off. */
+  lidClosure?: [number, number] | null;
+  headDown?: number | null;
 }
 
 export interface RealismBurstFrame {
@@ -269,6 +276,9 @@ export interface SerializedCapture {
   keyframeSecondaryId: string | null;
   keyframeMix: number;
   matrixPose: HeadPose | null;
+  /** R6b (flag lidPassThrough): per-eye lid closure and the chin-down amount this frame, null when off. */
+  lidClosure?: [number, number] | null;
+  headDown?: number | null;
 }
 
 export interface SerializedBurst {
@@ -494,6 +504,8 @@ export function installRealismWindowHook(app?: RealismAppHooks): RealismWindowHo
         keyframeSecondaryId: c.keyframeSecondaryId,
         keyframeMix: c.keyframeMix,
         matrixPose: c.matrixPose,
+        lidClosure: c.lidClosure ?? null,
+        headDown: c.headDown ?? null,
       }));
     },
     takeBurst: () => {

@@ -2,7 +2,7 @@ import test from 'node:test';
 import assert from 'node:assert/strict';
 import { FaceLandmarker } from '@mediapipe/tasks-vision';
 import { CANONICAL_FACE_MODEL } from './canonicalFaceModel.ts';
-import { buildFaceTopology, eyeFadeWeights } from './faceMesh.ts';
+import { BROW_LANDMARKS, buildFaceTopology, eyeFadeWeights } from './faceMesh.ts';
 import {
   JAW_MAX_DEPTH,
   JAW_TAPER,
@@ -10,6 +10,7 @@ import {
   LidClosure,
   MESH_POINTS,
   NeutralShapeCalibrator,
+  PitchBaseline,
   PROPORTION_MAX_SHIFT,
   STABLE_POINTS,
   applyJawExtension,
@@ -19,6 +20,7 @@ import {
   fitAffine,
   hasBeard,
   jawPlan,
+  jawPoseScale,
   jawSideScale,
   lidPassThroughWeights,
   normalizeShape,
@@ -193,6 +195,29 @@ test('jawSideScale is 1 on a frontal face, drops the compressed side of a turned
   assert.deepEqual(Array.from(moved), Array.from(turned));
 });
 
+test('jawPoseScale fades the jaw push on tilts (roll as an eye-line angle too) and far looks up or down', () => {
+  assert.equal(jawPoseScale(0, 0), 1);
+  assert.equal(jawPoseScale(180, 0), 1, 'a level eye line read as 180°');
+  assert.equal(jawPoseScale(-177, 0), 1);
+  assert.ok(jawPoseScale(-163, 0) < 0.05, 'C 7.3 s: a 17° tilt');
+  assert.ok(jawPoseScale(12, 0) > 0.3 && jawPoseScale(12, 0) < 0.8);
+  assert.equal(jawPoseScale(0, 15), 1, 'an ordinary look down keeps the push');
+  assert.equal(jawPoseScale(0, -40), 0, 'a far look up does not');
+  assert.equal(jawPoseScale(Number.NaN, Number.NaN), 1);
+  // The scale multiplies the push like the turn does.
+  const pts = canonicalFace(10);
+  const before = Float32Array.from(pts);
+  const plan = jawPlan(topo);
+  const depths = new Float32Array(LOWER_JAW_OVAL.length).fill(0.5);
+  applyJawExtension(pts, plan, depths, MESH_POINTS, 0.5);
+  const iod = eyeFrame(before)!.iod;
+  const chinMove = Math.hypot(pts[152 * 2] - before[152 * 2], pts[152 * 2 + 1] - before[152 * 2 + 1]);
+  assert.ok(Math.abs(chinMove - 0.25 * iod) < 1e-3, 'half the push at scale 0.5');
+  const still = Float32Array.from(before);
+  applyJawExtension(still, plan, depths, MESH_POINTS, 0);
+  assert.deepEqual(Array.from(still), Array.from(before), 'no push at scale 0');
+});
+
 test('upper-lid bands cover only vertices above each eye and add on top of the base pass-through', () => {
   const bands = upperLidBands(topo, 1);
   const base = eyeFadeWeights(topo, 1);
@@ -201,11 +226,16 @@ test('upper-lid bands cover only vertices above each eye and add on top of the b
   for (let v = 0; v < topo.vertexCount; v++) {
     leftSum += bands.left[v];
     rightSum += bands.right[v];
-    if (bands.left[v] > 0) assert.ok(CANONICAL_FACE_MODEL[v * 3] > 0, `left band vertex ${v} on the left`);
-    if (bands.right[v] > 0) assert.ok(CANONICAL_FACE_MODEL[v * 3] < 0, `right band vertex ${v} on the right`);
+    // Each side's band stays on its side; only the bridge between the eyes (|x| < 0.8) is in both, equally.
+    if (bands.left[v] > 0) assert.ok(CANONICAL_FACE_MODEL[v * 3] > -0.8, `left band vertex ${v} on the left`);
+    if (bands.right[v] > 0) assert.ok(CANONICAL_FACE_MODEL[v * 3] < 0.8, `right band vertex ${v} on the right`);
+    if (bands.left[v] > 0 && bands.right[v] > 0) assert.equal(bands.left[v], bands.right[v], `bridge vertex ${v}`);
     if (bands.left[v] > 0 || bands.right[v] > 0) assert.ok(CANONICAL_FACE_MODEL[v * 3 + 1] > 2.6, `band vertex ${v} above the eye`);
   }
   assert.ok(leftSum > 0 && rightSum > 0);
+  for (const v of BROW_LANDMARKS) assert.equal(bands.left[v] + bands.right[v], 0, `brow vertex ${v} stays the persona's`);
+  assert.equal(bands.left[9] + bands.right[9], 0, 'the forehead above the brow line is not lid');
+  for (const v of [8, 168]) assert.equal(bands.left[v], bands.right[v], `bridge vertex ${v} belongs to both lids equally`);
   const out = new Float32Array(topo.vertexCount);
   lidPassThroughWeights(base, bands, 0, 0, out);
   assert.deepEqual(Array.from(out), Array.from(base), 'open eyes: the base pass-through');
@@ -274,4 +304,20 @@ test('LidClosure rises with the chin down even when the eyes and their blendshap
   assert.ok(c[0] < 0.01);
   for (let i = 0; i < 6; i++) c = lc.update(0.3, 0.3, 0, [0, 0], [0, 0], 1);
   assert.ok(c[0] > 0.85 && c[1] > 0.85, `chin down: ${c}`);
+});
+
+test('PitchBaseline learns the wearer level pitch, so a chin-down is measured from it, not from 0°', () => {
+  const pb = new PitchBaseline();
+  // This wearer's level head reads −10° (camera above the screen); a look-down reads +10°.
+  for (let i = 0; i < 300; i++) pb.update(-10 + Math.sin(i) * 2, 0);
+  assert.ok(pb.headDown(-10) < 0.01, 'level');
+  assert.ok(pb.headDown(10) > 0.99, `chin down 20° from level: ${pb.headDown(10)}`);
+  // Look-downs and turned frames do not move the baseline.
+  for (let i = 0; i < 300; i++) pb.update(12, 0);
+  for (let i = 0; i < 300; i++) pb.update(-25, 40);
+  assert.ok(pb.headDown(10) > 0.99, 'still measured from the level pose');
+  assert.equal(new PitchBaseline().headDown(Number.NaN), 0);
+  pb.reset();
+  pb.update(5, 0);
+  assert.ok(pb.headDown(5) < 0.01, 'reset: the first frame is level');
 });

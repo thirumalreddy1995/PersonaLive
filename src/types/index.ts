@@ -162,6 +162,10 @@ export interface TransformationSettings {
   featureBlend?: number;
   /** R6b (flag skinTint): alpha of the neck/ear tint, 0..0.45 (default 0.45). */
   skinTintStrength?: number;
+  /** R6b (flag relightIllumination): largest CIEDE2000 difference allowed between the face's mean skin and the wearer's (default 2.5; 0 = off). */
+  toneBudget?: number;
+  /** R6b (flag relightIllumination): low-pass sigma as a share of face width; unset = per persona (photoLighting) or 0.1. */
+  illuminationRadius?: number;
   /** R6: output/camera sharpness ratio the camera-match loop aims for (1 = match the camera). */
   cameraMatchSharpness?: number;
   /** R6: output/camera noise ratio the camera-match loop aims for (1 = match the camera). */

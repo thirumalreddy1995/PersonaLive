@@ -50,18 +50,47 @@ export interface ShadingSample {
   neckDrv: number;
 }
 
-/** One control step; `hold` records the measurement without moving the radius (fast head motion). */
-export function stepAutoRadius(s: AutoRadiusState, m: ShadingSample, opts: { hold?: boolean } = {}): AutoRadiusState {
+/**
+ * R6b (flag photoLighting): the illumination relight's per-persona radius. It starts at the top
+ * (the persona keeps the most of its own form and shading) and steps down only while the output's
+ * cheek tone or side shading is out of line with the wearer's: a harshly lit photo's cheekbone
+ * highlights and shadows are then divided out at a finer scale. No load-time measure of the photo
+ * separates its baked light from a beard or the face's own colouring (R3b, and again in R6b), so
+ * the radius follows the output. It measures the upper cheeks (ILLUM_CHEEKS: below the eyes, above
+ * where a beard starts), so a persona's beard is not mistaken for a tone error.
+ */
+export const ILLUM_CHEEKS: readonly [number, number] = [347, 118];
+export const ILLUM_RADIUS_MIN = 0.05;
+export const ILLUM_RADIUS_MAX = 0.1;
+
+export interface AutoRadiusStepOptions {
+  /** Record the measurement without moving the radius (fast head motion). */
+  hold?: boolean;
+  /** Radius bounds (AUTO_RADIUS_MIN / MAX by default). */
+  min?: number;
+  max?: number;
+  /**
+   * Step down in proportion to the excess (up to 5× the base step), so a persona far out of line
+   * settles in a few updates instead of a dozen; the step up stays the slow base step.
+   */
+  proportional?: boolean;
+}
+
+/** One control step. */
+export function stepAutoRadius(s: AutoRadiusState, m: ShadingSample, opts: AutoRadiusStepOptions = {}): AutoRadiusState {
   const ema = (prev: number | null, v: number) => (prev === null ? v : prev + (v - prev) * AUTO_RADIUS_EMA);
   const sideExcess = ema(s.sideExcess, Math.abs(m.sideOut - m.sideDrv));
   const neckExcess = ema(s.neckExcess, Math.abs(m.neckOut - m.neckDrv));
+  const min = opts.min ?? AUTO_RADIUS_MIN;
+  const max = opts.max ?? AUTO_RADIUS_MAX;
   let radius = s.radius;
   if (!opts.hold) {
     const worst = Math.max(sideExcess, neckExcess);
-    if (worst < AUTO_RADIUS_RAISE_BELOW) radius = Math.min(AUTO_RADIUS_MAX, radius + AUTO_RADIUS_STEP_UP);
-    else if (worst > AUTO_RADIUS_LOWER_ABOVE) radius = Math.max(AUTO_RADIUS_MIN, radius - AUTO_RADIUS_STEP_DOWN);
+    const down = opts.proportional ? AUTO_RADIUS_STEP_DOWN * Math.min(5, Math.max(1, worst / AUTO_RADIUS_LOWER_ABOVE)) : AUTO_RADIUS_STEP_DOWN;
+    if (worst < AUTO_RADIUS_RAISE_BELOW) radius = Math.min(max, radius + AUTO_RADIUS_STEP_UP);
+    else if (worst > AUTO_RADIUS_LOWER_ABOVE) radius = Math.max(min, radius - down);
   }
-  return { radius, sideExcess, neckExcess, updates: s.updates + 1 };
+  return { radius: Math.min(max, Math.max(min, radius)), sideExcess, neckExcess, updates: s.updates + 1 };
 }
 
 /**

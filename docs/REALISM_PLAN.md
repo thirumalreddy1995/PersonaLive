@@ -1107,6 +1107,114 @@ Audit items 2–8 above, fixed inside the same flags plus one new flag (`seamFad
 - Tone match was 0.3 for the r6b runs; the default stays 1.
 - Stray Vite servers from this folder (ports 4778–4781) were stopped before verification, and `npm ci` then ran clean. npm now holds back install scripts, so Electron's binary was restored from its local cache (`node node_modules/electron/install.js`).
 
+### R6b round 3 (2026-11-14): adaptive photo lighting, tone budget, last glitches. The gate is not met; defaults stay off
+
+The user's go: adaptive lighting per persona, so that harshly lit or colour-cast photos stay within ±3 ΔE and evenly lit ones keep their colours; the three remaining glitches; then the mains verification, and r6b on by default if it passes.
+
+**What was built** (all behind the R6b flags; `--flags r6b` now has seven):
+- **New flag `photoLighting`** (reloads the persona):
+  - **At load** (`src/utils/photoLighting.ts`, pure, with tests):
+    - A 2nd-order skin shading field is fitted per channel on the photo.
+    - A mirror map built from the mesh's symmetric landmark pairs measures the field's left/right asymmetry, so a turned photo is mirrored anatomically.
+    - Only the asymmetric part is divided out, with a per-photo strength: none below 4 ΔE, full from 10, tapering to half at the oval.
+    - The mean skin colour's distance from a natural skin hue and chroma gives a cast score, which raises that persona's hue match.
+  - **At run time:** the illumination relight's radius follows its own loop (the R3c readbacks).
+    - It runs between 10% and 5% of face width.
+    - It measures the upper cheeks (landmarks 118/347), where a beard rarely reaches.
+    - It steps down in proportion to the excess.
+- **Tone budget** (setting `toneBudget`, default 2.5 ΔE00, with `relightIllumination`):
+  - Per frame, a floor on the brightness and hue matches keeps the face's mean skin within the budget of the wearer's (`toneBudgetFloor`).
+  - In the shader, the persona's large-scale skin colour is kept within about the same of the wearer's at each place. This applies on skin-like, non-lip pixels only, with the gain bounded to 0.5..2.
+- **Glitches:**
+  - `jawExtension`:
+    - The push and its feather fade on tilts (roll 8°–18°, pitch 20°–35°).
+    - In the lower face, the persona leaves wherever body skin is at least as likely as face skin. A hand pressed under the chin is labelled half and half, and the confident-hand rule missed it.
+    - The keep decision is averaged over a 5-tap cross, so the masks' jaw, neck and hand edges become short ramps.
+  - `lidPassThrough`:
+    - The real eyes stay through blinks and look-downs. Below an eye aspect ratio of 0.18 the app used to switch to the persona's open eyes, whose lids showed as pale arcs.
+    - The lid band covers the lid skin up to the brow (3.5 rings, brows excluded, the bridge between the eyes shared at half weight by both lids).
+    - The chin-down cue is measured from the wearer's own level pitch (`PitchBaseline`). This wearer's level head reads about −10°, so the old absolute 8°–22° window never fired.
+- **Speed:** a radius step no longer re-reads the persona's mean skin colour, a synchronous readback that had pushed p95 to 43 ms.
+- **Review tooling:** `report.json` records `photoLighting` and `toneFloor`; each frame's `-landmarks.json` records the matrix pose, the lid closure and the chin-down amount.
+- **Tests:** 243 pass (9 new: photo lighting, tone budget and clamp, the radius loop bounds, jaw tilt scale, pitch baseline; the lid band test now checks the brows and the bridge).
+
+**Setup:**
+- Frozen build `dist-r6d`, laptop on mains for every run (`power: ac`).
+- "r6" = `--flags r6`; "r6b" = `--flags r6b` with no settings overrides, exactly as it would ship (`skinToneMatch` stays 1).
+- The r6 baselines were re-run on the same build: `r6e-r6-me2bro`, `r6e-r6-bro2me`, `r6e-grid-r6`.
+- The final r6b runs: `r6f-r6b-me2bro`, `r6f-r6b-bro2me`, `r6f-grid-r6b`.
+- An intermediate r6b (radius floor 3.5%, mid-cheek loop patches): `r6e-r6b-*`.
+
+| Clip | fps | frame p95 (ms) | output↔persona | output↔wearer | margin | neck gap (±3) | ears gap (±3) | seam step (≤1) | hand leak |
+|---|---|---|---|---|---|---|---|---|---|
+| A | 29.3 → 29.3 | 26.1 → 28.9 | .45 → .41 | .70 → .64 | −.25 → −.23 | −1.3 → **−3.7** | +0.7 → +1.6 | −0.00 → −0.18 | 0 → 0 |
+| B | 29.4 → 29.5 | 31.2 → 28.9 | .41 → .34 | .70 → .75 | −.28 → −.41 | −1.9 → −1.9 | −0.1 → +0.1 | −0.05 → −0.02 | 1.1% → 0.2% |
+| C | 29.2 → 29.7 | 29.7 → 30.2 | .44 → .38 | .66 → .72 | −.22 → −.34 | −1.6 → −2.0 | −0.1 → +0.5 | −0.24 → −0.30 | 4.4% → 1.4% |
+| D | 29.1 → 29.4 | 34.6 → 28.8 | .51 → .48 | .65 → .64 | −.14 → −.16 | −2.2 → **−3.6** | −0.1 → +1.3 | −0.17 → −0.82 | 0 → 0 |
+| E | 29.6 → 29.4 | 27.3 → 29.3 | .43 → .39 | .64 → .73 | −.21 → −.35 | −1.9 → **−3.1** | −0.4 → +0.3 | +0.07 → +0.50 | 0 → 0 |
+| F | 29.6 → 29.0 | 28.9 → 37.6 | .53 → .48 | .59 → .66 | −.06 → −.18 | −2.4 → −2.1 | +0.2 → +1.0 | +0.08 → −0.18 | 0.3% → 0 |
+| G (reverse) | 30.0 → 30.0 | 29.7 → 30.4 | .44 → .45 | .69 → .63 | −.25 → −.18 | +0.5 → +0.2 | −0.4 → −0.8 | −0.10 → **+1.20** | 0 → 0 |
+
+**Attribution on clips A–F** (margin, neck gap):
+- `skinToneMatch` 0.3 instead of 1 barely changes either (B −.41 → −.36).
+- Fixing the radius at 10% (no loop) improves the margins a little (C −.30, E −.30, F −.09) and makes the neck gaps worse (A −4.2, E −3.6, F −3.3).
+- The first r6b (round 2) gave A −.19, B −.32, C −.29, D −.12, E −.27, F −.07, and also failed A (−4.1) and D (−3.8).
+- r6 moves by about ±0.05 between runs (r6c vs r6e).
+- So on this pair r6b is level with r6 on identity for A, D and F, a little below on B, C and E, and below on cheek tone in every variant. The second person's beard lies inside the metric's cheek patches.
+
+**Persona grid (`r6e-grid-r6` → `r6f-grid-r6b`, median / worst 10%):**
+
+| Metric | median | worst 10% |
+|---|---|---|
+| identity margin deficit (lower is better) | 0.37 → 0.28 | 0.56 → 0.46 |
+| output ↔ wearer | 0.63 → 0.56 | 0.71 → 0.63 |
+| \|skin tone gap vs neck\| (ΔE, tolerance 3) | 1.53 → 2.49 | 2.23 → **4.68** |
+| \|skin tone gap vs ears\| (ΔE, tolerance 3) | 0.69 → 1.15 | 1.67 → **4.81** |
+| side shading gap (L) | 1.77 → 3.16 | 2.56 → 6.63 |
+| seam step gap (ΔE, tolerance 1) | 0.02 → 0.42 | 0.34 → 0.92 |
+| \|sharpness gap, interior skin\| | 0.43 → 0.32 | 2.59 → 1.40 |
+| lip error (% face width) | 1.26 → 2.14 | 2.03 → 2.79 |
+| fps / frame p95 (ms) | 29.5 / 30.3 → 29.5 / 31.2 | 29.0 / 32.9 → 28.9 / 37.0 |
+
+- **Failures against the tolerances:** neck tone in 17 of 56 clip-persona combinations (r6: 2), ears in 6 (r6: 0), seam step in 5 (r6: 0).
+- **The intermediate r6b** (`r6e-grid-r6b`: radius floor 3.5%, loop on the mid-cheeks) traded the other way:
+  - neck 3.96, ears 3.25 and side 4.16 at the worst 10%;
+  - margin deficit 0.32 / 0.46;
+  - failures in 16 / 5 / 5 combinations.
+- **Round 2** (`r6c-grid-r6b`): deficit 0.23 / 0.39, neck 3.47 / 5.59, side 5.03 / 8.45.
+- **Speed:** about 30 fps and p95 under 40 ms everywhere, in every r6b variant.
+
+**By eye** (`realism-review/out/r6b-audit7/{A..G}-{1,2}.png`: r6e r6 vs r6f r6b; gitignored):
+- On frontal frames r6b carries the second person's full beard and tone and reads more like him than r6. Looks up keep natural lips (r6: magenta).
+- With the lid band at full closure the eye region is the wearer's (B 15.8 s). A faint line remains along the lowered lid looking down (B 13.8 s).
+- **Fixed:**
+  - Tilt (C 7.3 s): the beard ends in a soft ramp.
+  - Hand under the chin (C 17.4 s): the knuckles stay in front, with a soft edge (hand leak 4.4% → 1.4% on C).
+  - Look-down (B 13.8 s): no pale arcs; the real lowered lids show.
+  - No persona island between the brows when both lids lower.
+  - The strongest grid casts and side lights (p19, p24, p13, p08) are gone or much weaker. The side-shading gap worst 10% fell from 8.45 (round 2) to 6.63, and to 4.16 with the 3.5% floor.
+- **Introduced and fixed during the round:**
+  - A purple glow on the lower lip from the first version of the local tone clamp, which then ran on lips and beard too.
+  - A beard back over the knuckles when the masks themselves were averaged; the decision is averaged now.
+
+**Why the gate is not met:**
+- The ±3 ΔE cheek-tone tolerance and the persona keeping its own skin tone and shading pull against each other in 2D. They clash most for darker-skinned, bearded or harshly lit personas.
+- Every lever that closes the cheek gap moves the output toward the wearer: a finer relight radius, a tighter tone budget, more hue match.
+- The cheek metric also reads a persona's beard and stubble as a tone error. That is why the loop measures the upper cheeks, while the metric still uses the mid-cheeks.
+- No load-time measure of the photo separates its baked light from a beard or the face's own colouring. The two webcam enrollments scored as the harshest photos of all (the beard), as R3b found; hence the runtime loop.
+
+**Recommendation:**
+- Keep the defaults at r6, with all seven flags available behind `--flags r6b` and the debug panel.
+- The user decides between:
+  - (a) r6b on by default, accepting a cheek-tone tolerance of about ±4 ΔE for bearded or harshly lit personas;
+  - (b) a user-facing "stronger likeness" switch that turns r6b on per persona;
+  - (c) more 2D work on the cheek tone (separating the beard from skin in the metric and the loop first).
+
+**Deviations:**
+- The load-time harshness measure was dropped for the runtime loop (above). The user asked for a load-time measure; only the side-light and colour-cast parts are measured at load.
+- New settings: `toneBudget` and `illuminationRadius` (which fixes the radius instead of the loop).
+- The defaults were not flipped, because the verification did not pass. The flip is prepared but not applied.
+
 ---
 
 ## Phase R7 — Neural renderer (separate approval required)
