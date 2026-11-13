@@ -120,9 +120,10 @@ async function main() {
       browser: args.browser,
       software: false,
       headed: args.headed,
-      extraArgs: args.live ? [] : ['--use-fake-device-for-media-stream', `--use-file-for-fake-video-capture=${args.video}`],
+      // Live: a maximised window that follows the screen size, so the dialog and its buttons are fully visible.
+      extraArgs: args.live ? ['--start-maximized'] : ['--use-fake-device-for-media-stream', `--use-file-for-fake-video-capture=${args.video}`],
     });
-    const page = await (await browser.newContext({ viewport: { width: 1400, height: 1000 } })).newPage();
+    const page = await (await browser.newContext(args.live ? { viewport: null } : { viewport: { width: 1400, height: 1000 } })).newPage();
     const pageErrors: string[] = [];
     page.on('pageerror', (e) => pageErrors.push(String(e).slice(0, 200)));
     await driveAppShell(page, url, 'guidedEnrollment=1');
@@ -162,7 +163,20 @@ async function main() {
         if (page.isClosed()) break;
         await sleep(500);
       }
-      if (!last || last.phase !== 'saved') throw new Error('the enrollment was not signed and saved; nothing was exported');
+      if (!last || last.phase !== 'saved') {
+        // Say where it stopped, so a step that would not pass can be diagnosed.
+        if (last) {
+          const c = last.checks ? Object.entries(last.checks).map(([k, ok]) => `${k} ${ok ? 'ok' : 'NOT ok'}`).join(', ') : 'no camera frame';
+          const v = last.live ? `yaw ${last.live.yaw.toFixed(1)}, pitch ${last.live.pitch.toFixed(1)}, mouth ${last.live.mar.toFixed(2)}, smile ${last.live.smile.toFixed(2)}, sharpness ${last.live.sharpness?.toFixed(1) ?? '-'}, luma ${last.live.meanLuma?.toFixed(0) ?? '-'}` : 'no live values';
+          const f = last.shots.find((x) => x.stepId === 'frontal');
+          const fp = f ? f.matrixPose ?? f.pose : null;
+          console.log(`stopped in phase "${last.phase}"${last.stepId ? `, step "${last.stepId}"` : ''} with ${last.shots.length} of ${steps.length} shots (${page.isClosed() ? 'the window was closed' : Date.now() >= deadline ? 'timed out' : 'ended'})`);
+          console.log(`  last checks: ${c}`);
+          console.log(`  last hint: ${last.hint ?? 'none'}${last.error ? `; dialog error: ${last.error}` : ''}`);
+          console.log(`  last live values: ${v}${fp ? `; frontal baseline yaw ${fp.yaw.toFixed(1)}, pitch ${fp.pitch.toFixed(1)}` : ''}`);
+        }
+        throw new Error('the enrollment was not signed and saved; nothing was exported');
+      }
       final = last;
       saved = true;
     } else {
