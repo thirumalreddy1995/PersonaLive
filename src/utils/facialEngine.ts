@@ -58,6 +58,7 @@ import {
   applyPerspectiveForeshortening,
   applySmileBias,
   applySpeechAnatomy,
+  boundaryFeatherWeights,
   buildFaceTopology,
   computeKinematics,
   FaceTopology,
@@ -520,6 +521,7 @@ export class RealtimeFacialEngine {
     if (prev.eyePassThroughRadius !== settings.eyePassThroughRadius) {
       this.warp.setEyeFade(eyeFadeWeights(this.topology, settings.eyePassThroughRadius));
     }
+    if ((prev.boundaryFeather ?? 1) !== (settings.boundaryFeather ?? 1)) this.applyBoundaryFeather();
     if (prev.personaTextureSize !== settings.personaTextureSize && this.personaImage && realismFlags.get().personaCrop) {
       void this.preparePersona();
     }
@@ -871,6 +873,12 @@ export class RealtimeFacialEngine {
     const uv = this.foreheadOn ? this.collapsedExtension(kf.landmarks) : kf.landmarks;
     this.keyUv.set(key, uv);
     return uv;
+  }
+
+  /** R6 (setting boundaryFeather): the scaled boundary feather for the current topology; 1 keeps the topology's own. */
+  private applyBoundaryFeather() {
+    const width = this.settings.boundaryFeather ?? 1;
+    this.warp.setBoundaryFeather(width === 1 ? null : boundaryFeatherWeights(this.topology, width));
   }
 
   private getSource(): { source: HTMLVideoElement | HTMLCanvasElement; width: number; height: number; mirror: boolean } | null {
@@ -1442,7 +1450,13 @@ export class RealtimeFacialEngine {
       void stats.then(([d, o]) => {
         this.cameraMatchPending = false;
         if (this.disposed || token !== this.personaPrepareToken || !d || !o) return;
-        this.cameraMatch = stepCameraMatch(this.cameraMatch, d, o, 0.35, { steady, hold, median: realismFlags.get().cameraMatchMedian });
+        this.cameraMatch = stepCameraMatch(this.cameraMatch, d, o, 0.35, {
+          steady,
+          hold,
+          median: realismFlags.get().cameraMatchMedian,
+          sharpnessTarget: this.settings.cameraMatchSharpness ?? 1,
+          noiseTarget: this.settings.cameraMatchNoise ?? 1,
+        });
         if (this.cameraMatchWarm > 0) this.cameraMatchWarm--;
         if (this.cameraMatchTrace.length >= 1024) this.cameraMatchTrace.shift();
         this.cameraMatchTrace.push(this.cameraMatch.lodBias);
@@ -1484,6 +1498,7 @@ export class RealtimeFacialEngine {
     this.foreheadShown = null;
     this.warp.setTopology(topology);
     this.warp.setEyeFade(eyeFadeWeights(topology, this.settings.eyePassThroughRadius));
+    this.applyBoundaryFeather();
     // The UV set must cover every vertex the topology indexes until the persona is prepared again.
     const uvs = this.warp.personaUvs;
     if (changed && on && uvs && uvs.length < EXT_VERTEX_COUNT * 2) this.warp.updateUVs(this.collapsedExtension(uvs));

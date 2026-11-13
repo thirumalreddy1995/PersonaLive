@@ -7,6 +7,7 @@ import {
   applyPerspectiveForeshortening,
   applySmileBias,
   applySpeechAnatomy,
+  boundaryFeatherWeights,
   buildFaceTopology,
   closedLipMaskForZone,
   computeKinematics,
@@ -85,6 +86,24 @@ test('feather weights are 0 on the face oval and 1 in the interior', () => {
   assert.equal(topo.featherWeights[LM.MOUTH.upperInner], 1);
   const ring1 = topo.featherWeights.filter((w) => w > 0 && w < 1).length;
   assert.ok(ring1 > 20, 'there should be a soft transition ring');
+});
+
+test('boundaryFeatherWeights: width 1 is the built-in feather, narrower and wider stretch the same curve (R6)', () => {
+  const topo = buildFaceTopology(TESSELLATION, OVAL, 468);
+  assert.deepEqual(Array.from(boundaryFeatherWeights(topo, 1)), Array.from(topo.featherWeights));
+  const narrow = boundaryFeatherWeights(topo, 0.6);
+  const wide = boundaryFeatherWeights(topo, 1.5);
+  for (let v = 0; v < topo.vertexCount; v++) {
+    // The oval stays transparent and the deep interior opaque at every width.
+    if (topo.ovalRingDistance[v] === 0) assert.equal(narrow[v] + wide[v], 0);
+    assert.ok(narrow[v] >= topo.featherWeights[v] - 1e-6 && wide[v] <= topo.featherWeights[v] + 1e-6, `vertex ${v}`);
+    assert.ok(narrow[v] >= 0 && narrow[v] <= 1 && wide[v] >= 0 && wide[v] <= 1);
+  }
+  const ring = (d: number) => Array.from(topo.ovalRingDistance).findIndex((x) => x === d);
+  assert.equal(narrow[ring(3)], 1, 'narrow: opaque after three rings');
+  assert.ok(wide[ring(5)] < 1 && wide[ring(5)] > 0.6, 'wide: still feathering at ring five');
+  assert.equal(narrow[LM.NOSE_TIP], 1);
+  assert.equal(wide[LM.NOSE_TIP], 1);
 });
 
 function syntheticFace(options: { eyesOpen: boolean; mouthOpen: boolean }): Float32Array {

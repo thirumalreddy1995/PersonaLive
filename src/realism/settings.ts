@@ -24,6 +24,9 @@ const NUMERIC_KEYS: ReadonlyArray<SettingKey> = [
   'rigidPoseBeta',
   'skinToneMatch',
   'relightRadius',
+  'boundaryFeather',
+  'cameraMatchSharpness',
+  'cameraMatchNoise',
 ];
 const BOOLEAN_KEYS: ReadonlyArray<SettingKey> = [
   'segmentCpu',

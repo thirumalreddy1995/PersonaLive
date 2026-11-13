@@ -10,8 +10,17 @@
  * review-only, carries no consent record, and a persona loaded from it runs with a pending record
  * that only a review build activates. Nothing is written outside realism-review/ (gitignored).
  *
+ * With --live a person does the enrollment at the real webcam instead: the script opens a visible
+ * Chrome, starts the camera and opens the dialog, then touches nothing. The person at the camera
+ * reads the consent text, types their own name, ticks the attestation themselves and follows the
+ * seven prompts; when they press "Sign and save", the script exports the shots (review-only, like
+ * the automated export: the signed record stays in that browser session and is not written out).
+ *
+ *   npm run realism:enroll -- --live --url http://127.0.0.1:4392/ --out realism-review/enrolled/<name> --category men
+ *
  * Options:
- *   --video <file>        the recording behind the fake camera (required)
+ *   --live                a person at the real webcam does the enrollment; --video is not used
+ *   --video <file>        the recording behind the fake camera (required without --live)
  *   --out <dir>           export folder (default realism-review/enrolled/<date>)
  *   --name <text>         name typed into the dialog (default "Automated enrollment test")
  *   --category <men|women>   default men
@@ -38,6 +47,7 @@ interface Args {
   name: string;
   category: 'men' | 'women';
   stepTimeoutMs: number;
+  live: boolean;
   startPose: { yaw: number; pitch: number } | null;
   url: string | null;
   browser: string;
@@ -51,6 +61,7 @@ function parseArgs(argv: string[]): Args {
     name: 'Automated enrollment test',
     category: 'men',
     stepTimeoutMs: 45000,
+    live: false,
     startPose: null,
     url: null,
     browser: 'chrome',
@@ -76,12 +87,21 @@ function parseArgs(argv: string[]): Args {
       if (!Number.isFinite(yaw) || !Number.isFinite(pitch)) throw new Error('--start-pose takes yaw,pitch in degrees');
       a.startPose = { yaw, pitch };
     }
+    else if (k === '--live') a.live = true;
     else if (k === '--url') a.url = next();
     else if (k === '--browser') a.browser = next();
     else if (k === '--headed') a.headed = true;
     else throw new Error(`Unknown option ${k}`);
   }
-  if (!a.video) throw new Error('--video is required (.mjpeg or .y4m)');
+  if (a.live) {
+    if (a.video) throw new Error('--live uses the real webcam; do not pass --video');
+    a.headed = true;
+    if (a.name === 'Automated enrollment test') a.name = 'Live enrollment';
+    const rel = path.relative(REVIEW_DIR, a.out);
+    if (rel.startsWith('..') || path.isAbsolute(rel)) throw new Error('--out must be inside realism-review/ (the photos are never committed)');
+    return a;
+  }
+  if (!a.video) throw new Error('--video is required (.mjpeg or .y4m), or use --live');
   if (!fs.existsSync(a.video)) throw new Error(`${a.video} not found`);
   if (!/\.(mjpeg|y4m)$/i.test(a.video)) throw new Error("Chrome's fake camera reads .mjpeg or .y4m files only");
   const rel = path.relative(REVIEW_DIR, a.out);
@@ -100,7 +120,7 @@ async function main() {
       browser: args.browser,
       software: false,
       headed: args.headed,
-      extraArgs: ['--use-fake-device-for-media-stream', `--use-file-for-fake-video-capture=${args.video}`],
+      extraArgs: args.live ? [] : ['--use-fake-device-for-media-stream', `--use-file-for-fake-video-capture=${args.video}`],
     });
     const page = await (await browser.newContext({ viewport: { width: 1400, height: 1000 } })).newPage();
     const pageErrors: string[] = [];
@@ -115,6 +135,37 @@ async function main() {
     await page.getByRole('button', { name: /Upload Photo/i }).first().click({ timeout: 10000 });
     await page.getByTestId('open-guided-enrollment').click({ timeout: 10000 });
 
+    const refusals: EnrollmentRefusal[] = [];
+    const took: Array<{ stepId: string; waitedMs: number }> = [];
+    let saved = false;
+    let final: EnrollmentDebugSnapshot;
+    if (args.live) {
+      // The person at the camera does everything from here; the script only watches.
+      console.log('The enrollment dialog is open in the Chrome window. The person whose face will be used should now:');
+      console.log('  1. read the consent text, type their own name and tick "I am the person at this camera" themselves;');
+      console.log('  2. press "I agree" and follow the seven prompts (each photo is taken automatically after a short still hold);');
+      console.log('  3. choose Man/Woman and press "Sign and save this face".');
+      console.log('Waiting up to 15 minutes. Closing the dialog or the window cancels; nothing is exported then.');
+      const deadline = Date.now() + 15 * 60 * 1000;
+      let last: EnrollmentDebugSnapshot | null = null;
+      let seen = 0;
+      while (Date.now() < deadline) {
+        const s = await snapshot().catch(() => null);
+        if (s) {
+          last = s;
+          if (s.shots.length !== seen) {
+            seen = s.shots.length;
+            console.log(`  ${seen} of ${steps.length} shots taken`);
+          }
+          if (s.phase === 'saved') break;
+        }
+        if (page.isClosed()) break;
+        await sleep(500);
+      }
+      if (!last || last.phase !== 'saved') throw new Error('the enrollment was not signed and saved; nothing was exported');
+      final = last;
+      saved = true;
+    } else {
     // Consent: the start button must refuse without the name and the attestation.
     await page.getByTestId('enrollment-start').click();
     const refusedEmpty = (await page.getByTestId('enrollment-error').textContent({ timeout: 5000 })) ?? '';
@@ -137,9 +188,7 @@ async function main() {
 
     // Capture: the dialog takes each shot itself once its checks hold. A step that never passes is
     // logged as refused and the next missing one is selected, as a person would by clicking its tile.
-    const refusals: EnrollmentRefusal[] = [];
     const skipped = new Set<string>();
-    const took: Array<{ stepId: string; waitedMs: number }> = [];
     let current: string | null = null;
     let since = Date.now();
     let tally = new StepTally();
@@ -171,8 +220,7 @@ async function main() {
     }
 
     // Review and save (only reachable with all shots).
-    let saved = false;
-    let final = (await snapshot())!;
+    final = (await snapshot())!;
     if (final.phase === 'review') {
       await page.getByTestId('enrollment-review').getByRole('button', { name: args.category === 'men' ? 'Man' : 'Woman', exact: true }).click();
       await page.getByTestId('enrollment-save').click();
@@ -185,6 +233,7 @@ async function main() {
       console.log(`  the set is incomplete (${final.shots.length} of ${steps.length}); the save button is ${saveVisible ? 'VISIBLE (unexpected)' : 'not offered'}`);
       if (saveVisible) throw new Error('the dialog offers saving an incomplete reference set');
     }
+    }
 
     if (!final.shots.some((x) => x.stepId === 'frontal')) throw new Error('no frontal shot was taken; nothing to export');
     const exported = buildEnrollmentExport({
@@ -194,8 +243,8 @@ async function main() {
       saved,
       name: args.name,
       category: args.category,
-      camera: 'fake-device',
-      cameraFile: path.basename(args.video),
+      camera: args.live ? 'live' : 'fake-device',
+      cameraFile: args.live ? null : path.basename(args.video),
       createdAt: new Date().toISOString(),
     });
     fs.mkdirSync(args.out, { recursive: true });

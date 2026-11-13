@@ -1523,7 +1523,7 @@ export class MeshWarpRenderer {
     gl.bindBuffer(gl.ELEMENT_ARRAY_BUFFER, r.eyeIndexBuffer);
     gl.bufferData(gl.ELEMENT_ARRAY_BUFFER, topology.eyeTriangles, gl.STATIC_DRAW);
     gl.bindBuffer(gl.ARRAY_BUFFER, r.featherBuffer);
-    gl.bufferData(gl.ARRAY_BUFFER, topology.featherWeights, gl.STATIC_DRAW);
+    gl.bufferData(gl.ARRAY_BUFFER, this.boundaryFeather && this.boundaryFeather.length === topology.vertexCount ? this.boundaryFeather : topology.featherWeights, gl.STATIC_DRAW);
     gl.bindBuffer(gl.ARRAY_BUFFER, r.lipBuffer);
     gl.bufferData(gl.ARRAY_BUFFER, topology.lipWeights, gl.STATIC_DRAW);
     gl.bindBuffer(gl.ARRAY_BUFFER, r.lipZoneBuffer);
@@ -1606,6 +1606,17 @@ export class MeshWarpRenderer {
   }
 
   /** Per-vertex eye pass-through weights (see eyeFadeWeights); scaled per frame by WarpFrameOptions.eyeFade. */
+  /** R6 (setting boundaryFeather): per-vertex boundary feather replacing the topology's; null restores it. WebGL paths only. */
+  private boundaryFeather: Float32Array | null = null;
+  setBoundaryFeather(weights: Float32Array | null) {
+    this.boundaryFeather = weights;
+    const gl = this.gl;
+    if (gl && this.resources && this.glReady && this.topology) {
+      gl.bindBuffer(gl.ARRAY_BUFFER, this.resources.featherBuffer);
+      gl.bufferData(gl.ARRAY_BUFFER, weights && weights.length === this.topology.vertexCount ? weights : this.topology.featherWeights, gl.STATIC_DRAW);
+    }
+  }
+
   setEyeFade(weights: Float32Array) {
     this.eyeFadeWeights = weights;
     if (this.gl && this.resources && this.glReady) this.uploadEyeFade(this.gl, this.resources, weights);

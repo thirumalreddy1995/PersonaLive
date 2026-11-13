@@ -39,6 +39,10 @@ export interface CameraMatchStepOptions {
    * turns within a few updates when the output really is too sharp or too soft.
    */
   median?: boolean;
+  /** R6 (setting cameraMatchSharpness): the output/camera sharpness ratio the loop aims for; 1 = match (default). */
+  sharpnessTarget?: number;
+  /** R6 (setting cameraMatchNoise): the output/camera noise ratio the loop aims for; 1 = match (default). */
+  noiseTarget?: number;
 }
 
 /** Median mode: how many readings the error is taken from, and how many must exist before anything moves. */
@@ -102,22 +106,28 @@ export function stepCameraMatch(state: CameraMatchState, driver: FaceStats, outp
   if (driver.samples < 64 || output.samples < 64) return next;
   if (opts.hold) return next;
   const eps = 1e-3;
+  // The targets shift what "matched" means: the error is taken against the camera's value times the target.
+  const sharpnessTarget = clamp(opts.sharpnessTarget ?? 1, 0.25, 4);
+  const noiseTarget = clamp(opts.noiseTarget ?? 1, 0, 3);
+  const targetLog = Math.log(sharpnessTarget);
   // Sharpness: positive error = output sharper than the camera → blur (LOD bias); negative → sharpen.
   // The raw log ratio jumps with motion blur on head turns, so it is smoothed before it drives
   // anything, and only one of the two opposing controls moves away from zero at a time.
   let err: number;
+  // Median mode: the noise control still follows the camera while the sharpness controls rest.
+  let moveSharpness = true;
   if (opts.median) {
-    const raw = Math.log((output.laplacianVariance + eps) / (driver.laplacianVariance + eps));
+    const raw = Math.log((output.laplacianVariance + eps) / (driver.laplacianVariance + eps)) - targetLog;
     const history = [...(state.ratioHistory ?? []), raw].slice(-MEDIAN_WINDOW);
     next.ratioHistory = history;
     if (history.length < MEDIAN_MIN_SAMPLES) return next;
     err = median(history);
     next.errEma = err;
-    if (Math.abs(err) < STEADY_DEADBAND) return next;
+    if (Math.abs(err) < STEADY_DEADBAND) moveSharpness = false;
     // Anti-windup: a control only moves while the newest reading still points the same way as
     // the median. Once the output stops being too soft (or too sharp) the integration stops at
     // once, instead of running on until the window has turned over.
-    if (raw * Math.sign(err) < STEADY_DEADBAND * 0.5) return next;
+    if (raw * Math.sign(err) < STEADY_DEADBAND * 0.5) moveSharpness = false;
   } else if (opts.steady) {
     const dLog = Math.log(driver.laplacianVariance + eps);
     const oLog = Math.log(output.laplacianVariance + eps);
@@ -125,15 +135,17 @@ export function stepCameraMatch(state: CameraMatchState, driver: FaceStats, outp
     const o = state.outputLogEma ?? null;
     next.driverLogEma = d === null ? dLog : d + (dLog - d) * STEADY_ALPHA;
     next.outputLogEma = o === null ? oLog : o + (oLog - o) * STEADY_ALPHA;
-    err = next.outputLogEma - next.driverLogEma;
+    err = next.outputLogEma - next.driverLogEma - targetLog;
     next.errEma = err;
     if (Math.abs(err) < STEADY_DEADBAND) return next;
   } else {
-    const raw = Math.log((output.laplacianVariance + eps) / (driver.laplacianVariance + eps));
+    const raw = Math.log((output.laplacianVariance + eps) / (driver.laplacianVariance + eps)) - targetLog;
     err = state.updates === 0 ? raw : state.errEma + (raw - state.errEma) * 0.5;
     next.errEma = err;
   }
-  if (err > 0) {
+  if (!moveSharpness) {
+    // resting
+  } else if (err > 0) {
     if (state.sharpen > 0) next.sharpen = clamp(state.sharpen - gain * err, ...CAMERA_MATCH_LIMITS.sharpen);
     else next.lodBias = clamp(state.lodBias + gain * err, ...CAMERA_MATCH_LIMITS.lodBias);
   } else {
@@ -141,7 +153,7 @@ export function stepCameraMatch(state: CameraMatchState, driver: FaceStats, outp
     else next.sharpen = clamp(state.sharpen - gain * err * 0.5, ...CAMERA_MATCH_LIMITS.sharpen);
   }
   // Noise: match the camera's high-pass sigma (0..255 → 0..1 units).
-  const noiseErr = (driver.noiseMad - output.noiseMad) / 255;
+  const noiseErr = (driver.noiseMad * noiseTarget - output.noiseMad) / 255;
   next.noiseSigma = clamp(state.noiseSigma + gain * noiseErr, ...CAMERA_MATCH_LIMITS.noiseSigma);
   return next;
 }

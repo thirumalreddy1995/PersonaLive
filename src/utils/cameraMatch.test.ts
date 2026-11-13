@@ -259,3 +259,29 @@ test('median camera match (R6): no reading for the first frames after a change, 
   s = stepCameraMatch(s, stats(40, 1), stats(10, 1), 0.35, { steady: true, median: true });
   assert.ok(s.sharpen > rising);
 });
+
+test('camera match targets (R6): the loop aims for the set sharpness and noise ratios', () => {
+  // Output and camera equally sharp: with target 1 nothing moves; with target 1.5 the loop sharpens; with 0.7 it blurs.
+  const step = (sharpnessTarget: number, noiseTarget = 1) => {
+    let s = initialCameraMatch();
+    for (let i = 0; i < 8; i++) s = stepCameraMatch(s, stats(30, 2), stats(30, 2), 0.35, { steady: true, median: true, sharpnessTarget, noiseTarget });
+    return s;
+  };
+  assert.equal(step(1).sharpen + step(1).lodBias, 0);
+  assert.ok(step(1.5).sharpen > 0.2 && step(1.5).lodBias === 0);
+  assert.ok(step(0.7).lodBias > 0.2 && step(0.7).sharpen === 0);
+  // An output already 1.5x sharper satisfies a 1.5 target.
+  let s = initialCameraMatch();
+  for (let i = 0; i < 8; i++) s = stepCameraMatch(s, stats(30, 2), stats(45, 2), 0.35, { steady: true, median: true, sharpnessTarget: 1.5 });
+  assert.equal(s.sharpen + s.lodBias, 0);
+  // Noise: target 1 leaves matched noise alone, 1.5 adds some, 0 adds none even when the camera is noisier.
+  assert.equal(step(1, 1).noiseSigma, 0);
+  assert.ok(step(1, 1.5).noiseSigma > 0);
+  let q = initialCameraMatch();
+  for (let i = 0; i < 8; i++) q = stepCameraMatch(q, stats(30, 6), stats(30, 2), 0.35, { steady: true, noiseTarget: 0 });
+  assert.equal(q.noiseSigma, 0);
+  // The old loops honour the target too.
+  let e = initialCameraMatch();
+  for (let i = 0; i < 12; i++) e = stepCameraMatch(e, stats(30, 2), stats(30, 2), 0.35, { steady: true, sharpnessTarget: 1.5 });
+  assert.ok(e.sharpen > 0.1);
+});

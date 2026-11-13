@@ -176,6 +176,31 @@ export const TONE_WEIGHT_RINGS = 10;
  * without a colour step), falling to TONE_WEIGHT_CENTRE a few rings inward.
  */
 /** Rings from the face oval over which the R4 two-band blend fades the low frequencies (~12% of face width) and the detail (~3%). */
+/** The boundary feather by ring distance from the face oval (ring 0 = the oval itself, 5 and beyond = opaque). */
+const BOUNDARY_FEATHER_CURVE = [0, 0.22, 0.5, 0.78, 0.92, 1];
+
+/**
+ * Per-vertex boundary feather with its width scaled (R6 setting boundaryFeather): 1 reproduces
+ * `topology.featherWeights` exactly; 0.6 reaches full opacity after three rings instead of five,
+ * 1.5 after seven and a half. The curve is the same, stretched along the ring distance.
+ */
+export function boundaryFeatherWeights(topology: FaceTopology, width: number): Float32Array {
+  const scale = clamp(width, 0.25, 3);
+  const out = new Float32Array(topology.vertexCount);
+  const last = BOUNDARY_FEATHER_CURVE.length - 1;
+  for (let v = 0; v < topology.vertexCount; v++) {
+    const d = topology.ovalRingDistance[v];
+    if (d < 0) {
+      out[v] = 1;
+      continue;
+    }
+    const x = Math.min(d / scale, last);
+    const i = Math.min(Math.floor(x), last - 1);
+    out[v] = BOUNDARY_FEATHER_CURVE[i] + (BOUNDARY_FEATHER_CURVE[i + 1] - BOUNDARY_FEATHER_CURVE[i]) * (x - i);
+  }
+  return out;
+}
+
 export const WIDE_FEATHER_RINGS = 5;
 export const NARROW_FEATHER_RINGS = 1.5;
 

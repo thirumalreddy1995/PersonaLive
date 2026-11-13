@@ -154,6 +154,12 @@ export interface TransformationSettings {
   skinToneMatch: number;
   /** R3 relighting low-pass sigma as a share of face width (0.02 measured on the persona grid; 5% let harshly lit personas keep their own shading, the plan's 6–10% darkened the cheeks). */
   relightRadius: number;
+  /** R6: width of the feather at the face boundary relative to the built-in one (1 = five mesh rings; 0.6 narrower, 1.5 wider). */
+  boundaryFeather?: number;
+  /** R6: output/camera sharpness ratio the camera-match loop aims for (1 = match the camera). */
+  cameraMatchSharpness?: number;
+  /** R6: output/camera noise ratio the camera-match loop aims for (1 = match the camera). */
+  cameraMatchNoise?: number;
   lightingAdaptation: boolean;
   preserveFacialHair: boolean;
   showLandmarkOverlay: boolean;
