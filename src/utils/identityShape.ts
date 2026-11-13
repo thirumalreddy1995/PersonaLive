@@ -21,6 +21,8 @@ const smooth = (e0: number, e1: number, x: number) => {
   const t = clamp((x - e0) / (e1 - e0), 0, 1);
   return t * t * (3 - 2 * t);
 };
+/** Hermite step from e0 to e1 (0 below e0, 1 above e1), like GLSL smoothstep. */
+export const smoothstep = smooth;
 
 /** Mesh vertices (the 478 tracked points include 10 iris points that are not part of the surface). */
 export const MESH_POINTS = 468;
@@ -443,6 +445,66 @@ export function applyJawExtension(points: Float32Array, plan: JawPlan, depths: A
   return true;
 }
 
+// ------------------------------------------------------------------------------------------------
+// Seam fade (flag seamFade)
+// ------------------------------------------------------------------------------------------------
+
+/**
+ * The sides of the face (canonical lateral beyond 4, between the mouth corners and the brows,
+ * within three rings of the oval): where a turned enrollment shot's far side can sit on its
+ * silhouette, so its UVs land on the wall or hair behind the persona.
+ */
+export function sideRegionVertices(topology: FaceTopology): Int32Array {
+  const out: number[] = [];
+  const n = Math.min(topology.vertexCount, MESH_POINTS);
+  for (let v = 0; v < n; v++) {
+    const d = topology.ovalRingDistance[v];
+    if (d < 0 || d > 3) continue;
+    const x = canonicalLateral(v);
+    const y = canonicalUp(v);
+    if (Math.abs(x) > 4 && y > -3.5 && y < 4.6) out.push(v);
+  }
+  return Int32Array.from(out);
+}
+
+/**
+ * Per-vertex weight that fades the persona where a photo's UVs fall off its face skin on the
+ * sides (sideRegionVertices): the share of skin-coloured pixels in a small patch around the UV,
+ * mapped 0.25..0.65 → 0..1. 1 everywhere else. `uvPx` are the photo's landmark pixels.
+ */
+export function silhouetteWeights(sample: RgbSampler, uvPx: ArrayLike<number>, topology: FaceTopology, side: ArrayLike<number> = sideRegionVertices(topology)): Float32Array {
+  const out = new Float32Array(topology.vertexCount).fill(1);
+  const f = eyeFrame(uvPx);
+  if (!f) return out;
+  let lum = 0;
+  let red = 0;
+  let k = 0;
+  for (const i of [50, 280, 205, 425, 117, 346]) {
+    const c = sample(uvPx[i * 2], uvPx[i * 2 + 1]);
+    if (!c) continue;
+    lum += linearLuma(c);
+    red += redness(c);
+    k++;
+  }
+  if (!k) return out;
+  lum /= k;
+  red /= k;
+  const r = 0.05 * f.iod;
+  const offsets: Array<[number, number]> = [[0, 0], [r, 0], [-r, 0], [0, r], [0, -r], [r, r], [-r, -r], [r, -r], [-r, r]];
+  for (let s = 0; s < side.length; s++) {
+    const v = side[s];
+    let skin = 0;
+    let seen = 0;
+    for (const [dx, dy] of offsets) {
+      const c = sample(uvPx[v * 2] + dx, uvPx[v * 2 + 1] + dy);
+      seen++;
+      if (c && redness(c) > 0.55 * red && linearLuma(c) > 0.25 * lum && linearLuma(c) < 2.5 * lum) skin++;
+    }
+    out[v] = smooth(0.25, 0.65, skin / Math.max(1, seen));
+  }
+  return out;
+}
+
 /** True when any jaw depth is large enough to matter (a clean-shaven persona leaves the mesh alone). */
 export function hasBeard(depths: ArrayLike<number>, min = 0.05): boolean {
   for (let i = 0; i < depths.length; i++) if (depths[i] >= min) return true;
@@ -495,7 +557,12 @@ export class LidClosure {
   private open: [number, number] = [0, 0];
   private value: [number, number] = [0, 0];
 
-  update(earLeft: number, earRight: number, gazeY: number): [number, number] {
+  /**
+   * `blink` and `lookDown` are MediaPipe's eyeBlink / eyeLookDown blendshapes per eye ([left,
+   * right], 0..1) when the tracker provides them: they follow a lowered lid more reliably than
+   * the aspect ratio and the iris position alone.
+   */
+  update(earLeft: number, earRight: number, gazeY: number, blink?: readonly [number, number], lookDown?: readonly [number, number], headDown = 0): [number, number] {
     const ears = [earLeft, earRight];
     const gaze = smooth(0.1, 0.4, gazeY) * 0.9;
     for (let e = 0; e < 2; e++) {
@@ -504,8 +571,11 @@ export class LidClosure {
       if (this.open[e] === 0) this.open[e] = ear;
       else this.open[e] += (ear - this.open[e]) * (ear > this.open[e] ? 0.2 : 0.002);
       const closed = smooth(0.1, 0.45, 1 - ear / Math.max(1e-4, this.open[e]));
-      const target = Math.max(closed, gaze);
-      this.value[e] += (target - this.value[e]) * 0.5;
+      const bs = Math.max(smooth(0.25, 0.7, blink?.[e] ?? 0), smooth(0.2, 0.6, lookDown?.[e] ?? 0) * 0.9);
+      // Chin down: the camera sees more of the upper lid even with the eyes looking ahead.
+      const target = Math.max(closed, gaze, bs, clamp(headDown, 0, 1) * 0.9);
+      // Close fast, open a little slower: a lowered lid must not show the persona's crease for a frame.
+      this.value[e] += (target - this.value[e]) * (target > this.value[e] ? 0.7 : 0.4);
     }
     return [this.value[0], this.value[1]];
   }

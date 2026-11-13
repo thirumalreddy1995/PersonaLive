@@ -928,7 +928,7 @@ For this pair, with very different face shapes and facial hair, items a–h will
 
 ## Phase R6b — Identity fixes from the visual audit (2D, any laptop)
 
-R7 is on hold. The goal is a convincing browser app on a standard laptop (this one: Intel UHD, no sidecar). Branch `realism/r6b-identity`. Every change sits behind a flag, all off by default; `--flags r6b` turns all five on.
+R7 is on hold. The goal is a convincing browser app on a standard laptop (this one: Intel UHD, no sidecar). Branch `realism/r6b-identity`. Every change sits behind a flag, all off by default; `--flags r6b` turns all of them on (five here, six after the polish round below added `seamFade`).
 
 ### What was built
 - **Persona photo in every review:**
@@ -998,6 +998,114 @@ R7 is on hold. The goal is a convincing browser app on a standard laptop (this o
 - **Tone match:** 0.3 for the after runs (the default stays 1). The flags stay off by default until a measured comparison on mains and a look at the sheets.
 - **Jaw depth:** limited to the wearer's jaw silhouette (0.18 IOD), because the masks cannot tell a neck from a hand; a full beard onto the neck stays a 2D limit.
 - **Install incident:** during verification, `npm ci` emptied `node_modules` while Vite servers started outside this session held lightningcss open, and the `npm install` fallback then failed (EBUSY). The modules were restored by installing from the lockfile into a scratch folder and copying in only the missing files. The running servers were not touched.
+
+### R6b polish and mains verification (2026-11-13, later): flags stay off
+
+Audit items 2–8 above, fixed inside the same flags plus one new flag (`seamFade`). All six stay off by default.
+
+**What changed:**
+- **Tone and tint:**
+  - `relightIllumination`: brightness follows the wearer's mostly (65% in the centre, 90% at the boundary: it is mostly the camera's exposure). The hue still moves only by `skinToneMatch`, on skin only.
+  - `skinTint`: the tint draws only where the camera pixel is skin-coloured as well as inside the mask, so lagging masks no longer tint the wall.
+- **Beard and jaw:**
+  - Dark, non-red persona pixels are sampled without the camera-match blur (hair detail 0.75).
+  - The jaw's narrow feather and face-skin band blend back to the plain feather as the head turns (0.1 steps).
+  - `personaProportions` fades out on turns and tilts; it caused the turn notch.
+- **Eyes, lips and glare:**
+  - Lid closure also uses the blink and look-down blendshapes and chin-down pitch.
+  - Past 12–28° of look-up the real lips show.
+  - Glare is scaled toward a soft cap instead of clipped.
+  - New `seamFade` (reloads the persona): on the sides of the face, the persona fades where a photo's UVs fall off its face skin.
+- **Tests:** 234 pass (3 new: silhouette weights, blendshape and chin-down lid closure).
+
+**Setup:**
+- Frozen build `dist-r6c`; laptop **on mains** for every run (Windows status 2, `power: ac` in every report).
+- "r6" = defaults; "r6b" = `--flags r6b --settings skinToneMatch=0.3`.
+- Runs:
+  - second person's seven-shot enrollment on the clip author, clips A–F: `r6c-r6-me2bro` / `r6c-r6b-me2bro`;
+  - clip author's enrollment on the second person (`G.mp4`): `r6c-r6-bro2me` / `r6c-r6b-bro2me`;
+  - 28 personas × clips A, B: `r6c-grid-r6` / `r6c-grid-r6b`.
+
+| Clip | fps | frame p95 (ms) | output↔persona | output↔wearer | margin | hand leak |
+|---|---|---|---|---|---|---|
+| A | 29.6 → 29.4 | 30.6 → 31.2 | .44 → .41 | .70 → .61 | −.25 → −.19 | 0 → 0 |
+| B | 29.1 → 29.5 | 33.9 → 29.6 | .39 → .37 | .73 → .68 | −.34 → −.32 | 2.1% → 1.8% |
+| C | 29.2 → 29.3 | 29.3 → 29.3 | .43 → .40 | .68 → .69 | −.24 → −.29 | 4.6% → 7.2% |
+| D | 28.9 → 29.3 | 25.8 → 30.4 | .50 → .50 | .65 → .62 | −.15 → −.12 | 0 → 0 |
+| E | 29.6 → 29.3 | 30.7 → 31.5 | .43 → .40 | .64 → .68 | −.21 → −.27 | 0 → 0 |
+| F | 29.5 → 29.4 | 35.5 → 30.1 | .51 → .52 | .60 → .58 | −.09 → −.07 | 0.1% → 0 |
+| G (reverse) | 30.0 → 30.0 | 30.1 → 31.8 | .44 → .50 | .69 → .64 | −.25 → −.14 | 0 → 0 |
+
+**Timing:**
+- Every clip and every grid cell runs at 29–30 fps on this Intel UHD laptop.
+- Grid fps: median 29.4 → 29.5, worst 28.7 → 28.9.
+- Grid frame p95: median 30.2 → 30.1 ms, worst 36.8 → 32.7 ms.
+- The warp stage costs 1.3–1.4 ms with the flags and 1.4–1.6 ms without.
+
+**Identity:**
+- Clip author → second person: the margin moves within the noise (±0.05): better on A, B, D and F, worse on C and E.
+- Reverse: −.25 → −.14.
+
+**Persona grid, r6 → r6b:**
+
+| Metric | median | worst 10% |
+|---|---|---|
+| identity margin deficit (lower is better) | 0.38 → 0.23 | 0.55 → 0.39 |
+| output ↔ wearer | 0.63 → 0.51 | 0.75 → 0.60 |
+| \|skin tone gap vs neck\| (ΔE, tolerance 3) | 1.70 → 3.47 | 2.28 → 5.59 |
+| \|skin tone gap vs ears\| (ΔE, tolerance 3) | 0.77 → 2.13 | 1.81 → 5.35 |
+| side shading gap (L) | 1.83 → 5.03 | 2.57 → 8.45 |
+| seam step gap (ΔE, tolerance 1) | 0.01 → 0.50 | 0.54 → 1.70 |
+| \|sharpness gap, interior skin\| | 0.32 → 0.37 | 1.66 → 3.51 |
+| lip error (% face width) | 1.40 → 2.26 | 2.26 → 3.63 |
+| ghost hair / hand leak | 0 / 0 → 0 / 0 | .02 / 0 → .01 / 0 |
+
+- **Lip error** rises by design: the outer lip contour moves half way to the persona's layout.
+- **Relight radius:** the compare tool lists it as changed (→ 2.0). That is only because the illumination relight does not use the auto radius; it is not a real change.
+
+**By eye** (`realism-review/out/r6b-audit6/{A..G}-{1,2}.png`; grid tiles under `r6c-grid-*/personas/`, gitignored):
+- **Fixed:**
+  - On bright frontal frames the face now matches the ears and neck (A).
+  - No tint on the wall beside the cheeks during fast motion (C 2.2 s, 9.8 s).
+  - No jaw notch on turns (B 1.75 s).
+  - No seam by the far eye (B 3.8 s).
+  - Natural lips on look-ups instead of magenta; nostril rims follow the camera's (B 9.8 s, 11.8 s).
+  - No flat glare patch on the nose (B 15.8 s).
+  - The beard has a little more texture.
+  - The reverse direction shows the wearer's eyes, lighter skin and moustache.
+- **Not fixed:**
+  - Pale arcs above both lids when looking down, and a pink line at the nostril (B 13.8 s).
+  - A hard beard edge on a tilted head (C 7.3 s): the jaw blend follows turns, not tilts.
+  - A hard beard edge over the knuckles with a hand under the chin (C 17.4 s; hand leak 4.6% → 7.2%).
+- **Grid:**
+  - About 12 of 28 personas read more like the persona: grey moustaches (p01, p09, p21), make-up (p06, p07), beards (p12, p17).
+  - 8 show the photo's own lighting:
+    - coloured light: orange or red on p08, p13 and p13d, green on p05 and p23;
+    - harsh side light leaving pale or dark patches: p19, p19d, p03 and p24.
+  - p10 loses its wrinkles.
+  - The r6 relight hid the photo's lighting by copying the wearer's low frequencies, which is also why r6 reads as the wearer.
+
+**What still looks fake (ranked):**
+1. **Persona photos with coloured or harsh directional light** (8 of the 28 grid faces): the illumination relight divides the photo's light out only at 10% of face width, so colour casts and shadow-side patches survive. The enrolled pair, shot in ordinary room light, does not show it.
+2. **Head shape is the wearer's:** silhouette, hairline and ears (2D ceiling).
+3. **Eyelid arcs** on downward gaze.
+4. **The beard:**
+   - still a fairly uniform dark mass at webcam resolution;
+   - a hard edge on tilted heads;
+   - drawn over a hand under the chin.
+5. **Face vs neck and ear tone on the grid** (median 3.5 / 2.1 ΔE): the persona keeps its own tone (`skinToneMatch` 0.3), and the tint closes only part of the gap.
+6. **Small:** a faint dark line at the far eye corner on turns (E 20.6 s).
+
+**Recommendation:** do not turn all six on by default yet. The grid's worst 10% regresses on tone and side shading beyond the tolerances, and the cause is item 1. Next round:
+- a photo-lighting check at persona load (side-to-side lightness and hue spread of the persona's skin low pass); where the photo's light is strong, divide it out at a finer scale or move that persona back toward the r6 relight;
+- a tilt-aware jaw blend;
+- a stronger look-down lid pass;
+- then the grid again.
+
+**Deviations:**
+- The grid ran on clips A and B only, as in R6 Part 2.
+- Tone match was 0.3 for the r6b runs; the default stays 1.
+- Stray Vite servers from this folder (ports 4778–4781) were stopped before verification, and `npm ci` then ran clean. npm now holds back install scripts, so Electron's binary was restored from its local cache (`node node_modules/electron/install.js`).
 
 ---
 

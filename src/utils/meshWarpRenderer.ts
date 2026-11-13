@@ -62,6 +62,8 @@ export interface RelightOptions {
   illumination?: boolean;
   /** R6b: compress specular glare baked into the persona photo (needs illumination). */
   specular?: boolean;
+  /** R6b: 0..1 share of the unblurred persona taken on dark, non-red pixels (beard and hair strands). */
+  hairDetail?: number;
 }
 
 /** Frames between driver mean-tone readbacks (a small synchronous readPixels of the 1/RELIGHT_SCALE-scale low pass). */
@@ -78,6 +80,13 @@ export const RELIGHT_SCALE = 4;
  * cheek-vs-neck gap sits inside ±3 ΔE of the wearer's own on all three clips.
  */
 export const RELIGHT_RADIUS_SHARE = 0.02;
+/**
+ * R6b: how far the face's mean skin brightness follows the wearer's (illumination mode): in the
+ * centre and at the boundary. Brightness is mostly the camera's exposure, and a face kept at the
+ * persona photo's brightness read darker than the wearer's ears and neck on well-lit frames.
+ */
+export const ILLUM_LUMA_CENTRE = 0.65;
+export const ILLUM_LUMA_BOUNDARY = 0.9;
 /** R6b: low-pass sigma (share of face width) of the skin-only illumination estimate (flag relightIllumination). */
 export const ILLUMINATION_RADIUS_SHARE = 0.1;
 /** R6b: largest neck/ear tint alpha; kept under 0.5 so the review's leak metrics (alpha ≥ 128) never count it as persona pixels. */
@@ -153,6 +162,8 @@ export interface WarpFrameOptions {
    * illumination and the masks; omitted = off.
    */
   skinTint?: number;
+  /** R6b (flag jawExtension): a wider face-skin ramp in the outer band, so the jaw push fades instead of being cut. */
+  softFaceEdge?: boolean;
 }
 
 /** Face-region pixel statistics from an asynchronous readback. */
@@ -222,6 +233,8 @@ void main() {
 
 const FRAGMENT_SHADER_ES1 = `
 precision highp float;
+#define ILLUM_LUMA_CENTRE ${ILLUM_LUMA_CENTRE.toFixed(3)}
+#define ILLUM_LUMA_BOUNDARY ${ILLUM_LUMA_BOUNDARY.toFixed(3)}
 uniform sampler2D uTexture;
 uniform sampler2D uDriverLow;
 uniform sampler2D uPersonaLow;
@@ -252,6 +265,8 @@ uniform float uIllum;
 uniform vec3 uMeanP;
 uniform vec3 uMeanD;
 uniform float uSpecular;
+uniform float uHairDetail;
+uniform float uSoftFaceEdge;
 uniform vec2 uMotionBlur;
 uniform float uSoftHolesPx;
 uniform sampler2D uSegMask;
@@ -310,6 +325,13 @@ vec4 personaTex(vec2 off, vec2 off2) {
   return mix(a, texture2D(uTexture2, vUv2 + off2, uLodBias), uKeyMix);
 }
 
+// R6b: the persona colour without the camera-match blur (for hair detail).
+vec4 personaTexSharp() {
+  vec4 a = texture2D(uTexture, vUv);
+  if (uKeyMix <= 0.0) return a;
+  return mix(a, texture2D(uTexture2, vUv2), uKeyMix);
+}
+
 void main() {
   // Camera match: a mip LOD bias blurs the persona toward the camera's softness (R2 §4).
   vec4 c = personaTex(vec2(0.0), vec2(0.0));
@@ -324,6 +346,15 @@ void main() {
   }
 #endif
   if (c.a < 0.02) discard;
+  if (uHairDetail > 0.0) {
+    // R6b: beard, brows and hair keep their strands. Dark, non-red persona pixels are taken
+    // without the camera-match blur, which otherwise flattens a full beard into a dark mass.
+    vec4 cs = personaTexSharp();
+    vec3 sl = srgbToLinear(cs.rgb);
+    float hr = (sl.r - sl.b) / max(sl.r + sl.g + sl.b, 1e-4);
+    float hair = (1.0 - smoothstep(0.1, 0.2, hr)) * (1.0 - smoothstep(0.05, 0.2, luma(sl)));
+    c.rgb = mix(c.rgb, cs.rgb, hair * uHairDetail);
+  }
 
   // 1. Unsharp mask with a texel-sized kernel: the fixed-offset R0 version (flag shaderUnsharp)
   //    and the camera-match sharpen amount share it.
@@ -359,21 +390,28 @@ void main() {
       vec3 PL = mix(uMeanP, pl.rgb / max(pl.a, 1e-4), smoothstep(0.02, 0.2, pl.a));
       vec3 DL = mix(uMeanD, dl.rgb / max(dl.a, 1e-4), smoothstep(0.02, 0.2, dl.a));
       if (uSpecular > 0.5) {
-        // Glare baked into the photo (nose tip, forehead): compress what is far brighter than the
-        // skin around it. Lips (teeth) and eyes are left alone.
+        // Glare baked into the photo (nose tip, forehead): what is far brighter than the skin
+        // around it is scaled down toward a soft cap, keeping its own texture and colour (no flat
+        // patch). Lips (teeth) and eyes are left alone.
         float rel = luma(P) / max(luma(PL), 0.002);
-        float k = smoothstep(1.25, 1.8, rel) * (1.0 - clamp(vLip, 0.0, 1.0)) * (1.0 - clamp(vEyeFade, 0.0, 1.0));
-        P = mix(P, PL * (1.25 + max(rel - 1.25, 0.0) * 0.2), k);
+        float cap = 1.35 + max(rel - 1.35, 0.0) * 0.35;
+        float k = smoothstep(1.35, 2.2, rel) * (1.0 - clamp(vLip, 0.0, 1.0)) * (1.0 - clamp(vEyeFade, 0.0, 1.0));
+        P *= mix(1.0, cap / max(rel, 1e-3), k);
       }
       float shadeP = luma(PL) / max(luma(uMeanP), 0.002);
       float shadeD = luma(DL) / max(luma(uMeanD), 0.002);
       float ratio = clamp(shadeD / max(shadeP, 0.05), 0.25, 4.0);
-      float e = clamp(uToneMatch * mix(0.35, 1.0, clamp(vToneWeight, 0.0, 1.0)), 0.0, 1.0);
-      vec3 g = pow(clamp(uMeanD / max(uMeanP, vec3(0.002)), vec3(0.25), vec3(4.0)), vec3(e));
-      // The colour part of the tone match is for skin; beard, hair and brows take only its
-      // brightness, or a neutral beard turns olive when the wearer's skin is lighter and less red.
-      float skinP = smoothstep(0.16, 0.28, (P.r - P.b) / max(P.r + P.g + P.b, 1e-4)) * smoothstep(0.003, 0.015, luma(P));
-      g = mix(vec3(pow(clamp(luma(uMeanD) / max(luma(uMeanP), 0.002), 0.25, 4.0), e)), g, skinP);
+      // Tone: brightness is mostly the camera's exposure, so it follows the wearer's mean skin
+      // brightness by ILLUM_LUMA_* (more at the boundary); the hue moves toward the wearer's by
+      // the skin tone match. The hue part is for skin only: beard, hair and brows take only the
+      // brightness (a neutral beard turns olive otherwise), and the lips keep their own colour.
+      float tw = clamp(vToneWeight, 0.0, 1.0);
+      float eC = clamp(uToneMatch * mix(0.35, 1.0, tw), 0.0, 1.0);
+      float eL = mix(ILLUM_LUMA_CENTRE, ILLUM_LUMA_BOUNDARY, tw);
+      float lr = clamp(luma(uMeanD) / max(luma(uMeanP), 0.002), 0.25, 4.0);
+      vec3 cr = clamp((uMeanD / max(luma(uMeanD), 0.002)) / max(uMeanP / max(luma(uMeanP), 0.002), vec3(0.002)), vec3(0.25), vec3(4.0));
+      float skinP = smoothstep(0.16, 0.28, (P.r - P.b) / max(P.r + P.g + P.b, 1e-4)) * smoothstep(0.003, 0.015, luma(P)) * (1.0 - clamp(vLip, 0.0, 1.0));
+      vec3 g = pow(lr, eL) * mix(vec3(1.0), pow(cr, vec3(eC)), skinP);
       base = linearToSrgb(clamp(P * ratio * g, 0.0, 1.0));
       lowCol = linearToSrgb(clamp(PL * ratio * g, 0.0, 1.0));
       hasLow = 1.0;
@@ -445,7 +483,8 @@ void main() {
     vec4 m = texture2D(uSegMask, clamp(mu, 0.0, 1.0)) * inCrop + vec4(0.0, 0.0, 1.0, 0.0) * (1.0 - inCrop);
     // Face-skin limits the persona only in the outer band (the interior is face by construction);
     // confident hair, hand (body skin) and accessory pixels remove it everywhere.
-    float faceSkin = mix(1.0, smoothstep(0.05, 0.3, m.b), 1.0 - clamp(vFeatherBands.x, 0.0, 1.0));
+    // R6b (jaw extension): a wider ramp, so the pushed beard fades where the wearer's face-skin mask ends instead of being cut.
+    float faceSkin = mix(1.0, smoothstep(mix(0.05, 0.0, uSoftFaceEdge), mix(0.3, 0.65, uSoftFaceEdge), m.b), 1.0 - clamp(vFeatherBands.x, 0.0, 1.0));
     float keep = faceSkin * (1.0 - smoothstep(0.5, 0.85, m.r)) * (1.0 - smoothstep(0.45, 0.8, m.g)) * (1.0 - smoothstep(0.45, 0.8, m.a));
     segKeep = mix(1.0, keep, uSegStrength);
     cranialFalloff = mix(cranialFalloff, 1.0, uSegStrength);
@@ -594,9 +633,13 @@ void main() {
   // Outside the face oval, inside a region that reaches the ears and well down the neck.
   float inner = smoothstep(0.85, 1.05, length(q));
   float outer = 1.0 - smoothstep(0.8, 1.0, length(vec2(q.x / 1.7, q.y > 0.0 ? q.y / 2.6 : q.y / 1.2)));
-  float a = uStrength * skin * inner * outer;
+  vec3 cam = pow(max(texture2D(uTexture, su).rgb, vec3(0.0)), vec3(2.2));
+  // The masks lag fast motion by a few frames: the camera pixel itself must also be skin-coloured
+  // (redder than blue), so a wall or a shirt the mask still calls skin is never tinted.
+  float skinColour = smoothstep(0.12, 0.22, (cam.r - cam.b) / max(cam.r + cam.g + cam.b, 1e-4));
+  float a = uStrength * skin * skinColour * inner * outer;
   if (a < 0.003) discard;
-  vec3 lin = pow(max(texture2D(uTexture, su).rgb, vec3(0.0)), vec3(2.2)) * uGain;
+  vec3 lin = cam * uGain;
   gl_FragColor = vec4(pow(clamp(lin, 0.0, 1.0), vec3(1.0 / 2.2)) * a, a);
 }`;
 
@@ -735,6 +778,8 @@ interface GLResources {
     uMeanP: WebGLUniformLocation | null;
     uMeanD: WebGLUniformLocation | null;
     uSpecular: WebGLUniformLocation | null;
+    uHairDetail: WebGLUniformLocation | null;
+    uSoftFaceEdge: WebGLUniformLocation | null;
     uMotionBlur: WebGLUniformLocation | null;
     uSoftHolesPx: WebGLUniformLocation | null;
     uSegMask: WebGLUniformLocation | null;
@@ -882,13 +927,22 @@ export function meanColour(pixels: ArrayLike<number>, width: number, height: num
 }
 
 /**
- * R6b: per-channel gain for the wearer's neck and ears. The face's mean skin colour sits at
- * persona^(1 − t) · wearer^t at the boundary (t = tone match); the neck is moved to the same point:
- * gain = (persona / wearer)^(1 − t), clamped to 0.5..2.
+ * R6b: per-channel gain for the wearer's neck and ears, toward the face's mean skin colour at its
+ * boundary. That colour takes the wearer's brightness by `lumaMatch` (ILLUM_LUMA_BOUNDARY) and the
+ * wearer's hue by the tone match t, so the neck moves by (persona/wearer brightness)^(1 − lumaMatch)
+ * times (persona/wearer hue)^(1 − t), clamped to 0.5..2.
  */
-export function skinTintGain(persona: readonly number[], wearer: readonly number[], toneMatch: number): [number, number, number] {
-  const k = 1 - Math.min(1, Math.max(0, toneMatch));
-  const g = (i: number) => Math.min(2, Math.max(0.5, Math.pow(Math.max(1e-4, persona[i]) / Math.max(1e-4, wearer[i]), k)));
+export function skinTintGain(persona: readonly number[], wearer: readonly number[], toneMatch: number, lumaMatch = ILLUM_LUMA_BOUNDARY): [number, number, number] {
+  const t = Math.min(1, Math.max(0, toneMatch));
+  const lm = Math.min(1, Math.max(0, lumaMatch));
+  const luma = (c: readonly number[]) => Math.max(1e-4, 0.2126 * c[0] + 0.7152 * c[1] + 0.0722 * c[2]);
+  const lp = luma(persona);
+  const lw = luma(wearer);
+  const lumGain = Math.pow(lp / lw, 1 - lm);
+  const g = (i: number) => {
+    const hue = Math.max(1e-4, persona[i]) / lp / (Math.max(1e-4, wearer[i]) / lw);
+    return Math.min(2, Math.max(0.5, lumGain * Math.pow(hue, 1 - t)));
+  };
   return [g(0), g(1), g(2)];
 }
 
@@ -1272,6 +1326,8 @@ export class MeshWarpRenderer {
         uMeanP: u('uMeanP'),
         uMeanD: u('uMeanD'),
         uSpecular: u('uSpecular'),
+        uHairDetail: u('uHairDetail'),
+        uSoftFaceEdge: u('uSoftFaceEdge'),
         uMotionBlur: u('uMotionBlur'),
         uSoftHolesPx: u('uSoftHolesPx'),
         uSegMask: u('uSegMask'),
@@ -2190,6 +2246,8 @@ export class MeshWarpRenderer {
     const illum = !!opts.relight?.illumination && !!meanP && !!meanD;
     gl.uniform1f(loc.uIllum, illum ? 1 : 0);
     gl.uniform1f(loc.uSpecular, illum && opts.relight?.specular ? 1 : 0);
+    gl.uniform1f(loc.uHairDetail, illum ? Math.min(1, Math.max(0, opts.relight?.hairDetail ?? 0)) : 0);
+    gl.uniform1f(loc.uSoftFaceEdge, opts.softFaceEdge ? 1 : 0);
     const mpc = (illum && meanP) || [1, 1, 1];
     const mdc = (illum && meanD) || [1, 1, 1];
     gl.uniform3f(loc.uMeanP, mpc[0], mpc[1], mpc[2]);

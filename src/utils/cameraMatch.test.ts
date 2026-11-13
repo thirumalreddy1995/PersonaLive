@@ -1,7 +1,7 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import { CAMERA_MATCH_EVERY, CAMERA_MATCH_LIMITS, CAMERA_MATCH_SETTLE_FRAMES, CAMERA_MATCH_WARM_UPDATES, STEADY_DEADBAND, cameraMatchDue, cameraMatchDueSettled, initialCameraMatch, stepCameraMatch } from './cameraMatch.ts';
-import { RELIGHT_RADIUS_SHARE, blendMean, blurTaps, derivativesPreamble, faceStatsFromPixels, lowPassSigma, meanChroma, meanColour, pairedFaceStats, skinTintGain, softHoleRadiusPx, toGlslEs3, uvWidth } from './meshWarpRenderer.ts';
+import { RELIGHT_RADIUS_SHARE, blendMean, blurTaps, derivativesPreamble, faceStatsFromPixels, lowPassSigma, meanChroma, meanColour, ILLUM_LUMA_BOUNDARY, pairedFaceStats, skinTintGain, softHoleRadiusPx, toGlslEs3, uvWidth } from './meshWarpRenderer.ts';
 
 const stats = (laplacianVariance: number, noiseMad: number, samples = 5000) => ({ laplacianVariance, noiseMad, samples });
 
@@ -164,15 +164,20 @@ test('meanColour is the coverage-weighted linear colour of a premultiplied low p
   assert.equal(meanColour(new Uint8Array(w * h * 4), w, h), null, 'nothing painted');
 });
 
-test('skinTintGain moves the wearer to the shared tone: none at full tone match, all the way at zero (R6b)', () => {
+test('skinTintGain splits brightness and hue: brightness by the luma match, hue by the tone match (R6b)', () => {
+  const luma = (c: number[]) => 0.2126 * c[0] + 0.7152 * c[1] + 0.0722 * c[2];
   const persona = [0.3, 0.15, 0.1];
   const wearer = [0.4, 0.25, 0.18];
-  assert.deepEqual(skinTintGain(persona, wearer, 1), [1, 1, 1]);
-  const full = skinTintGain(persona, wearer, 0);
-  for (let i = 0; i < 3; i++) assert.ok(Math.abs(full[i] - Math.max(0.5, persona[i] / wearer[i])) < 1e-9);
-  const half = skinTintGain(persona, wearer, 0.5);
-  assert.ok(Math.abs(half[0] - Math.sqrt(0.3 / 0.4)) < 1e-9);
-  assert.deepEqual(skinTintGain([1, 1, 1], [0.01, 0.01, 0.01], 0), [2, 2, 2], 'clamped');
+  // Full luma and tone match: the neck keeps its colour.
+  for (const g of skinTintGain(persona, wearer, 1, 1)) assert.ok(Math.abs(g - 1) < 1e-9);
+  // No match at all: the neck takes the persona's colour exactly.
+  const all = skinTintGain(persona, wearer, 0, 0);
+  for (let i = 0; i < 3; i++) assert.ok(Math.abs(all[i] - persona[i] / wearer[i]) < 1e-9, `channel ${i}`);
+  // Full tone match with the default luma match: a grey (equal) gain, the brightness part only.
+  const grey = skinTintGain(persona, wearer, 1);
+  assert.ok(Math.abs(grey[0] - grey[1]) < 1e-9 && Math.abs(grey[1] - grey[2]) < 1e-9);
+  assert.ok(Math.abs(grey[0] - Math.pow(luma(persona) / luma(wearer), 1 - ILLUM_LUMA_BOUNDARY)) < 1e-9);
+  assert.deepEqual(skinTintGain([1, 1, 1], [0.01, 0.01, 0.01], 0, 0), [2, 2, 2], 'clamped');
 });
 
 test('meanChroma averages the painted (premultiplied) low pass and normalises by luma', () => {

@@ -22,6 +22,8 @@ import {
   jawSideScale,
   lidPassThroughWeights,
   normalizeShape,
+  sideRegionVertices,
+  silhouetteWeights,
   proportionOffsets,
   proportionWeights,
   upperLidBands,
@@ -228,4 +230,48 @@ test('LidClosure rises as the eye aspect ratio falls below the learned open valu
   assert.ok(c[0] > 0.9 && c[1] < 0.01, `left lid lowered: ${c}`);
   for (let i = 0; i < 10; i++) c = lc.update(0.3, 0.3, 0.6);
   assert.ok(c[0] > 0.7 && c[1] > 0.7, `looking down: ${c}`);
+});
+
+test('silhouetteWeights fade side vertices whose UVs fall on the background and keep those on skin', () => {
+  const pts = canonicalFace(12, 320, 260);
+  const side = sideRegionVertices(topo);
+  assert.ok(side.length > 10);
+  for (const v of side) assert.ok(Math.abs(CANONICAL_FACE_MODEL[v * 3]) > 4, `side vertex ${v}`);
+  // All skin: every weight 1.
+  const skin = (): [number, number, number] => [200, 150, 120];
+  const all = silhouetteWeights(skin, pts, topo, side);
+  for (let v = 0; v < topo.vertexCount; v++) assert.ok(all[v] > 0.99, `vertex ${v} on skin`);
+  // The subject's left side (x > image centre + 50 px) is wall: those side vertices fade, the rest stay.
+  const wall = (x: number): [number, number, number] => (x > 320 + 50 ? [235, 235, 228] : [200, 150, 120]);
+  const w = silhouetteWeights(wall, pts, topo, side);
+  let faded = 0;
+  for (const v of side) {
+    if (pts[v * 2] > 320 + 60) {
+      assert.ok(w[v] < 0.05, `vertex ${v} over the wall`);
+      faded++;
+    }
+    if (pts[v * 2] < 320 - 60) assert.ok(w[v] > 0.99, `vertex ${v} on skin`);
+  }
+  assert.ok(faded > 3);
+  assert.equal(w[1], 1, 'interior untouched');
+});
+
+test('LidClosure follows the blink and look-down blendshapes when the aspect ratio does not move', () => {
+  const lc = new LidClosure();
+  let c: [number, number] = [0, 0];
+  for (let i = 0; i < 20; i++) c = lc.update(0.3, 0.3, 0, [0, 0], [0, 0]);
+  assert.ok(c[0] < 0.01 && c[1] < 0.01);
+  for (let i = 0; i < 6; i++) c = lc.update(0.3, 0.3, 0, [0, 0], [0.7, 0.7]);
+  assert.ok(c[0] > 0.8 && c[1] > 0.8, `looking down by blendshape: ${c}`);
+  for (let i = 0; i < 20; i++) c = lc.update(0.3, 0.3, 0, [0, 0.9], [0, 0]);
+  assert.ok(c[0] < 0.05 && c[1] > 0.9, `right-eye blink only: ${c}`);
+});
+
+test('LidClosure rises with the chin down even when the eyes and their blendshapes stay open', () => {
+  const lc = new LidClosure();
+  let c: [number, number] = [0, 0];
+  for (let i = 0; i < 20; i++) c = lc.update(0.3, 0.3, 0, [0, 0], [0, 0], 0);
+  assert.ok(c[0] < 0.01);
+  for (let i = 0; i < 6; i++) c = lc.update(0.3, 0.3, 0, [0, 0], [0, 0], 1);
+  assert.ok(c[0] > 0.85 && c[1] > 0.85, `chin down: ${c}`);
 });

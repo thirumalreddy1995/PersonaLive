@@ -62,6 +62,9 @@ import {
   fitAffine,
   hasBeard,
   jawPlan,
+  jawSideScale,
+  silhouetteWeights,
+  smoothstep,
   lidPassThroughWeights,
   normalizeShape,
   proportionOffsets,
@@ -214,6 +217,11 @@ export class RealtimeFacialEngine {
   private jawPlanCache: JawPlan | null = null;
   /** Pushed jaw UVs → the persona's own UVs, so the foreshortening fade measures the real geometry. */
   private jawUvBase = new WeakMap<Float32Array, Float32Array>();
+  /** R6b (flag seamFade): per UV set (persona photo or keyframe), the side-of-face silhouette weights. */
+  private seamWeights = new WeakMap<Float32Array, Float32Array>();
+  private seamScratch: Float32Array | null = null;
+  /** The head-turn factor (0..1, 0.1 steps) the jaw feather and bands were last uploaded for. */
+  private jawTurnApplied = 1;
   /** Beard depth below each lower-jaw point of the persona photo (IOD units); null = no beard or flag off. */
   private jawDepths: Float32Array | null = null;
   private lidClosure = new LidClosure();
@@ -403,8 +411,9 @@ export class RealtimeFacialEngine {
           // R5: real keyframes are loaded with the persona, and their stored pose depends on the pose source.
           changed.includes('keyframeCrossfade') ||
           changed.includes('matrixHeadPose') ||
-          // R6b: the beard depth and the jaw UVs are measured with the persona.
-          changed.includes('jawExtension')) &&
+          // R6b: the beard depth, the jaw UVs and the seam weights are measured with the persona.
+          changed.includes('jawExtension') ||
+          changed.includes('seamFade')) &&
         this.personaImage
       )
         void this.preparePersona();
@@ -739,6 +748,8 @@ export class RealtimeFacialEngine {
       } else {
         this.personaUvExt = null;
       }
+      // R6b (flag seamFade): where this photo's side UVs fall off its face skin.
+      if (realismFlags.get().seamFade) this.seamWeights.set(uv, this.measureSeam(texture, uv));
       this.warp.setPersona(texture, uv);
       // R6b: the jaw feather follows this persona's beard (or goes back to the plain one).
       this.applyBoundaryFeather();
@@ -901,6 +912,7 @@ export class RealtimeFacialEngine {
         const texture = prepared.texture;
         // R6b (flag jawExtension): every keyframe follows the persona photo's beard depth.
         const uv = this.jawDepths ? this.extendJawUv(prepared.uv, texture) : prepared.uv;
+        if (realismFlags.get().seamFade) this.seamWeights.set(uv, this.measureSeam(texture, uv));
         const size = texture instanceof HTMLImageElement ? { width: texture.naturalWidth, height: texture.naturalHeight } : { width: texture.width, height: texture.height };
         out.push({
           id: ref.id,
@@ -926,8 +938,8 @@ export class RealtimeFacialEngine {
     return this.jawPlanCache;
   }
 
-  /** R6b (flag jawExtension): beard depths below the jaw of a prepared persona texture, from its UVs. */
-  private measureBeard(texture: HTMLImageElement | HTMLCanvasElement, uv: Float32Array): Float32Array | null {
+  /** R6b: a pixel sampler over a persona texture and its landmarks in pixels (null when unreadable). */
+  private texturePixels(texture: HTMLImageElement | HTMLCanvasElement, uv: Float32Array): { sample: (x: number, y: number) => [number, number, number] | null; pts: Float32Array } | null {
     const w = texture instanceof HTMLImageElement ? texture.naturalWidth : texture.width;
     const h = texture instanceof HTMLImageElement ? texture.naturalHeight : texture.height;
     if (!w || !h) return null;
@@ -943,13 +955,26 @@ export class RealtimeFacialEngine {
       pts[i * 2] = uv[i * 2] * w;
       pts[i * 2 + 1] = uv[i * 2 + 1] * h;
     }
-    return beardDepths((x, y) => {
+    const sample = (x: number, y: number): [number, number, number] | null => {
       const xi = Math.round(x);
       const yi = Math.round(y);
       if (xi < 0 || yi < 0 || xi >= w || yi >= h) return null;
       const o = (yi * w + xi) * 4;
       return [data[o], data[o + 1], data[o + 2]];
-    }, pts);
+    };
+    return { sample, pts };
+  }
+
+  /** R6b (flag jawExtension): beard depths below the jaw of a prepared persona texture, from its UVs. */
+  private measureBeard(texture: HTMLImageElement | HTMLCanvasElement, uv: Float32Array): Float32Array | null {
+    const px = this.texturePixels(texture, uv);
+    return px ? beardDepths(px.sample, px.pts) : null;
+  }
+
+  /** R6b (flag seamFade): side-of-face silhouette weights of a prepared texture (all 1 when unreadable). */
+  private measureSeam(texture: HTMLImageElement | HTMLCanvasElement, uv: Float32Array): Float32Array {
+    const px = this.texturePixels(texture, uv);
+    return px ? silhouetteWeights(px.sample, px.pts, this.baseTopology) : new Float32Array(this.baseTopology.vertexCount).fill(1);
   }
 
   /** R6b (flag jawExtension): a copy of `uv` with the lower face rings pushed out by the beard depth (in the texture's pixels). */
@@ -977,7 +1002,7 @@ export class RealtimeFacialEngine {
    * R6b (flag personaProportions): learns the wearer's neutral shape from frontal relaxed frames
    * and moves the interior vertices toward the persona's layout, mapped by the current head pose.
    */
-  private applyPersonaProportions(k: LandmarkKinematics, lipFade: number, smile: number) {
+  private applyPersonaProportions(k: LandmarkKinematics, lipFade: number, smile: number, pitchDeg: number) {
     const s = this.settings;
     const rest = this.restMouth.rest ?? 0.03;
     const relaxed = Math.abs(k.yaw) < 10 && Math.abs(k.pitch) < 12 && k.earLeft > 0.18 && k.earRight > 0.18 && k.mar < rest + 0.04 && smile < 0.3;
@@ -999,14 +1024,19 @@ export class RealtimeFacialEngine {
       this.proportionW = { topology: this.topology, realEyes, w: proportionWeights(this.topology, realEyes) };
     }
     this.proportionRamp = Math.min(1, this.proportionRamp + 1 / 30);
-    applyProportions(this.warpPositions, this.proportionOff, this.proportionW.w, this.topology.lipWeights, lipFade, [A[0], A[1], A[2], A[3]], clamp(s.featureBlend ?? 0.8, 0, 1) * this.proportionRamp);
+    // The persona's frontal layout applies near frontal. On a turn or a tilt the bank's turned or
+    // tilted shot already carries the persona's geometry for that pose, and the frontal offsets
+    // (mapped by one affine) tore the far side of the jaw and the lower lip.
+    const [sr, sl] = jawSideScale(this.smoothed);
+    const pose = Math.min(sr, sl) * (1 - smoothstep(8, 20, Math.abs(pitchDeg)));
+    applyProportions(this.warpPositions, this.proportionOff, this.proportionW.w, this.topology.lipWeights, lipFade, [A[0], A[1], A[2], A[3]], clamp(s.featureBlend ?? 0.8, 0, 1) * this.proportionRamp * pose);
   }
 
   /**
    * R6b (flag lidPassThrough): widens the eye pass-through over the upper lid as each lid lowers.
    * Uploads new weights only when a lid moved noticeably; restores the plain ring when off.
    */
-  private updateLidPassThrough(on: boolean, k: LandmarkKinematics) {
+  private updateLidPassThrough(on: boolean, k: LandmarkKinematics, bs: Record<string, number>, headDown: number) {
     const radius = this.settings.eyePassThroughRadius;
     if (!on) {
       if (this.lidLast[0] >= 0) {
@@ -1015,7 +1045,14 @@ export class RealtimeFacialEngine {
       }
       return;
     }
-    const [cl, cr] = this.lidClosure.update(k.earLeft, k.earRight, k.gazeY);
+    const [cl, cr] = this.lidClosure.update(
+      k.earLeft,
+      k.earRight,
+      k.gazeY,
+      [bs.eyeBlinkLeft ?? 0, bs.eyeBlinkRight ?? 0],
+      [bs.eyeLookDownLeft ?? 0, bs.eyeLookDownRight ?? 0],
+      headDown
+    );
     if (!this.lidBands || this.lidBands.topology !== this.topology || this.lidBands.radius !== radius) {
       this.lidBands = {
         topology: this.topology,
@@ -1050,16 +1087,18 @@ export class RealtimeFacialEngine {
    * below the jaw, the jaw rings take a much narrower feather, so the beard is opaque over the
    * wearer's jaw and fades only at its own outer edge.
    */
-  private applyBoundaryFeather() {
+  private applyBoundaryFeather(turn = this.jawTurnApplied) {
+    this.jawTurnApplied = turn;
     const width = resolveLook(this.settings).boundaryFeather;
     const depths = realismFlags.get().jawExtension ? this.jawDepths : null;
-    if (width === 1 && !depths) {
+    if (width === 1 && (!depths || turn <= 0)) {
       this.warp.setBoundaryFeather(null);
+      this.warp.setFeatherBands(null);
       return;
     }
     const w = boundaryFeatherWeights(this.topology, width);
     let bands: Float32Array | null = null;
-    if (depths) {
+    if (depths && turn > 0) {
       const narrow = boundaryFeatherWeights(this.topology, JAW_BEARD_FEATHER);
       bands = featherBandWeights(this.topology);
       const plan = this.jawPlanFor();
@@ -1067,9 +1106,10 @@ export class RealtimeFacialEngine {
         const v = plan.vertex[k];
         const d = depths[plan.oval[k]] ?? 0;
         if (d > 0.05) {
-          w[v] = Math.max(w[v], narrow[v] * Math.min(1, d / 0.2));
+          // Both blend back to the plain feather as the head turns (the push itself is gone by then).
+          w[v] = Math.max(w[v], narrow[v] * Math.min(1, d / 0.2) * turn);
           // Outer band: the masks keep the pushed beard on the wearer's face skin (not the background, neck or a hand).
-          bands[v * 2] = 0;
+          bands[v * 2] *= 1 - turn;
         }
       }
     }
@@ -1525,7 +1565,12 @@ export class RealtimeFacialEngine {
     // "Keep my real mouth": fade the persona lip band as the mouth opens (R1 §2); with restMouth
     // (R3 item 1) the thresholds sit above the wearer's learned resting aperture.
     const fadeWindow = lipFadeWindow(flags.restMouth ? this.restMouth.rest : null);
-    const lipFade = flags.realMouth && s.keepRealMouth ? lipFadeForMar(k.mar, resolveLook(s).lipFadeFloor, fadeWindow.start, fadeWindow.end) : 0;
+    let lipFade = flags.realMouth && s.keepRealMouth ? lipFadeForMar(k.mar, resolveLook(s).lipFadeFloor, fadeWindow.start, fadeWindow.end) : 0;
+    // R6b (flag lidPassThrough): the pose decides what passes through. Looking up past the
+    // enrollment's chin-up shot (about 15°) the persona's lips would be stretched and lit beyond any
+    // photo, so the real lips show; chin down raises the eyelid pass-through (see updateLidPassThrough).
+    const pitchDeg = flags.matrixHeadPose && this.matrixPose ? this.matrixPose.pitch : k.pitch;
+    if (flags.lidPassThrough && flags.realMouth && s.keepRealMouth) lipFade = Math.max(lipFade, smoothstep(12, 28, -pitchDeg));
     // R4 §4: foreshortening from the tracked mesh against the persona's own (un-pushed) UVs, before
     // the R6b proportion and jaw changes, which squash some triangles on purpose and must not fade them.
     const fsUv = this.warp.personaUvs ? this.jawUvBase.get(this.warp.personaUvs) ?? this.warp.personaUvs : null;
@@ -1533,12 +1578,27 @@ export class RealtimeFacialEngine {
       flags.foreshortenFade && fsUv
         ? (this.foreshorten = copyColumnWeights(foreshortenWeights(this.warpPositions, fsUv, this.baseTopology.triangles, this.topology.vertexCount, this.foreshorten ?? undefined)))
         : undefined;
+    // R6b (flag seamFade): the side-of-face silhouette weights of the photo in use multiply in.
+    const seam = flags.seamFade && this.warp.personaUvs ? this.seamWeights.get(this.warp.personaUvs) : undefined;
+    let vertexFade = foreshorten;
+    if (seam) {
+      const n = this.topology.vertexCount;
+      if (!this.seamScratch || this.seamScratch.length !== n) this.seamScratch = new Float32Array(n);
+      for (let v = 0; v < n; v++) this.seamScratch[v] = (foreshorten ? foreshorten[v] : 1) * (v < seam.length ? seam[v] : 1);
+      vertexFade = this.seamScratch;
+    }
     // R6b: the persona's interior proportions, then its beard below the jaw line (before the bounds and the forehead rings).
     if (flags.personaProportions) {
       const smile = ((bs.mouthSmileLeft ?? 0) + (bs.mouthSmileRight ?? 0)) / 2;
-      this.applyPersonaProportions(k, lipFade, smile);
+      this.applyPersonaProportions(k, lipFade, smile, pitchDeg);
     }
-    if (flags.jawExtension && this.jawDepths) applyJawExtension(this.warpPositions, this.jawPlanFor(), this.jawDepths);
+    if (flags.jawExtension && this.jawDepths) {
+      applyJawExtension(this.warpPositions, this.jawPlanFor(), this.jawDepths);
+      // The jaw's narrow feather and face-skin band follow the turn in 0.1 steps (a re-upload of two small buffers).
+      const [sr, sl] = jawSideScale(this.smoothed);
+      const turn = Math.round(Math.min(sr, sl) * 10) / 10;
+      if (turn !== this.jawTurnApplied) this.applyBoundaryFeather(turn);
+    }
 
     const bounds = pointBounds(this.warpPositions.subarray(0, 468 * 2));
     const strength = clamp(s.blendStrength / 100, 0, 1);
@@ -1546,7 +1606,7 @@ export class RealtimeFacialEngine {
     // Eye pass-through ring: only while the wearer's real eyes are showing (R1 §6).
     const eyeFade = flags.eyePassThrough && !drawPersonaEyes ? 1 : 0;
     // R6b: the ring widens over the upper lid as the lid lowers.
-    this.updateLidPassThrough(flags.lidPassThrough && eyeFade > 0, k);
+    this.updateLidPassThrough(flags.lidPassThrough && eyeFade > 0, k, bs, smoothstep(8, 22, pitchDeg));
     // Closed-lip mask (R2): persona lips end at the wearer's lip contour while the mouth is closed.
     const closedLipMask = flags.closedLipMask && s.keepRealMouth ? 1 : 0;
     this.lastLipFade = lipFade;
@@ -1587,6 +1647,7 @@ export class RealtimeFacialEngine {
             shadowGuard: flags.relightShadowGuard,
             illumination,
             specular: illumination,
+            hairDetail: illumination ? 0.75 : 0,
             // R4b: hair leaves the driver low pass only as far as the extension is in, so an inactive extension renders as R4.
             excludeHair: this.foreheadOn && this.segActive ? this.foreheadStrength : 0,
           }
@@ -1600,7 +1661,8 @@ export class RealtimeFacialEngine {
       forehead,
       skinTint: flags.skinTint && illumination ? clamp(s.skinTintStrength ?? SKIN_TINT_MAX, 0, SKIN_TINT_MAX) : undefined,
       // R4b: the weights come from the base triangles only; the extension rings copy their column (see copyColumnWeights).
-      foreshorten,
+      foreshorten: vertexFade,
+      softFaceEdge: flags.jawExtension && !!this.jawDepths,
     });
     this.masksDirty = false;
 

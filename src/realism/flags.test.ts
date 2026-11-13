@@ -127,7 +127,7 @@ test('the r6 preset is the Balanced defaults chosen at the end of R6', () => {
 });
 
 test('the R6b identity flags are off by default and in every shipped preset, and on in r6b', () => {
-  const keys = ['relightIllumination', 'skinTint', 'personaProportions', 'jawExtension', 'lidPassThrough'] as const;
+  const keys = ['relightIllumination', 'skinTint', 'personaProportions', 'jawExtension', 'lidPassThrough', 'seamFade'] as const;
   for (const key of keys) {
     assert.equal(defaultRealismFlags()[key], false, key);
     for (const preset of ['r0', 'r1', 'r2', 'r3', 'r3c', 'r4', 'r6']) assert.equal(parseRealismFlagString(preset).flags[key], false, `${preset} ${key}`);
