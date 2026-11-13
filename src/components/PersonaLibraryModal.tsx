@@ -214,7 +214,7 @@ export const PersonaLibraryModal: React.FC<PersonaLibraryModalProps> = ({
             <div>
               <h2 className="font-semibold text-base text-slate-100">Your Faces</h2>
               <p className="text-xs text-slate-400">
-                Upload one clear photo — the face is mapped onto your live camera in real time
+                Upload one clear photo, or capture seven angles at the webcam — the face is mapped onto your live camera in real time
               </p>
             </div>
           </div>

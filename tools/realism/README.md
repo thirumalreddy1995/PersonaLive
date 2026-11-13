@@ -103,7 +103,7 @@ persona layer's top edge and the hair-mask boundary across the forehead (px and 
 upright frontal captures only; `stepPx` is the change between capture times, not video frames).
 The extension lands about 3 s into a clip, so earlier captures show the R4 forehead.
 
-R5 flags (all off): `keyframeCrossfade` (persona-reload; a persona with enrollment `references` gets one GPU
+R5 flags (off in `r0`…`r4`; all but `singleGlComposite` are on by default since R6): `keyframeCrossfade` (persona-reload; a persona with enrollment `references` gets one GPU
 texture per shot and a 150 ms cross-fade on a switch), `guidedEnrollment` (the capture flow in the library),
 `videoFramePacing` (`requestVideoFrameCallback`, else rAF with a changed-frame check), `singleGlComposite`
 (camera frame and persona in one WebGL pass, plain transformed view only), `matrixHeadPose` (keyframe
@@ -127,7 +127,8 @@ anti-windup and a 45-frame settle after a persona or source change; it leaves sh
 sharp, see the R6 Part 2 report). `summary.r5.framesSkipped` counts duplicate ticks the pacing skipped.
 
 Defaults since the end of R6 ("Balanced"): `--flags r6` = `r4` + `videoFramePacing`, `matrixHeadPose`,
-`keyframeCrossfade`, and the app setting `segmentCpu` is on (the segmenter runs on the CPU delegate: on an
+`keyframeCrossfade`, `guidedEnrollment` (the seven-shot capture in the library, next to the photo upload),
+and the app setting `segmentCpu` is on (the segmenter runs on the CPU delegate: on an
 integrated GPU that removes the 60-90 ms tracker stalls each GPU mask causes, at about 40% of the mask rate).
 A run without `--flags` / `--settings` measures these defaults; `--flags r4 --settings segmentCpu=0`
 reproduces the R4 defaults. The user-facing `cameraBlend` setting (0..1, `src/utils/look.ts`) moves the

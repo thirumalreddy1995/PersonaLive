@@ -166,6 +166,9 @@ export const UserGuideModal: React.FC<UserGuideModalProps> = ({
                   <p className="text-slate-400 leading-relaxed">
                     Click <strong>"Library"</strong> in the title bar or <strong>"Change"</strong> in the right inspector. Select from pre-verified personas (Dr. Sarah Chen, Marcus Vance, Elena Rostova, Aria Sterling) or upload your own reference photograph with automatic multi-point quality evaluation and legal consent attestation.
                   </p>
+                  <p className="text-slate-400 leading-relaxed">
+                    For a steadier face on head turns, use <strong>"Guided capture at the webcam"</strong> in the library: start the camera first, then the person whose face will be used sits at it, reads the consent text, types their own name and confirms they are the person at the camera, and is guided through seven reference photos (straight ahead, turned left and right, chin up and down, mouth open, smiling). Each photo is checked live for pose, sharpness and exposure; the signed consent record covers exactly those seven photos.
+                  </p>
                 </div>
 
                 <div className="bg-slate-950 p-4 rounded-xl border border-slate-800 space-y-2">

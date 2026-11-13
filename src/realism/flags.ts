@@ -335,8 +335,8 @@ export const REALISM_FLAG_DEFS: ReadonlyArray<RealismFlagDef> = [
   {
     key: 'guidedEnrollment',
     label: 'Guided enrollment (R5)',
-    description: 'Shows the guided capture flow in the library: the pictured person accepts the consent text at the webcam and records frontal, yaw, pitch, open-mouth and smile shots with live quality checks.',
-    defaultValue: false,
+    description: 'Shows the guided capture flow in the library: the pictured person accepts the consent text at the webcam and records frontal, yaw, pitch, open-mouth and smile shots with live quality checks. On by default since the R6 close-out, next to the single-photo upload.',
+    defaultValue: true,
     group: 'bank',
   },
   {
@@ -394,8 +394,8 @@ export const R3C_FLAG_STRING = R3_FLAG_STRING.replace('autoRadius=0', 'autoRadiu
 /** The R4 defaults (segmentation, foreshortening fade and persona inpaint on; R4b's forehead extension off), as a flag string: `--flags r4`. */
 export const R4_FLAG_STRING = R3C_FLAG_STRING.replace('segmentation=0', 'segmentation=1').replace('foreshortenFade=0', 'foreshortenFade=1').replace('personaInpaint=0', 'personaInpaint=1');
 
-/** The R6 defaults (the "Balanced" preset chosen at the end of R6), as a flag string: `--flags r6`. With the setting segmentCpu=1 (the app default since R6). */
-export const R6_FLAG_STRING = R4_FLAG_STRING.replace('keyframeCrossfade=0', 'keyframeCrossfade=1').replace('videoFramePacing=0', 'videoFramePacing=1').replace('matrixHeadPose=0', 'matrixHeadPose=1');
+/** The R6 defaults (the "Balanced" preset chosen at the end of R6, plus the guided enrollment in the library), as a flag string: `--flags r6`. With the setting segmentCpu=1 (the app default since R6). */
+export const R6_FLAG_STRING = R4_FLAG_STRING.replace('keyframeCrossfade=0', 'keyframeCrossfade=1').replace('videoFramePacing=0', 'videoFramePacing=1').replace('matrixHeadPose=0', 'matrixHeadPose=1').replace('guidedEnrollment=0', 'guidedEnrollment=1');
 
 /** Named flag presets accepted by parseRealismFlagString (case-insensitive). */
 export const REALISM_FLAG_PRESETS: Record<string, string> = { r0: R0_FLAG_STRING, r1: R1_FLAG_STRING, r2: R2_FLAG_STRING, r3: R3_FLAG_STRING, r3c: R3C_FLAG_STRING, r4: R4_FLAG_STRING, r6: R6_FLAG_STRING };
