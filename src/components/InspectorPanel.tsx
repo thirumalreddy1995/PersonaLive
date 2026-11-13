@@ -12,6 +12,9 @@ import {
   AlertTriangle,
   ScanFace,
   Cpu,
+  Aperture,
+  ChevronDown,
+  ChevronRight,
 } from 'lucide-react';
 import {
   AuthorizedPersona,
@@ -23,6 +26,7 @@ import {
 } from '../types/index.ts';
 import { UserRound } from 'lucide-react';
 import { realismFlags } from '../realism/flags.ts';
+import { resolveLook } from '../utils/look.ts';
 
 interface InspectorPanelProps {
   activePersona: AuthorizedPersona | null;
@@ -55,6 +59,9 @@ export const InspectorPanel: React.FC<InspectorPanelProps> = ({
     () => realismFlags.get().foreheadExtension,
     () => realismFlags.get().foreheadExtension
   );
+  // R6: the fine-tuning controls sit behind "Advanced"; the defaults are the measured Balanced look.
+  const [advancedOpen, setAdvancedOpen] = React.useState(false);
+  const cameraBlend = settings.cameraBlend ?? 0;
   const personaState = status?.persona ?? 'none';
   const matchingPersonas = personas.filter((p) => p.category === subjectCategory);
   const hiddenCount = personas.length - matchingPersonas.length;
@@ -269,24 +276,6 @@ export const InspectorPanel: React.FC<InspectorPanelProps> = ({
             />
           </label>
 
-          {settings.eyeGazeSync && (
-            <div className="px-2 pb-1 space-y-1">
-              <div className="flex items-center justify-between text-[10px] text-slate-500">
-                <span>Eye pass-through (lids &amp; lashes)</span>
-                <span className="text-slate-300">{settings.eyePassThroughRadius.toFixed(2)} rings</span>
-              </div>
-              <input
-                type="range"
-                min="0"
-                max="2"
-                step="0.25"
-                value={settings.eyePassThroughRadius}
-                onChange={(e) => onUpdateSettings({ eyePassThroughRadius: Number(e.target.value) })}
-                className="w-full accent-sky-500 cursor-pointer h-1.5 bg-slate-800 rounded-lg"
-              />
-            </div>
-          )}
-
           <label className="flex items-center justify-between cursor-pointer p-2 rounded-lg bg-slate-900/60 hover:bg-slate-900 transition-colors">
             <span className="flex items-center gap-2 text-slate-200">
               <Smile className="w-3.5 h-3.5 text-rose-400" />
@@ -301,40 +290,6 @@ export const InspectorPanel: React.FC<InspectorPanelProps> = ({
               onChange={(e) => onUpdateSettings({ keepRealMouth: e.target.checked })}
               className="accent-rose-500 w-4 h-4 rounded cursor-pointer"
             />
-          </label>
-
-          {settings.keepRealMouth && (
-            <div className="px-2 pb-1 space-y-1">
-              <div className="flex items-center justify-between text-[10px] text-slate-500">
-                <span>Lips at rest: persona ↔ always mine</span>
-                <span className="text-slate-300">{settings.lipFadeFloor.toFixed(2)}</span>
-              </div>
-              <input
-                type="range"
-                min="0"
-                max="1"
-                step="0.05"
-                value={settings.lipFadeFloor}
-                onChange={(e) => onUpdateSettings({ lipFadeFloor: Number(e.target.value) })}
-                className="w-full accent-rose-500 cursor-pointer h-1.5 bg-slate-800 rounded-lg"
-              />
-            </div>
-          )}
-
-          <label className="flex items-center justify-between p-2 rounded-lg bg-slate-900/60">
-            <span className="text-slate-200">
-              Persona texture size
-              <span className="block text-[10px] text-slate-500 font-normal">Face crop resolution uploaded to the GPU</span>
-            </span>
-            <select
-              value={settings.personaTextureSize}
-              onChange={(e) => onUpdateSettings({ personaTextureSize: Number(e.target.value) as 512 | 1024 | 2048 })}
-              className="bg-slate-950 border border-slate-800 rounded px-2 py-1 text-xs text-slate-200"
-            >
-              <option value={512}>512 px</option>
-              <option value={1024}>1024 px</option>
-              <option value={2048}>2048 px</option>
-            </select>
           </label>
 
           <label className="flex items-center justify-between cursor-pointer p-2 rounded-lg bg-slate-900/60 hover:bg-slate-900 transition-colors">
@@ -356,7 +311,7 @@ export const InspectorPanel: React.FC<InspectorPanelProps> = ({
           {settings.lightingAdaptation && (
             <div className="px-2 pb-1 space-y-1">
               <div className="flex items-center justify-between text-[10px] text-slate-500">
-                <span>Skin tone: persona ↔ match me</span>
+                <span>Skin tone match: chosen face ↔ my camera</span>
                 <span className="text-slate-300">{Math.round(settings.skinToneMatch * 100)}%</span>
               </div>
               <input
@@ -371,6 +326,36 @@ export const InspectorPanel: React.FC<InspectorPanelProps> = ({
             </div>
           )}
 
+          <div className="p-2 rounded-lg bg-slate-900/60 space-y-1.5">
+            <div className="flex items-center justify-between">
+              <span className="flex items-center gap-2 text-slate-200">
+                <Aperture className="w-3.5 h-3.5 text-sky-400" />
+                <span>
+                  Camera Blend
+                  <span className="block text-[10px] text-slate-500 font-normal">Softer face edge and more of your own lips</span>
+                </span>
+              </span>
+              <span className="font-mono text-sky-400 font-bold">{Math.round(cameraBlend * 100)}%</span>
+            </div>
+            <input
+              type="range"
+              min="0"
+              max="1"
+              step="0.05"
+              value={cameraBlend}
+              onChange={(e) => onUpdateSettings({ cameraBlend: Number(e.target.value) })}
+              className="w-full accent-sky-500 cursor-pointer h-1.5 bg-slate-800 rounded-lg"
+              aria-label="Camera blend"
+            />
+            <div className="flex justify-between text-[10px] text-slate-500">
+              <span>Most like the chosen face</span>
+              <span>Blends into my camera</span>
+            </div>
+            {cameraBlend > 0 && (
+              <p className="text-[10px] text-amber-300/80">A higher blend makes the face read a little less like the chosen person.</p>
+            )}
+          </div>
+
           {foreheadExtension && (
             <div className="flex items-center justify-between p-2 rounded-lg bg-slate-900/60">
               <span className="text-slate-200">
@@ -384,6 +369,74 @@ export const InspectorPanel: React.FC<InspectorPanelProps> = ({
               >
                 Recalibrate forehead
               </button>
+            </div>
+          )}
+
+          <button
+            type="button"
+            onClick={() => setAdvancedOpen((o) => !o)}
+            className="w-full flex items-center gap-1.5 px-1 text-[11px] text-slate-400 hover:text-slate-200 cursor-pointer"
+            aria-expanded={advancedOpen}
+          >
+            {advancedOpen ? <ChevronDown className="w-3 h-3" /> : <ChevronRight className="w-3 h-3" />}
+            Advanced
+          </button>
+          {advancedOpen && (
+            <div className="space-y-2.5 pl-1">
+              {settings.eyeGazeSync && (
+                <div className="px-2 space-y-1">
+                  <div className="flex items-center justify-between text-[10px] text-slate-500">
+                    <span>Eye pass-through (lids &amp; lashes)</span>
+                    <span className="text-slate-300">{settings.eyePassThroughRadius.toFixed(2)} rings</span>
+                  </div>
+                  <input
+                    type="range"
+                    min="0"
+                    max="2"
+                    step="0.25"
+                    value={settings.eyePassThroughRadius}
+                    onChange={(e) => onUpdateSettings({ eyePassThroughRadius: Number(e.target.value) })}
+                    className="w-full accent-sky-500 cursor-pointer h-1.5 bg-slate-800 rounded-lg"
+                  />
+                </div>
+              )}
+
+              {settings.keepRealMouth && (
+                <div className="px-2 space-y-1">
+                  <div className="flex items-center justify-between text-[10px] text-slate-500">
+                    <span>Lips at rest: chosen face ↔ always mine</span>
+                    <span className="text-slate-300">{settings.lipFadeFloor.toFixed(2)}</span>
+                  </div>
+                  <input
+                    type="range"
+                    min="0"
+                    max="1"
+                    step="0.05"
+                    value={settings.lipFadeFloor}
+                    onChange={(e) => onUpdateSettings({ lipFadeFloor: Number(e.target.value) })}
+                    className="w-full accent-rose-500 cursor-pointer h-1.5 bg-slate-800 rounded-lg"
+                  />
+                  {cameraBlend > 0 && (
+                    <p className="text-[10px] text-slate-500">Camera Blend keeps this at least {resolveLook({ lipFadeFloor: 0, cameraBlend }).lipFadeFloor.toFixed(2)}.</p>
+                  )}
+                </div>
+              )}
+
+              <label className="flex items-center justify-between p-2 rounded-lg bg-slate-900/60">
+                <span className="text-slate-200">
+                  Persona texture size
+                  <span className="block text-[10px] text-slate-500 font-normal">Face crop resolution uploaded to the GPU</span>
+                </span>
+                <select
+                  value={settings.personaTextureSize}
+                  onChange={(e) => onUpdateSettings({ personaTextureSize: Number(e.target.value) as 512 | 1024 | 2048 })}
+                  className="bg-slate-950 border border-slate-800 rounded px-2 py-1 text-xs text-slate-200"
+                >
+                  <option value={512}>512 px</option>
+                  <option value={1024}>1024 px</option>
+                  <option value={2048}>2048 px</option>
+                </select>
+              </label>
             </div>
           )}
         </div>

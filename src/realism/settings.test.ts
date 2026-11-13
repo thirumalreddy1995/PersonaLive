@@ -16,6 +16,12 @@ test('parseSettingsFromSearch reads the rs parameter', () => {
   assert.deepEqual(parseSettingsFromSearch('?realism=1'), {});
 });
 
+test('parseSettingsString reads the R6 look settings', () => {
+  const { settings, errors } = parseSettingsString('cameraBlend=0.5,boundaryFeather=1.5,segmentCpu=0');
+  assert.deepEqual(errors, []);
+  assert.deepEqual(settings, { cameraBlend: 0.5, boundaryFeather: 1.5, segmentCpu: false });
+});
+
 test('parseSettingsString reads the rigid-pose tuning settings', () => {
   const { settings, errors } = parseSettingsString('rigidPoseMinCutoff=5,rigidPoseBeta=2,rigidShapeOffset=0,skinToneMatch=0.5,relightRadius=0.06');
   assert.deepEqual(errors, []);

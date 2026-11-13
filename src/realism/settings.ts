@@ -24,6 +24,7 @@ const NUMERIC_KEYS: ReadonlyArray<SettingKey> = [
   'rigidPoseBeta',
   'skinToneMatch',
   'relightRadius',
+  'cameraBlend',
   'boundaryFeather',
   'cameraMatchSharpness',
   'cameraMatchNoise',

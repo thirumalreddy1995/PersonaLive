@@ -304,8 +304,6 @@ export interface ClipSummary {
   restMar: number | null;
   /** Identity guard (R3b): means over the captured frames; null when the recogniser was not run. */
   identity: IdentitySummary | null;
-  /** Times the 5-zone CPU lighting gain ran over the persona's life (R3b item 4; 0 with default flags). */
-  cpuLightingGainUpdates: number | null;
   /** Max/min of the persona de-light field (flag personaDelight). */
   personaDelightRange: number | null;
   /** R3c auto-radius loop: the radius it settled at (end of clip), its smoothed excesses and the per-clip trace. */
@@ -672,7 +670,6 @@ async function captureClip(page: Page, args: Args, o: CaptureOptions): Promise<C
     cameraMatchTrace: traceStats ? { ...traceStats, series: trace } : null,
     restMar: finalState.restMar ?? null,
     identity,
-    cpuLightingGainUpdates: finalState.lightingGainUpdates ?? null,
     personaDelightRange: finalState.personaDelightRange ?? null,
     autoRadius: finalState.autoRadius
       ? (() => {
@@ -721,7 +718,7 @@ function printSummary(label: string, s: ClipSummary) {
       `    identity (SFace):  output↔persona ${fmt(s.identity.toPersona)}  output↔wearer ${fmt(s.identity.toDriver)}  margin ${fmt(s.identity.margin)} (min ${fmt(s.identity.minMargin)})  wearer↔persona ${fmt(s.identity.driverToPersona)}  faces ${s.identity.detected}/${s.identity.frames}`
     );
   }
-  if (s.cpuLightingGainUpdates !== null) console.log(`    cpu lighting gain: ${s.cpuLightingGainUpdates} updates${s.personaDelightRange !== null ? `  de-light field range ${fmt(s.personaDelightRange)}` : ''}`);
+  if (s.personaDelightRange !== null) console.log(`    de-light field range ${fmt(s.personaDelightRange)}`);
   if (s.ghostHairShare !== null || s.segmentationUpdates) console.log(`    occlusion (masks): ghost hair ${fmt(s.ghostHairShare)}  hand leak ${fmt(s.handLeakShare)}  glasses leak ${fmt(s.glassesLeakShare)}  segmenter updates ${s.segmentationUpdates ?? '-'}${s.personaInpaintShare !== null ? `  persona inpainted ${(s.personaInpaintShare * 100).toFixed(1)}%` : ''}`);
   if (s.autoRadius) console.log(`    auto radius:       ${(s.autoRadius.radius * 100).toFixed(1)}%  side excess ${fmt(s.autoRadius.sideExcess)} L  neck excess ${fmt(s.autoRadius.neckExcess)} ΔE  updates ${s.autoRadius.updates}${s.autoRadius.trace ? `  trace ${(s.autoRadius.trace.min * 100).toFixed(1)}..${(s.autoRadius.trace.max * 100).toFixed(1)}%` : ''}${s.symmetricDelight ? '  symmetric de-light on' : ''}`);
   const t = s.targets;

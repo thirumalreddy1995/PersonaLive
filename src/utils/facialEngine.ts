@@ -50,6 +50,7 @@ import { FACE_OVAL_RING } from './personaDelight.ts';
 import { READBACK_SIZE } from './meshWarpRenderer.ts';
 import { CameraMatchState, initialCameraMatch, stepCameraMatch, CAMERA_MATCH_WARM_UPDATES, cameraMatchDue, cameraMatchDueSettled } from './cameraMatch.ts';
 import { RestMouthCalibrator, lipFadeWindow } from './restMouth.ts';
+import { resolveLook } from './look.ts';
 import {
   applyEyelidKinematics,
   eyeFadeWeights,
@@ -76,7 +77,7 @@ import {
   FACE_TESSELLATION,
   TrackedFace,
 } from './faceTracker.ts';
-import { FacialLightingZones, MeshWarpRenderer, pairedFaceStats, readbackWindow, type FaceStats } from './meshWarpRenderer.ts';
+import { MeshWarpRenderer, pairedFaceStats, readbackWindow, type FaceStats } from './meshWarpRenderer.ts';
 import { OralCavityRenderer, extractOralApertureMetrics } from './oralCavityRenderer.ts';
 import { MultiReferenceBank, type ReferenceKeyframe } from './multiReferenceBank.ts';
 import { CranialBoundaryBlender } from './cranialBoundaryBlender.ts';
@@ -179,14 +180,6 @@ export class RealtimeFacialEngine {
   /** Transparent copy of the warp output; alpha-only boundary passes run here before compositing. */
   private overlayLayer: HTMLCanvasElement;
   private overlayCtx: CanvasRenderingContext2D;
-  private colorGain: [number, number, number] = [1, 1, 1];
-  private zoneLighting: FacialLightingZones = {
-    forehead: [1, 1, 1],
-    leftCheek: [1, 1, 1],
-    rightCheek: [1, 1, 1],
-    nose: [1, 1, 1],
-    chin: [1, 1, 1],
-  };
   private frameIndex = 0;
   /** frameIndex when the debug counters were last reset, so framesRendered is per replay. */
   private frameIndexAtReset = 0;
@@ -262,8 +255,6 @@ export class RealtimeFacialEngine {
   private cameraMatchWarm = 0;
   /** Frame index of the last persona or source change (R6 median mode waits for the output to settle). */
   private cameraMatchChangeFrame = 0;
-  /** How often the 5-zone CPU lighting gain ran (0 with the default flags on a WebGL machine). */
-  private lightingGainUpdates = 0;
   /** Max/min of the de-light shading field fitted on the current persona (flag personaDelight). */
   private personaDelightRange: number | null = null;
   /** R3c auto-radius loop state (flag autoRadius) and its per-update trace. */
@@ -517,11 +508,10 @@ export class RealtimeFacialEngine {
       this.warp.resize(w, h);
       this.resetTracking();
     }
-    if (prev.lightingAdaptation && !settings.lightingAdaptation) this.colorGain = [1, 1, 1];
     if (prev.eyePassThroughRadius !== settings.eyePassThroughRadius) {
       this.warp.setEyeFade(eyeFadeWeights(this.topology, settings.eyePassThroughRadius));
     }
-    if ((prev.boundaryFeather ?? 1) !== (settings.boundaryFeather ?? 1)) this.applyBoundaryFeather();
+    if (resolveLook(prev).boundaryFeather !== resolveLook(settings).boundaryFeather) this.applyBoundaryFeather();
     if (prev.personaTextureSize !== settings.personaTextureSize && this.personaImage && realismFlags.get().personaCrop) {
       void this.preparePersona();
     }
@@ -875,9 +865,9 @@ export class RealtimeFacialEngine {
     return uv;
   }
 
-  /** R6 (setting boundaryFeather): the scaled boundary feather for the current topology; 1 keeps the topology's own. */
+  /** R6 (settings cameraBlend / boundaryFeather): the scaled boundary feather for the current topology; 1 keeps the topology's own. */
   private applyBoundaryFeather() {
-    const width = this.settings.boundaryFeather ?? 1;
+    const width = resolveLook(this.settings).boundaryFeather;
     this.warp.setBoundaryFeather(width === 1 ? null : boundaryFeatherWeights(this.topology, width));
   }
 
@@ -997,7 +987,7 @@ export class RealtimeFacialEngine {
     let singleGl = false;
     if (overlayReady && kinematics && src && layout) {
       profiler.begin('warp');
-      this.renderPersonaOverlay(layout, src.source, src.width, src.height, kinematics, timestamp);
+      this.renderPersonaOverlay(layout, src.source, kinematics, timestamp);
       profiler.end('warp');
       profiler.begin('overlay');
       // R5 §4 (flag singleGlComposite): the camera frame goes under the persona inside the WebGL canvas.
@@ -1166,14 +1156,6 @@ export class RealtimeFacialEngine {
     this.faceVisible = false;
     this.framesSinceFace = 0;
     this.neutralMouthWidth = null;
-    this.colorGain = [1, 1, 1];
-    this.zoneLighting = {
-      forehead: [1, 1, 1],
-      leftCheek: [1, 1, 1],
-      rightCheek: [1, 1, 1],
-      nose: [1, 1, 1],
-      chin: [1, 1, 1],
-    };
     if (this.status.faceDetected) this.patchStatus({ faceDetected: false });
   }
 
@@ -1235,8 +1217,6 @@ export class RealtimeFacialEngine {
   private renderPersonaOverlay(
     layout: SourceLayout,
     source: CanvasImageSource,
-    srcW: number,
-    srcH: number,
     k: LandmarkKinematics,
     timestamp: number
   ) {
@@ -1319,11 +1299,10 @@ export class RealtimeFacialEngine {
       }
     }
 
-    // R3 (flag relight): the shader relights from the real frame; the CPU zone gains stay off.
+    // R3 (flag relight): the shader relights the persona from the real frame. Without it (lighting
+    // adaptation off, the flag off for diagnostics, or a GPU whose relight programs did not compile)
+    // the persona keeps its photo's own lighting; the R0 5-zone CPU gain was removed in R6.
     const relightOn = flags.relight && s.lightingAdaptation && this.warp.supportsRelight;
-    if (s.lightingAdaptation && !relightOn && this.frameIndex % 5 === 0) {
-      this.updateLightingGain(layout, source, srcW, srcH);
-    }
 
     // Head velocity (nose and cheeks), smoothed over ~2 frames.
     const hc = {
@@ -1343,7 +1322,7 @@ export class RealtimeFacialEngine {
     // "Keep my real mouth": fade the persona lip band as the mouth opens (R1 §2); with restMouth
     // (R3 item 1) the thresholds sit above the wearer's learned resting aperture.
     const fadeWindow = lipFadeWindow(flags.restMouth ? this.restMouth.rest : null);
-    const lipFade = flags.realMouth && s.keepRealMouth ? lipFadeForMar(k.mar, clamp(s.lipFadeFloor ?? 0, 0, 1), fadeWindow.start, fadeWindow.end) : 0;
+    const lipFade = flags.realMouth && s.keepRealMouth ? lipFadeForMar(k.mar, resolveLook(s).lipFadeFloor, fadeWindow.start, fadeWindow.end) : 0;
     // Eye pass-through ring: only while the wearer's real eyes are showing (R1 §6).
     const eyeFade = flags.eyePassThrough && !drawPersonaEyes ? 1 : 0;
     // Closed-lip mask (R2): persona lips end at the wearer's lip contour while the mouth is closed.
@@ -1363,8 +1342,6 @@ export class RealtimeFacialEngine {
     this.warp.render({
       positions: this.warpPositions,
       opacity: Math.pow(strength, 0.55),
-      colorGain: relightOn ? IDENTITY_GAIN : this.colorGain,
-      zoneLighting: relightOn ? undefined : this.zoneLighting,
       faceBounds: [bounds.minX, bounds.minY, bounds.width, bounds.height],
       drawPersonaEyes,
       lipFade,
@@ -1769,89 +1746,6 @@ export class RealtimeFacialEngine {
     if (flags.hairlineSoften && stackedFades) CranialBoundaryBlender.softenHairlineEdges(octx, this.warpPositions);
   }
 
-  /** Estimates the wearer's facial skin tone across 5 spatial zones and derives lighting gains. */
-  private updateLightingGain(layout: SourceLayout, source: CanvasImageSource, srcW: number, srcH: number) {
-    this.lightingGainUpdates++;
-    const n = 468;
-    const srcPts = new Float32Array(n * 2);
-    for (let i = 0; i < n; i++) {
-      let x = this.smoothed[i * 2];
-      if (layout.mirror) x = this.canvas.width - x;
-      srcPts[i * 2] = ((x - layout.offsetX) / layout.drawWidth) * srcW;
-      srcPts[i * 2 + 1] = ((this.smoothed[i * 2 + 1] - layout.offsetY) / layout.drawHeight) * srcH;
-    }
-
-    const b = pointBounds(srcPts.subarray(0, 468 * 2));
-    const size = 24;
-    const sctx = this.samplerCtx;
-    try {
-      sctx.clearRect(0, 0, size, size);
-      sctx.drawImage(source, b.minX, b.minY, Math.max(1, b.width), Math.max(1, b.height), 0, 0, size, size);
-      const data = sctx.getImageData(0, 0, size, size).data;
-
-      const samplePatch = (cx: number, cy: number, rad: number): [number, number, number] => {
-        let pr = 0;
-        let pg = 0;
-        let pb = 0;
-        let pcount = 0;
-        for (let py = Math.max(0, cy - rad); py <= Math.min(size - 1, cy + rad); py++) {
-          for (let px = Math.max(0, cx - rad); px <= Math.min(size - 1, cx + rad); px++) {
-            const idx = (py * size + px) * 4;
-            pr += data[idx];
-            pg += data[idx + 1];
-            pb += data[idx + 2];
-            pcount++;
-          }
-        }
-        return pcount ? [pr / pcount, pg / pcount, pb / pcount] : [128, 128, 128];
-      };
-
-      const lum = (c: [number, number, number]) => 0.2126 * c[0] + 0.7152 * c[1] + 0.0722 * c[2];
-      const computeGain = (sampleRGB: [number, number, number]): [number, number, number] => {
-        const lumRatio = clamp(Math.pow((lum(sampleRGB) + 6) / (lum(this.personaMean) + 6), 0.75), 0.55, 1.6);
-        const out: [number, number, number] = [1, 1, 1];
-        for (let c = 0; c < 3; c++) {
-          const chroma = (sampleRGB[c] + 6) / (lum(sampleRGB) + 6) / ((this.personaMean[c] + 6) / (lum(this.personaMean) + 6));
-          out[c] = clamp(lumRatio * Math.pow(chroma, 0.45), 0.5, 1.8);
-        }
-        return out;
-      };
-
-      const blendGain = (curr: [number, number, number], target: [number, number, number]) => {
-        curr[0] = curr[0] * 0.85 + target[0] * 0.15;
-        curr[1] = curr[1] * 0.85 + target[1] * 0.15;
-        curr[2] = curr[2] * 0.85 + target[2] * 0.15;
-      };
-
-      // Sample directly from driver's tracked anatomical landmarks
-      const sampleLandmark = (idx: number): [number, number, number] => {
-        const lx = srcPts[idx * 2];
-        const ly = srcPts[idx * 2 + 1];
-        const nx = Math.round(clamp(((lx - b.minX) / Math.max(1, b.width)) * size, 1, size - 2));
-        const ny = Math.round(clamp(((ly - b.minY) / Math.max(1, b.height)) * size, 1, size - 2));
-        return samplePatch(nx, ny, 1);
-      };
-
-      const userForehead = sampleLandmark(LM.FOREHEAD);
-      const userLeftCheek = sampleLandmark(LM.LEFT_CHEEK);
-      const userRightCheek = sampleLandmark(LM.RIGHT_CHEEK);
-      const userNose = sampleLandmark(LM.NOSE_BRIDGE);
-      // Chin tip: landmark 152 is safely located at the inferior mandibular apex, never inside the mouth
-      const userChin = sampleLandmark(LM.CHIN);
-
-      blendGain(this.zoneLighting.forehead, computeGain(userForehead));
-      blendGain(this.zoneLighting.leftCheek, computeGain(userLeftCheek));
-      blendGain(this.zoneLighting.rightCheek, computeGain(userRightCheek));
-      blendGain(this.zoneLighting.nose, computeGain(userNose));
-      blendGain(this.zoneLighting.chin, computeGain(userChin));
-
-      const centralMean = computeGain(userNose);
-      blendGain(this.colorGain, centralMean);
-    } catch {
-      // Keep existing gain on read error
-    }
-  }
-
   /**
    * Mean RGB of the central face region (cheeks/nose/forehead) of `image`, where `points` are
    * landmark pixel positions inside that image.
@@ -1927,7 +1821,7 @@ export class RealtimeFacialEngine {
     if (apertureMetrics) {
       const teeth = OralCavityRenderer.renderOralCavity(ctx, pts, {
         metrics: apertureMetrics,
-        lightingGain: this.colorGain,
+        lightingGain: IDENTITY_GAIN,
         isSpeaking: metrics.isSpeaking,
         isSmiling: metrics.isSmiling,
       });
@@ -2257,7 +2151,6 @@ export class RealtimeFacialEngine {
           cameraMatch: realismFlags.get().cameraMatch ? { ...this.cameraMatch } : null,
           cameraMatchTrace: [...this.cameraMatchTrace],
           restMar: this.restMouth.rest,
-          lightingGainUpdates: this.lightingGainUpdates,
           personaDelightRange: this.personaDelightRange,
           autoRadius: realismFlags.get().autoRadius ? { ...this.autoRadius } : null,
           autoRadiusTrace: [...this.autoRadiusTrace],

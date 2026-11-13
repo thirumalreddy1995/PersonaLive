@@ -93,18 +93,34 @@ test('the r4 preset is the R4 defaults with the R4b forehead extension off', () 
   assert.equal(defaultRealismFlags().foreheadExtension, false);
   for (const preset of ['r0', 'r1', 'r2', 'r3', 'r3c']) assert.equal(parseRealismFlagString(preset).flags.foreheadExtension, false, preset);
   assert.equal(parseRealismFlagString('r4,foreheadExtension=1').flags.foreheadExtension, true);
-  // R5 flags are opt-in until measured: off by default and in every preset.
+  // R5 flags are off in every preset up to r4.
   for (const key of ['keyframeCrossfade', 'guidedEnrollment', 'videoFramePacing', 'singleGlComposite', 'matrixHeadPose'] as const) {
-    assert.equal(defaultRealismFlags()[key], false, key);
     for (const preset of ['r0', 'r1', 'r2', 'r3', 'r3c', 'r4']) assert.equal(parseRealismFlagString(preset).flags[key], false, `${preset} ${key}`);
     assert.equal(parseRealismFlagString(`r4,${key}=1`).flags[key], true);
   }
-  // R6 flags are opt-in until measured: off by default and in every preset.
-  for (const key of ['cameraMatchMedian'] as const) {
-    assert.equal(defaultRealismFlags()[key], false, key);
-    for (const preset of ['r0', 'r1', 'r2', 'r3', 'r3c', 'r4']) assert.equal(parseRealismFlagString(preset).flags[key], false, `${preset} ${key}`);
-    assert.equal(parseRealismFlagString(`r4,${key}=1`).flags[key], true);
-  }
-  // Until R4b's defaults are decided, r4 equals the registry defaults.
+  // r4 differs from the R6 defaults in exactly the three flags R6 turned on.
+  const defaults = defaultRealismFlags();
+  const differing = REALISM_FLAG_DEFS.map((d) => d.key).filter((k) => flags[k] !== defaults[k]);
+  assert.deepEqual(differing.sort(), ['keyframeCrossfade', 'matrixHeadPose', 'videoFramePacing']);
+});
+
+test('the r6 preset is the Balanced defaults chosen at the end of R6', () => {
+  const { flags, errors } = parseRealismFlagString('r6');
+  assert.deepEqual(errors, []);
+  assert.equal(Object.keys(flags).length, REALISM_FLAG_DEFS.length, 'r6 preset covers every flag');
   assert.deepEqual(flags, defaultRealismFlags());
+  // Balanced = r4 + video-frame pacing, the MediaPipe head pose and the keyframe cross-fade.
+  for (const key of ['keyframeCrossfade', 'videoFramePacing', 'matrixHeadPose'] as const) {
+    assert.equal(defaultRealismFlags()[key], true, key);
+    assert.equal(flags[key], true, key);
+  }
+  // Still opt-in: the guided enrollment, the single GL composite, the median camera-match loop
+  // (dropped in R6 Part 2) and the forehead extension are off by default and in every preset.
+  for (const key of ['guidedEnrollment', 'singleGlComposite', 'cameraMatchMedian', 'foreheadExtension'] as const) {
+    assert.equal(defaultRealismFlags()[key], false, key);
+    for (const preset of ['r0', 'r1', 'r2', 'r3', 'r3c', 'r4', 'r6']) assert.equal(parseRealismFlagString(preset).flags[key], false, `${preset} ${key}`);
+    assert.equal(parseRealismFlagString(`r6,${key}=1`).flags[key], true);
+  }
+  // Relighting stays on: the R0 5-zone gain it replaced was removed in R6.
+  assert.equal(defaultRealismFlags().relight, true);
 });

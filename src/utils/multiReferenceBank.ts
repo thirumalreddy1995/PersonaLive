@@ -15,7 +15,6 @@
  * with temporal hysteresis to guarantee jitter-free transitions.
  */
 
-import { FacialLightingZones } from './meshWarpRenderer.ts';
 
 export interface ReferenceKeyframe {
   id: string;
@@ -28,8 +27,6 @@ export interface ReferenceKeyframe {
   source: HTMLImageElement | HTMLCanvasElement;
   /** Mean RGB color for lighting harmonization */
   meanColor: [number, number, number];
-  /** Zone lighting profile */
-  zoneLighting?: FacialLightingZones;
   /** Canonical aspect ratio */
   width: number;
   height: number;

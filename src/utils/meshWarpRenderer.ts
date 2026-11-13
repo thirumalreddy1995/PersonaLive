@@ -20,14 +20,6 @@ import { closedLipMaskForZone, featherBandWeights, toneWeights, type FaceTopolog
 import type { PackedMasks } from './segmentation.ts';
 import { KeyframeTextureCache } from './keyframeBlend.ts';
 
-export interface FacialLightingZones {
-  forehead: [number, number, number];
-  leftCheek: [number, number, number];
-  rightCheek: [number, number, number];
-  nose: [number, number, number];
-  chin: [number, number, number];
-}
-
 export interface CameraMatchOptions {
   /** Mip level-of-detail bias (≥ 0 blurs the persona by sampling coarser mip levels). */
   lodBias: number;
@@ -107,11 +99,7 @@ export interface WarpFrameOptions {
   positions: Float32Array;
   /** Overall opacity 0..1 (transformation strength). */
   opacity: number;
-  /** Global per-channel RGB multiplier for lighting adaptation. */
-  colorGain: [number, number, number];
-  /** Multi-zone directional lighting adaptation across 5 facial regions. */
-  zoneLighting?: FacialLightingZones;
-  /** Bounding box of the face [minX, minY, width, height] for spatial lighting interpolation. */
+  /** Bounding box of the face [minX, minY, width, height]; the shader's normalised face position. */
   faceBounds?: [number, number, number, number];
   /** Paint persona eyes over the wearer's eyes (otherwise the wearer's real eyes show). */
   drawPersonaEyes: boolean;
@@ -125,7 +113,7 @@ export interface WarpFrameOptions {
   shader?: { unsharp: boolean; subsurface: boolean; sebum: boolean };
   /** Camera-matched sharpness and noise (R2 §4); omitted = off. */
   cameraMatch?: CameraMatchOptions;
-  /** R3 relighting from the real frame; omitted = the zone gains above. */
+  /** R3 relighting from the real frame; omitted = the persona keeps its photo's own lighting. */
   relight?: RelightOptions;
   /** Directional motion blur: head velocity in screen pixels per frame (y up), scaled by the exposure share. */
   motionBlurPx?: [number, number];
@@ -174,15 +162,9 @@ attribute vec2 aUv2;
 uniform vec2 uResolution;
 uniform float uForeheadExt;
 uniform vec4 uFaceBounds;
-uniform vec3 uGainForehead;
-uniform vec3 uGainLeftCheek;
-uniform vec3 uGainRightCheek;
-uniform vec3 uGainNose;
-uniform vec3 uGainChin;
 
 varying vec2 vUv;
 varying float vFeather;
-varying vec3 vLighting;
 varying vec2 vNormPos;
 varying float vLip;
 varying float vLipZone;
@@ -214,21 +196,6 @@ void main() {
   // Normalized position relative to face bounding box [0, 1]
   vec2 nPos = clamp((aPosition - uFaceBounds.xy) / max(uFaceBounds.zw, vec2(1.0)), 0.0, 1.0);
   vNormPos = nPos;
-
-  // Smooth spatial basis functions across forehead, cheeks, nose, and chin/jaw
-  float wForehead = clamp((0.45 - nPos.y) / 0.45, 0.0, 1.0);
-  float wChin = clamp((nPos.y - 0.65) / 0.35, 0.0, 1.0);
-  float midY = clamp(1.0 - abs(nPos.y - 0.5) / 0.35, 0.0, 1.0);
-  float wLeftCheek = midY * clamp((0.45 - nPos.x) / 0.45, 0.0, 1.0);
-  float wRightCheek = midY * clamp((nPos.x - 0.55) / 0.45, 0.0, 1.0);
-  float wNose = clamp(1.0 - length((nPos - vec2(0.5, 0.5)) * vec2(2.5, 2.5)), 0.0, 1.0);
-
-  float totalW = wForehead + wChin + wLeftCheek + wRightCheek + wNose + 0.001;
-  vLighting = (wForehead * uGainForehead +
-               wLeftCheek * uGainLeftCheek +
-               wRightCheek * uGainRightCheek +
-               wNose * uGainNose +
-               wChin * uGainChin) / totalW;
 }`;
 
 const FRAGMENT_SHADER_ES1 = `
@@ -274,7 +241,6 @@ uniform float uHairFeatherPx;
 
 varying vec2 vUv;
 varying float vFeather;
-varying vec3 vLighting;
 varying vec2 vNormPos;
 varying float vLip;
 varying float vLipZone;
@@ -347,9 +313,9 @@ void main() {
   // 2. Lighting. R3 (flag relight): frequency separation in linear light. The persona keeps its
   //    own detail (persona / persona low-pass) and takes the wearer's low-pass shading; its chroma
   //    is mixed toward the wearer's by the tone weight (1 at the face boundary, 0.3 at the centre)
-  //    times the user's skin-tone-match setting. Otherwise the multi-zone gain of R0.
+  //    times the user's skin-tone-match setting. Otherwise the persona keeps its photo's lighting
+  //    (the R0 multi-zone gain was removed in R6).
   vec3 base = clamp(microSkin, 0.0, 1.0);
-  vec3 gain = vLighting;
   vec3 lowCol = base;
   float hasLow = 0.0;
   if (uRelight > 0.5) {
@@ -382,10 +348,9 @@ void main() {
       base = linearToSrgb(clamp(detail * shade * tone, 0.0, 1.0));
       lowCol = linearToSrgb(clamp(shade * tone, 0.0, 1.0));
       hasLow = 1.0;
-      gain = vec3(1.0);
     }
   }
-  vec3 lit = base * gain;
+  vec3 lit = base;
 
   // 3. Warm "subdermal" tint on mid-tones (realism flag shaderSubsurface)
   float lum = dot(lit, vec3(0.299, 0.587, 0.114));
@@ -393,8 +358,9 @@ void main() {
   float sssWeight = clamp((0.42 - abs(lum - 0.44)) * 0.55, 0.0, 0.28) * uSubsurface;
   vec3 sssSkin = mix(lit, subdermal, sssWeight);
 
-  // 4. Synthetic sebum sheen where the lighting gain is high (realism flag shaderSebum)
-  float specLum = max(0.0, dot(vLighting, vec3(0.333)) - 0.88);
+  // 4. Synthetic sebum sheen (realism flag shaderSebum, R0). It was keyed on the R0 zone gain,
+  //    which is 1 since R6; 0.12 is its value at a neutral gain.
+  float specLum = 0.12;
   vec3 specSheen = vec3(0.09, 0.11, 0.13) * specLum * pow(lum, 1.8) * uSebum;
   vec3 naturalSkin = clamp(sssSkin + specSheen, 0.0, 1.0);
 
@@ -636,11 +602,6 @@ interface GLResources {
     uResolution: WebGLUniformLocation | null;
     uTexture: WebGLUniformLocation | null;
     uFaceBounds: WebGLUniformLocation | null;
-    uGainForehead: WebGLUniformLocation | null;
-    uGainLeftCheek: WebGLUniformLocation | null;
-    uGainRightCheek: WebGLUniformLocation | null;
-    uGainNose: WebGLUniformLocation | null;
-    uGainChin: WebGLUniformLocation | null;
     uOpacity: WebGLUniformLocation | null;
     uUnsharp: WebGLUniformLocation | null;
     uSubsurface: WebGLUniformLocation | null;
@@ -1124,11 +1085,6 @@ export class MeshWarpRenderer {
         uResolution: u('uResolution'),
         uTexture: u('uTexture'),
         uFaceBounds: u('uFaceBounds'),
-        uGainForehead: u('uGainForehead'),
-        uGainLeftCheek: u('uGainLeftCheek'),
-        uGainRightCheek: u('uGainRightCheek'),
-        uGainNose: u('uGainNose'),
-        uGainChin: u('uGainChin'),
         uOpacity: u('uOpacity'),
         uUnsharp: u('uUnsharp'),
         uSubsurface: u('uSubsurface'),
@@ -1972,21 +1928,6 @@ export class MeshWarpRenderer {
     gl.bindTexture(gl.TEXTURE_2D, texA);
     gl.uniform1i(loc.uTexture, 0);
     gl.uniform2f(loc.uResolution, this._canvas.width, this._canvas.height);
-
-    // Multi-zone directional lighting
-    const z = opts.zoneLighting;
-    const base = opts.colorGain;
-    const fGain = z?.forehead ?? base;
-    const lGain = z?.leftCheek ?? base;
-    const rGain = z?.rightCheek ?? base;
-    const nGain = z?.nose ?? base;
-    const cGain = z?.chin ?? base;
-
-    gl.uniform3f(loc.uGainForehead, fGain[0], fGain[1], fGain[2]);
-    gl.uniform3f(loc.uGainLeftCheek, lGain[0], lGain[1], lGain[2]);
-    gl.uniform3f(loc.uGainRightCheek, rGain[0], rGain[1], rGain[2]);
-    gl.uniform3f(loc.uGainNose, nGain[0], nGain[1], nGain[2]);
-    gl.uniform3f(loc.uGainChin, cGain[0], cGain[1], cGain[2]);
 
     const bounds = opts.faceBounds ?? [0, 0, this._canvas.width, this._canvas.height];
     gl.uniform4f(loc.uFaceBounds, bounds[0], bounds[1], bounds[2], bounds[3]);

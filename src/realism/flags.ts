@@ -3,11 +3,16 @@
  *
  * Every visual stage of the persona pipeline that the realism pass touches sits behind one of
  * these flags so before/after can be compared live (debug panel) and headlessly (capture tool).
- * Defaults are the behaviour of the latest finished phase (R4: segmentation masks, foreshortening fade and
- * persona inpaint on top of R3c's auto relight radius and R3: relit from the real frame, rest-mouth
+ * Defaults are the behaviour of the latest finished phase (R6 "Balanced": video-frame pacing, the
+ * MediaPipe head pose and the keyframe cross-fade on top of R4's segmentation masks, foreshortening
+ * fade and persona inpaint, R3c's auto relight radius and R3: relit from the real frame, rest-mouth
  * lip window, steady camera match, soft pass-through edges, on top of R1/R2's tracked warp, real
- * mouth and eye pass-through, rigid forehead, WebGL2 texture pipeline). `--flags r0` restores the pre-R1 behaviour; a default changes only after a
- * phase report shows the comparison.
+ * mouth and eye pass-through, rigid forehead, WebGL2 texture pipeline; the segmenter runs on the CPU
+ * delegate through the setting segmentCpu). `--flags r0` restores the pre-R1 stages; a default
+ * changes only after a phase report shows the comparison.
+ *
+ * Since R6 the R0 5-zone CPU lighting gain is gone: with `relight` off (r0–r2 presets, or the debug
+ * toggle) the persona keeps its photo's own lighting instead.
  *
  * This module is pure (no DOM, no Vite env) so the capture tool and the unit tests can import it.
  */
@@ -193,7 +198,7 @@ export const REALISM_FLAG_DEFS: ReadonlyArray<RealismFlagDef> = [
     key: 'relight',
     label: 'Relight from the real frame',
     description:
-      'Frequency-separation relighting (R3): the persona keeps its own detail (pores, brows, stubble) over the wearer\'s low-pass shading, with its chroma matched toward the wearer\'s at the face boundary (setting skinToneMatch). Replaces the 5-zone gain while on.',
+      'Frequency-separation relighting (R3): the persona keeps its own detail (pores, brows, stubble) over the wearer\'s low-pass shading, with its chroma matched toward the wearer\'s at the face boundary (setting skinToneMatch). Off is for diagnostics only: the persona then keeps its photo\'s own lighting (the R0 5-zone gain was removed in R6).',
     defaultValue: true,
     group: 'shader',
   },
@@ -322,8 +327,8 @@ export const REALISM_FLAG_DEFS: ReadonlyArray<RealismFlagDef> = [
   {
     key: 'keyframeCrossfade',
     label: 'Keyframe cross-fade (R5)',
-    description: 'Real keyframes (enrollment shots) are uploaded once each; the shader samples two of them with two UV sets and cross-fades over 150 ms when the bank switches, with no texture upload on a switch.',
-    defaultValue: false,
+    description: 'Real keyframes (enrollment shots) are uploaded once each; the shader samples two of them with two UV sets and cross-fades over 150 ms when the bank switches, with no texture upload on a switch. On by default since R6 (Balanced).',
+    defaultValue: true,
     group: 'bank',
     appliesOn: 'persona-reload',
   },
@@ -337,8 +342,8 @@ export const REALISM_FLAG_DEFS: ReadonlyArray<RealismFlagDef> = [
   {
     key: 'videoFramePacing',
     label: 'Video-frame pacing (R5)',
-    description: 'Drives the loop with requestVideoFrameCallback so each camera frame is processed exactly once; falls back to requestAnimationFrame with a changed-frame check.',
-    defaultValue: false,
+    description: 'Drives the loop with requestVideoFrameCallback so each camera frame is processed exactly once; falls back to requestAnimationFrame with a changed-frame check. On by default since R6 (Balanced).',
+    defaultValue: true,
     group: 'post',
   },
   {
@@ -351,8 +356,8 @@ export const REALISM_FLAG_DEFS: ReadonlyArray<RealismFlagDef> = [
   {
     key: 'matrixHeadPose',
     label: 'MediaPipe head pose (R5)',
-    description: 'Keyframe selection uses the head pose from the facial transformation matrix instead of the landmark-ratio estimate.',
-    defaultValue: false,
+    description: 'Keyframe selection uses the head pose from the facial transformation matrix instead of the landmark-ratio estimate. On by default since R6 (Balanced).',
+    defaultValue: true,
     group: 'bank',
   },
   {
@@ -389,8 +394,11 @@ export const R3C_FLAG_STRING = R3_FLAG_STRING.replace('autoRadius=0', 'autoRadiu
 /** The R4 defaults (segmentation, foreshortening fade and persona inpaint on; R4b's forehead extension off), as a flag string: `--flags r4`. */
 export const R4_FLAG_STRING = R3C_FLAG_STRING.replace('segmentation=0', 'segmentation=1').replace('foreshortenFade=0', 'foreshortenFade=1').replace('personaInpaint=0', 'personaInpaint=1');
 
+/** The R6 defaults (the "Balanced" preset chosen at the end of R6), as a flag string: `--flags r6`. With the setting segmentCpu=1 (the app default since R6). */
+export const R6_FLAG_STRING = R4_FLAG_STRING.replace('keyframeCrossfade=0', 'keyframeCrossfade=1').replace('videoFramePacing=0', 'videoFramePacing=1').replace('matrixHeadPose=0', 'matrixHeadPose=1');
+
 /** Named flag presets accepted by parseRealismFlagString (case-insensitive). */
-export const REALISM_FLAG_PRESETS: Record<string, string> = { r0: R0_FLAG_STRING, r1: R1_FLAG_STRING, r2: R2_FLAG_STRING, r3: R3_FLAG_STRING, r3c: R3C_FLAG_STRING, r4: R4_FLAG_STRING };
+export const REALISM_FLAG_PRESETS: Record<string, string> = { r0: R0_FLAG_STRING, r1: R1_FLAG_STRING, r2: R2_FLAG_STRING, r3: R3_FLAG_STRING, r3c: R3C_FLAG_STRING, r4: R4_FLAG_STRING, r6: R6_FLAG_STRING };
 
 export type RealismFlags = Record<RealismFlagKey, boolean>;
 

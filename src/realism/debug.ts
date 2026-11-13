@@ -46,8 +46,6 @@ export interface RealismDebugState {
   cameraMatchTrace: number[];
   /** Learned resting mouth aperture (flag restMouth), or null until the first frontal window completes. */
   restMar: number | null;
-  /** Times the 5-zone CPU lighting gain ran since the engine was created (R3b item 4). */
-  lightingGainUpdates: number;
   /** Max/min of the de-light field fitted on the persona (flag personaDelight), null when off. */
   personaDelightRange: number | null;
   /** R3c auto-radius loop state (flag autoRadius), null when off. */

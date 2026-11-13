@@ -72,7 +72,8 @@ gitignored) against the persona photo (`--personaPhoto`, default: the first entr
 `references/personas.json`; grid personas use their own file). `summary.identity` holds the cosine
 similarity output ↔ persona, output ↔ wearer and the margin: a regression guard so the persona does
 not fade into the wearer, never a score to maximise or a verification threshold. `--no-identity`
-skips it. `summary.cpuLightingGainUpdates` counts the 5-zone CPU gain (0 with default flags).
+skips it. (Reports before R6 also carry `summary.cpuLightingGainUpdates`, the run count of the 5-zone
+CPU lighting gain; that path was removed in R6.)
 `npx tsx tools/realism/sweep.ts` turns the `r3b-sweep-r<radius>-d<0|1>` runs into per-persona
 side-by-side sheets and a table (`realism-review/out/r3b-sweep/`).
 
@@ -84,8 +85,8 @@ disables it automatically. Review personas never enter the app's library. Every 
 process count, CPU and GPU load at start and end (`app.system`) for the report header.
 
 R4 flags: `segmentation` (MediaPipe multiclass masks from a Web Worker every `--settings segmentEvery=4`
-frames, the default; `segmentCpu=1` runs the segmenter on the CPU: no GPU stall, but ~220 ms per
-mask; the persona is removed under the wearer's hair, hand and glasses, captures carry the masks and
+frames, the default; `segmentCpu=1` (the default since R6) runs the segmenter on the CPU: no GPU stall,
+but ~220 ms per mask; the persona is removed under the wearer's hair, hand and glasses, captures carry the masks and
 `summary.ghostHairShare` / `handLeakShare` / `glassesLeakShare` measure what still leaks),
 `twoBandBlend`, `foreshortenFade`, `personaInpaint` (persona-reload; `summary.personaInpaintShare`),
 `cameraMatchSameMask` (the camera match measures the camera frame only on the pixels where the
@@ -122,9 +123,16 @@ for example seven stills of 3 s each at 15 fps:
 `ffmpeg -f concat -i list.txt -vf "fps=15,format=yuv420p" -f yuv4mpegpipe camera.y4m`.
 
 R6 flag (off): `cameraMatchMedian` (the sharpness loop follows the median of its last seven readings, with
-anti-windup and a 45-frame settle after a persona or source change). `--settings segmentCpu=1` runs the
-segmenter on the CPU delegate: on an integrated GPU that removes the 60-90 ms tracker stalls each GPU mask
-causes, at about 40% of the mask rate. `summary.r5.framesSkipped` counts duplicate ticks the pacing skipped.
+anti-windup and a 45-frame settle after a persona or source change; it leaves sharp single photos too
+sharp, see the R6 Part 2 report). `summary.r5.framesSkipped` counts duplicate ticks the pacing skipped.
+
+Defaults since the end of R6 ("Balanced"): `--flags r6` = `r4` + `videoFramePacing`, `matrixHeadPose`,
+`keyframeCrossfade`, and the app setting `segmentCpu` is on (the segmenter runs on the CPU delegate: on an
+integrated GPU that removes the 60-90 ms tracker stalls each GPU mask causes, at about 40% of the mask rate).
+A run without `--flags` / `--settings` measures these defaults; `--flags r4 --settings segmentCpu=0`
+reproduces the R4 defaults. The user-facing `cameraBlend` setting (0..1, `src/utils/look.ts`) moves the
+look toward the Camera-matched preset (`boundaryFeather` 1 → 1.5, lip floor at least 0.3 × blend); an
+explicit `--settings boundaryFeather=…` overrides its feather.
 
 `--settings temporalSmoothing=20,blendStrength=100` overrides the inspector settings for the run (the
 same keys as `TransformationSettings`; `?rs=` on the page URL does the same in a browser). The rigid

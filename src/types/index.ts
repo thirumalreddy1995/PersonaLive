@@ -154,7 +154,9 @@ export interface TransformationSettings {
   skinToneMatch: number;
   /** R3 relighting low-pass sigma as a share of face width (0.02 measured on the persona grid; 5% let harshly lit personas keep their own shading, the plan's 6–10% darkened the cheeks). */
   relightRadius: number;
-  /** R6: width of the feather at the face boundary relative to the built-in one (1 = five mesh rings; 0.6 narrower, 1.5 wider). */
+  /** R6 "Camera blend", 0..1: 0 is the Balanced look (default), 1 the Camera-matched preset (wider boundary feather, more of the wearer's lips at rest; src/utils/look.ts). */
+  cameraBlend?: number;
+  /** R6: width of the feather at the face boundary relative to the built-in one (1 = five mesh rings; 0.6 narrower, 1.5 wider). Overrides the camera blend's feather when set. */
   boundaryFeather?: number;
   /** R6: output/camera sharpness ratio the camera-match loop aims for (1 = match the camera). */
   cameraMatchSharpness?: number;

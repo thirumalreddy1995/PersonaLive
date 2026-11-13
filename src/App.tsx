@@ -107,7 +107,8 @@ export default function App() {
     lipFadeFloor: 0,
     segmentEvery: 4,
     segmentationStrength: 1,
-    segmentCpu: false,
+    // R6 Balanced: the segmenter on the CPU delegate keeps the tracker off the GPU queue (frame p95 ~30 ms instead of 70–100 ms on an integrated GPU).
+    segmentCpu: true,
     hairlineFeather: 0.025,
     foreheadStretchMin: 0.75,
     foreheadStretchMax: 1.35,
@@ -117,6 +118,7 @@ export default function App() {
     rigidPoseBeta: 0.05,
     rigidShapeOffset: true,
     skinToneMatch: 1,
+    cameraBlend: 0,
     relightRadius: 0.02,
     lightingAdaptation: true,
     preserveFacialHair: true,
