@@ -35,11 +35,17 @@ export const ENROLLMENT_STEPS: ReadonlyArray<EnrollmentStep> = [
   { id: 'smile', label: 'Smile', instruction: 'Face the screen and smile.', target: { yaw: 0, pitch: 0 }, tolerance: { yaw: 8, pitch: 8 }, expression: 'smile' },
 ];
 
-/** Before the frontal baseline exists the pitch band is wide: a camera below the face reads several degrees of pitch at rest. */
-export const FRONTAL_PITCH_BAND = 18;
+/**
+ * Before the frontal baseline exists the pitch band is absolute. A camera above or below the face
+ * reads a few degrees of pitch at rest, so it is wider than the later steps' tolerance, but it must
+ * stay below the chin-up/chin-down target (15 degrees) minus that step's tolerance (5): at the
+ * R5 value of 18 a chin-down frame (17 degrees) passed as frontal. 9.5 rather than 10 so no pitch is both frontal and a chin shot.
+ */
+export const FRONTAL_PITCH_BAND = 9.5;
 export const NEUTRAL_MAX_MAR = 0.14;
 export const NEUTRAL_MAX_SMILE = 0.3;
-export const OPEN_MOUTH_MIN_MAR = 0.3;
+/** Mouth aperture for the open-mouth shot. Speech peaks near 0.27 on the review clips; with the still hold a held "aah" passes from 0.26 (R5 used 0.30, which a natural "aah" at a laptop camera angle did not reach). */
+export const OPEN_MOUTH_MIN_MAR = 0.26;
 export const SMILE_MIN_SCORE = 0.45;
 /** Blur: Laplacian variance of the face crop at ENROLL_ANALYSIS_WIDTH pixels wide (8-bit luma). Provisional floor, to be tuned on recorded shots. */
 export const ENROLL_MIN_SHARPNESS = 4;

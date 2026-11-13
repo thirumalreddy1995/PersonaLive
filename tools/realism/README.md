@@ -121,6 +121,11 @@ record, which only a review build activates. A camera stream of held poses can b
 for example seven stills of 3 s each at 15 fps:
 `ffmpeg -f concat -i list.txt -vf "fps=15,format=yuv420p" -f yuv4mpegpipe camera.y4m`.
 
+R6 flag (off): `cameraMatchMedian` (the sharpness loop follows the median of its last seven readings, with
+anti-windup and a 45-frame settle after a persona or source change). `--settings segmentCpu=1` runs the
+segmenter on the CPU delegate: on an integrated GPU that removes the 60-90 ms tracker stalls each GPU mask
+causes, at about 40% of the mask rate. `summary.r5.framesSkipped` counts duplicate ticks the pacing skipped.
+
 `--settings temporalSmoothing=20,blendStrength=100` overrides the inspector settings for the run (the
 same keys as `TransformationSettings`; `?rs=` on the page URL does the same in a browser). The rigid
 forehead can be tuned the same way: `rigidPoseMinCutoff` / `rigidPoseBeta` (One Euro on the head

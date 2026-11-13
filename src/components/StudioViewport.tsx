@@ -23,6 +23,7 @@ import { TransformationSettings, AuthorizedPersona, FacialMetrics, HeadPose, Eng
 import { RealtimeFacialEngine } from '../utils/facialEngine.ts';
 import { isEnrollmentActive, setEnrollmentFrameProvider, subscribeEnrollmentActive } from '../utils/enrollmentSource.ts';
 import { isRealismDebugEnabled } from '../realism/debug.ts';
+import { realismFlags } from '../realism/flags.ts';
 
 export interface RecordingResult {
   durationSeconds: number;
@@ -137,6 +138,11 @@ export const StudioViewport: React.FC<StudioViewportProps> = ({
     engineRef.current?.setSplitPosition(splitPosition);
   }, [splitPosition]);
 
+  const pacedVideo = React.useSyncExternalStore(
+    (onChange) => realismFlags.subscribe(onChange),
+    () => realismFlags.get().videoFramePacing,
+    () => realismFlags.get().videoFramePacing
+  );
   // R5 §2: the guided enrollment reads the live tracking, so the engine runs while that dialog is open.
   const enrollmentActive = React.useSyncExternalStore(subscribeEnrollmentActive, isEnrollmentActive, isEnrollmentActive);
   useEffect(() => {
@@ -490,7 +496,8 @@ export const StudioViewport: React.FC<StudioViewportProps> = ({
 
       {/* Main Canvas Viewport */}
       <div className="relative flex-1 bg-slate-900/60 rounded-xl border border-slate-800 overflow-hidden flex items-center justify-center shadow-inner">
-        <video ref={videoRef} playsInline muted className="hidden" />
+        {/* With videoFramePacing the video stays in the layout at 1 px instead of display:none, so the compositor keeps presenting its frames (R6). */}
+        <video ref={videoRef} playsInline muted aria-hidden="true" className={pacedVideo ? 'absolute left-0 top-0 w-px h-px opacity-0 pointer-events-none' : 'hidden'} />
 
         <canvas
           ref={canvasRef}

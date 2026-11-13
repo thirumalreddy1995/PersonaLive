@@ -99,6 +99,12 @@ test('the r4 preset is the R4 defaults with the R4b forehead extension off', () 
     for (const preset of ['r0', 'r1', 'r2', 'r3', 'r3c', 'r4']) assert.equal(parseRealismFlagString(preset).flags[key], false, `${preset} ${key}`);
     assert.equal(parseRealismFlagString(`r4,${key}=1`).flags[key], true);
   }
+  // R6 flags are opt-in until measured: off by default and in every preset.
+  for (const key of ['cameraMatchMedian'] as const) {
+    assert.equal(defaultRealismFlags()[key], false, key);
+    for (const preset of ['r0', 'r1', 'r2', 'r3', 'r3c', 'r4']) assert.equal(parseRealismFlagString(preset).flags[key], false, `${preset} ${key}`);
+    assert.equal(parseRealismFlagString(`r4,${key}=1`).flags[key], true);
+  }
   // Until R4b's defaults are decided, r4 equals the registry defaults.
   assert.deepEqual(flags, defaultRealismFlags());
 });

@@ -1,6 +1,6 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { CAMERA_MATCH_EVERY, CAMERA_MATCH_LIMITS, CAMERA_MATCH_WARM_UPDATES, STEADY_DEADBAND, cameraMatchDue, initialCameraMatch, stepCameraMatch } from './cameraMatch.ts';
+import { CAMERA_MATCH_EVERY, CAMERA_MATCH_LIMITS, CAMERA_MATCH_SETTLE_FRAMES, CAMERA_MATCH_WARM_UPDATES, STEADY_DEADBAND, cameraMatchDue, cameraMatchDueSettled, initialCameraMatch, stepCameraMatch } from './cameraMatch.ts';
 import { RELIGHT_RADIUS_SHARE, blendMean, blurTaps, derivativesPreamble, faceStatsFromPixels, lowPassSigma, meanChroma, pairedFaceStats, softHoleRadiusPx, toGlslEs3, uvWidth } from './meshWarpRenderer.ts';
 
 const stats = (laplacianVariance: number, noiseMad: number, samples = 5000) => ({ laplacianVariance, noiseMad, samples });
@@ -186,4 +186,76 @@ test('cameraMatchDue runs the warm-start updates on consecutive frames, then eve
   assert.ok(!cameraMatchDue(1, 0) && !cameraMatchDue(14, 0));
   assert.ok(cameraMatchDue(15, 0) && cameraMatchDue(0, 0));
   assert.ok(cameraMatchDue(7, 0, 7));
+});
+
+test('median camera match (R6): unrepresentative first readings do not wind the sharpen control up', () => {
+  // Clip B with keyframes, as traced: two readings just after the persona loads show the output
+  // four times softer than the camera; from then on it matches, and later it is several times sharper.
+  const sequence: Array<[number, number]> = [
+    [16.7, 4.2],
+    [16.7, 4.2],
+    ...Array.from({ length: 6 }, (): [number, number] => [12, 12.5]),
+    ...Array.from({ length: 6 }, (): [number, number] => [12, 80]),
+  ];
+  const run = (median: boolean) => {
+    let s = initialCameraMatch();
+    let peak = 0;
+    for (const [d, o] of sequence) {
+      s = stepCameraMatch(s, stats(d, 1), stats(o, 1), 0.35, { steady: true, median });
+      peak = Math.max(peak, s.sharpen);
+    }
+    return { s, peak };
+  };
+  const ema = run(false);
+  const med = run(true);
+  // The slow EMAs keep sharpening long after the output stopped being soft.
+  assert.ok(ema.peak > 0.4, `EMA loop peak sharpen ${ema.peak}`);
+  // The median loop never moves on the two outliers: too few readings at first, and from the
+  // third on the newest reading no longer agrees with the median (anti-windup).
+  assert.equal(med.peak, 0, `median loop peak sharpen ${med.peak}`);
+  // ...and blurs once the output really is sharper, within the window.
+  assert.ok(med.s.lodBias > 0.3, `median loop lodBias ${med.s.lodBias}`);
+  assert.equal(med.s.sharpen, 0);
+});
+
+test('median camera match (R6): converges on a steady offset, keeps the dead band and skips held readings', () => {
+  // A persona that is steadily 3x sharper than the camera: blur rises after MEDIAN_MIN_SAMPLES readings.
+  let s = initialCameraMatch();
+  s = stepCameraMatch(s, stats(20, 1), stats(60, 1), 0.35, { steady: true, median: true });
+  s = stepCameraMatch(s, stats(20, 1), stats(60, 1), 0.35, { steady: true, median: true });
+  assert.equal(s.lodBias, 0, 'nothing moves on fewer than three readings');
+  for (let i = 0; i < 4; i++) s = stepCameraMatch(s, stats(20, 1), stats(60, 1), 0.35, { steady: true, median: true });
+  assert.ok(s.lodBias > 0.8, `lodBias ${s.lodBias}`);
+  assert.equal(s.ratioHistory!.length, 6);
+  // Held readings (fast head motion) are recorded but never enter the history.
+  const held = stepCameraMatch(s, stats(2, 1), stats(60, 1), 0.35, { steady: true, median: true, hold: true });
+  assert.equal(held.ratioHistory!.length, 6);
+  assert.equal(held.lodBias, s.lodBias);
+  assert.equal(held.driverLaplacian, 2);
+  // The history is bounded, and a matched output leaves the controls alone (dead band).
+  let m = initialCameraMatch();
+  for (let i = 0; i < 20; i++) m = stepCameraMatch(m, stats(30, 1), stats(30 * Math.exp(STEADY_DEADBAND * 0.8), 1), 0.35, { steady: true, median: true });
+  assert.equal(m.ratioHistory!.length, 7);
+  assert.equal(m.lodBias, 0);
+  assert.equal(m.sharpen, 0);
+  // One motion-blurred reading among matched ones changes nothing.
+  m = stepCameraMatch(m, stats(3, 1), stats(30, 1), 0.35, { steady: true, median: true });
+  assert.equal(m.lodBias, 0);
+});
+
+test('median camera match (R6): no reading for the first frames after a change, then every 15th frame', () => {
+  const due: number[] = [];
+  for (let frame = 100; frame < 100 + CAMERA_MATCH_SETTLE_FRAMES + 40; frame++) if (cameraMatchDueSettled(frame, frame - 100)) due.push(frame);
+  assert.ok(due.length >= 2);
+  assert.ok(due[0] - 100 >= CAMERA_MATCH_SETTLE_FRAMES, `first reading ${due[0] - 100} frames after the change`);
+  assert.ok(due.every((f) => f % CAMERA_MATCH_EVERY === 0));
+  // Windup stops as soon as the newest reading disagrees with the median, and resumes when it agrees again.
+  let s = initialCameraMatch();
+  for (let i = 0; i < 4; i++) s = stepCameraMatch(s, stats(40, 1), stats(10, 1), 0.35, { steady: true, median: true });
+  const rising = s.sharpen;
+  assert.ok(rising > 0);
+  s = stepCameraMatch(s, stats(40, 1), stats(60, 1), 0.35, { steady: true, median: true });
+  assert.equal(s.sharpen, rising, 'held: the newest reading says sharper, the median still says softer');
+  s = stepCameraMatch(s, stats(40, 1), stats(10, 1), 0.35, { steady: true, median: true });
+  assert.ok(s.sharpen > rising);
 });

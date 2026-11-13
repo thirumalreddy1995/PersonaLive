@@ -63,6 +63,30 @@ test('evaluateShot: expression per step', () => {
   assert.match(evaluateShot(step('smile'), { ...good, smile: 0.2 }, { yaw: 0, pitch: 0 }).hints[0], /Smile/);
 });
 
+test('evaluateShot: a chin-down or chin-up frame is not a frontal shot (R6)', () => {
+  // The R5 band of 18 degrees took a 17 degree chin-down frame as the frontal baseline.
+  const down = evaluateShot(step('frontal'), { ...good, pitch: 17 }, null);
+  assert.equal(down.ok, false);
+  assert.equal(down.checks.pose, false);
+  assert.match(down.hints[0], /Raise your chin/);
+  assert.equal(evaluateShot(step('frontal'), { ...good, pitch: -13 }, null).ok, false);
+  assert.equal(evaluateShot(step('frontal'), { ...good, pitch: 9 }, null).ok, true);
+  // No frame can be both frontal (absolute) and inside a chin step's band around a level baseline.
+  for (let pitch = -30; pitch <= 30; pitch++) {
+    const frontal = evaluateShot(step('frontal'), { ...good, pitch }, null).ok;
+    const chin = evaluateShot(step('pitch-down'), { ...good, pitch }, { yaw: 0, pitch: 0 }).ok || evaluateShot(step('pitch-up'), { ...good, pitch }, { yaw: 0, pitch: 0 }).ok;
+    assert.ok(!(frontal && chin), `pitch ${pitch} passes as frontal and as a chin shot`);
+  }
+});
+
+test('evaluateShot: the open-mouth shot takes a held "aah" and refuses a half-open mouth (R6)', () => {
+  const base = { yaw: 0, pitch: 0 };
+  assert.equal(evaluateShot(step('open-mouth'), { ...good, mar: 0.27 }, base).ok, true);
+  assert.equal(evaluateShot(step('open-mouth'), { ...good, mar: 0.24 }, base).ok, false);
+  // The neutral shots still require a closed mouth well below it.
+  assert.equal(evaluateShot(step('frontal'), { ...good, mar: 0.2 }, null).ok, false);
+});
+
 test('evaluateShot: blur, exposure and a missing face block the shot', () => {
   const blurred = evaluateShot(step('frontal'), { ...good, sharpness: ENROLL_MIN_SHARPNESS - 1 }, null);
   assert.equal(blurred.ok, false);

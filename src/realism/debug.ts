@@ -96,7 +96,10 @@ export interface RealismDebugState {
     keyframeMix: number;
     matrixPose: HeadPose | null;
     pacing: 'video-frame' | 'animation-frame' | null;
+    /** Loop ticks without a new camera frame (duplicates the pacing skipped). */
     framesSkipped: number;
+    /** Camera frames replaced by a newer one before the loop got to them (R6 pacing). */
+    framesOverwritten?: number;
     singleGl: boolean;
   };
   personaStatus: string;

@@ -93,9 +93,14 @@ test('flag on: each camera frame is processed exactly once at a 60 Hz display', 
     if (i % 2 === 0) f.videoFrame(now, i / 60);
     f.animationFrame(now);
   }
-  assert.equal(ticks.length, 30);
-  assert.ok(ticks.every((t) => t.mode === 'video-frame' && t.newFrame && !t.stalled));
-  assert.deepEqual(ticks.slice(0, 3).map((t) => t.mediaTime), [0, 2 / 60, 4 / 60]);
+  // The loop ticks on every refresh, but only the 30 ticks that carry a camera frame are processed.
+  assert.equal(ticks.length, 60);
+  const processed = ticks.filter((t) => t.newFrame);
+  assert.equal(processed.length, 30);
+  assert.ok(processed.every((t) => t.mode === 'video-frame' && !t.stalled));
+  assert.ok(ticks.filter((t) => !t.newFrame).every((t) => !t.stalled), 'the other 30 are skipped, not watchdog ticks');
+  assert.deepEqual(processed.slice(0, 3).map((t) => t.mediaTime), [0, 2 / 60, 4 / 60]);
+  assert.equal(pacer.framesOverwritten, 0);
   // Exactly one of each is pending between ticks: no pile-up of callbacks.
   assert.deepEqual(f.pending(), { raf: 1, vfc: 1 });
 });
@@ -117,8 +122,9 @@ test('flag on: the watchdog ticks when the video stops delivering frames, and vi
   assert.ok(stalled.length >= 3 && stalled.length <= 4, `${stalled.length} watchdog ticks in 1 s`);
   assert.ok(stalled.every((t) => t.mode === 'animation-frame' && !t.newFrame));
   for (let i = 1; i < stalled.length; i++) assert.ok(stalled[i].now - stalled[i - 1].now >= PACING_STALL_MS);
-  // Playback resumes.
+  // Playback resumes: the frame is processed on the next animation frame.
   f.videoFrame(1010, 0.033);
+  f.animationFrame(1016);
   const last = ticks[ticks.length - 1];
   assert.equal(last.mode, 'video-frame');
   assert.equal(last.newFrame, true);
@@ -177,5 +183,55 @@ test('cancel stops the loop and a stale callback does nothing', () => {
   pacer.schedule(video, true, () => n++);
   assert.deepEqual(f.pending(), { raf: 1, vfc: 1 });
   f.videoFrame(10, 0.033);
+  assert.equal(n, 0, 'the video callback only marks the frame');
+  f.animationFrame(16);
   assert.equal(n, 1);
+});
+
+test('flag on: a loop slower than the camera processes a frame on every tick instead of every other frame', () => {
+  const f = fakeEnv();
+  const pacer = new FramePacer(f.env);
+  const ticks: PacedTick[] = [];
+  const video = f.video();
+  // The loop is rescheduled only after the frame's work, which here spans two refreshes (about 33 ms).
+  let resume: (() => void) | null = null;
+  const loop = (_now: number, info: PacedTick) => {
+    ticks.push(info);
+    resume = () => pacer.schedule(video, true, loop);
+  };
+  pacer.schedule(video, true, loop);
+  // One second: 60 refreshes, a camera frame on every second one; the loop is free again on every second refresh.
+  for (let i = 0; i < 60; i++) {
+    const now = i * (1000 / 60);
+    if (i % 2 === 0) f.videoFrame(now, i / 60);
+    f.animationFrame(now);
+    if (i % 2 === 1 && resume) {
+      const r: () => void = resume;
+      resume = null;
+      r();
+    }
+  }
+  const processed = ticks.filter((t) => t.newFrame);
+  assert.ok(processed.length >= 29, `${processed.length} frames processed in 1 s (the R5 pacer managed 15)`);
+  assert.equal(ticks.filter((t) => t.stalled).length, 0);
+});
+
+test('flag on: the listener re-arms before the frame is processed, and counts frames it had to overwrite', () => {
+  const f = fakeEnv();
+  const pacer = new FramePacer(f.env);
+  const ticks: PacedTick[] = [];
+  const video = f.video();
+  pacer.schedule(video, true, (_now, info) => ticks.push(info));
+  // Three camera frames arrive before the loop runs once.
+  f.videoFrame(0, 0);
+  assert.equal(f.pending().vfc, 1, 're-armed inside the callback');
+  f.videoFrame(33, 0.033);
+  f.videoFrame(66, 0.066);
+  f.animationFrame(70);
+  assert.equal(ticks.length, 1);
+  assert.equal(ticks[0].mediaTime, 0.066, 'the newest frame is the one processed');
+  assert.equal(pacer.framesOverwritten, 2);
+  // Flag off: the listener is released.
+  pacer.schedule(video, false, () => undefined);
+  assert.equal(f.pending().vfc, 0);
 });

@@ -16,6 +16,8 @@
  *   --name <text>         name typed into the dialog (default "Automated enrollment test")
  *   --category <men|women>   default men
  *   --step-timeout <s>    how long a step may wait for its checks before it is logged as refused (default 45)
+ *   --start-pose <yaw,pitch>   start the capture when the head pose is within 2 degrees of this (a recording
+ *                         with more than one straight-ahead segment); default: any straight, neutral face
  *   --url <url>           a running build (default: vite preview of dist/)
  *   --browser <chrome|chromium|msedge>, --headed
  */
@@ -36,6 +38,7 @@ interface Args {
   name: string;
   category: 'men' | 'women';
   stepTimeoutMs: number;
+  startPose: { yaw: number; pitch: number } | null;
   url: string | null;
   browser: string;
   headed: boolean;
@@ -48,6 +51,7 @@ function parseArgs(argv: string[]): Args {
     name: 'Automated enrollment test',
     category: 'men',
     stepTimeoutMs: 45000,
+    startPose: null,
     url: null,
     browser: 'chrome',
     headed: false,
@@ -67,6 +71,11 @@ function parseArgs(argv: string[]): Args {
       if (c !== 'men' && c !== 'women') throw new Error('--category must be men or women');
       a.category = c;
     } else if (k === '--step-timeout') a.stepTimeoutMs = Number(next()) * 1000;
+    else if (k === '--start-pose') {
+      const [yaw, pitch] = next().split(',').map(Number);
+      if (!Number.isFinite(yaw) || !Number.isFinite(pitch)) throw new Error('--start-pose takes yaw,pitch in degrees');
+      a.startPose = { yaw, pitch };
+    }
     else if (k === '--url') a.url = next();
     else if (k === '--browser') a.browser = next();
     else if (k === '--headed') a.headed = true;
@@ -118,7 +127,10 @@ async function main() {
     // Like a person, start while looking straight at the camera with a closed mouth (the recording loops through all poses).
     await waitForHookState(page, 'a straight, neutral face on the camera', (st) => {
       const m = st?.r5?.matrixPose;
-      return !!st?.faceVisible && !!m && Math.abs(m.yaw) < 10 && Math.abs(m.pitch) < 6 && st.mar < 0.08 && !st.isSmiling;
+      if (!st?.faceVisible || !m || st.mar >= 0.08 || st.isSmiling) return false;
+      // A recording with several straight-ahead segments: start on the one meant as the frontal shot.
+      if (args.startPose) return Math.abs(m.yaw - args.startPose.yaw) < 2 && Math.abs(m.pitch - args.startPose.pitch) < 2;
+      return Math.abs(m.yaw) < 10 && Math.abs(m.pitch) < 6;
     }, 120000);
     await page.getByTestId('enrollment-start').click();
     await page.getByTestId('enrollment-capture').waitFor({ timeout: 5000 });

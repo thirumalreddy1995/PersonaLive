@@ -43,12 +43,12 @@ import { dilateMask, inpaintMasked } from './inpaint.ts';
 import { foreshortenWeights } from './foreshorten.ts';
 import { KeyframeCrossfader } from './keyframeBlend.ts';
 import { driverPoseFromMatrix } from './headPose.ts';
-import { FramePacer, type PacedTick, type PacedVideo } from './framePacing.ts';
+import { FramePacer, pacingMode, type PacedTick, type PacedVideo } from './framePacing.ts';
 import { useSingleGlComposite } from './compositePath.ts';
 import type { EnrollmentFrame } from './enrollmentSource.ts';
 import { FACE_OVAL_RING } from './personaDelight.ts';
 import { READBACK_SIZE } from './meshWarpRenderer.ts';
-import { CameraMatchState, initialCameraMatch, stepCameraMatch, CAMERA_MATCH_WARM_UPDATES, cameraMatchDue } from './cameraMatch.ts';
+import { CameraMatchState, initialCameraMatch, stepCameraMatch, CAMERA_MATCH_WARM_UPDATES, cameraMatchDue, cameraMatchDueSettled } from './cameraMatch.ts';
 import { RestMouthCalibrator, lipFadeWindow } from './restMouth.ts';
 import {
   applyEyelidKinematics,
@@ -259,6 +259,8 @@ export class RealtimeFacialEngine {
   private cameraMatchTrace: number[] = [];
   /** Warm-start updates still to run on consecutive frames (R3b). */
   private cameraMatchWarm = 0;
+  /** Frame index of the last persona or source change (R6 median mode waits for the output to settle). */
+  private cameraMatchChangeFrame = 0;
   /** How often the 5-zone CPU lighting gain ran (0 with the default flags on a WebGL machine). */
   private lightingGainUpdates = 0;
   /** Max/min of the de-light shading field fitted on the current persona (flag personaDelight). */
@@ -441,6 +443,7 @@ export class RealtimeFacialEngine {
     this.cameraMatch = initialCameraMatch();
     this.cameraMatchPending = false;
     this.cameraMatchWarm = CAMERA_MATCH_WARM_UPDATES;
+    this.cameraMatchChangeFrame = this.frameIndex;
     this.captureTimes = [];
     this.burstPlan = null;
     this.patchStatus({ source: video ? kind : this.demoImage ? 'demo' : 'none' });
@@ -691,6 +694,7 @@ export class RealtimeFacialEngine {
       this.cameraMatchTrace = [];
       this.cameraMatchPending = false;
       this.cameraMatchWarm = CAMERA_MATCH_WARM_UPDATES;
+      this.cameraMatchChangeFrame = this.frameIndex;
       this.autoRadius = initialAutoRadius();
       this.autoRadiusPending = false;
       this.autoRadiusTrace = [];
@@ -1398,7 +1402,10 @@ export class RealtimeFacialEngine {
 
     // R2 §4: every 15 frames read the wearer's and the persona's face-region statistics back
     // asynchronously and step the control loop when both have arrived.
-    if (cameraMatchOn && !this.cameraMatchPending && cameraMatchDue(this.frameIndex, this.cameraMatchWarm)) {
+    const cameraMatchNow = flags.cameraMatchMedian
+      ? cameraMatchDueSettled(this.frameIndex, this.frameIndex - this.cameraMatchChangeFrame)
+      : cameraMatchDue(this.frameIndex, this.cameraMatchWarm);
+    if (cameraMatchOn && !this.cameraMatchPending && cameraMatchNow) {
       this.cameraMatchPending = true;
       const faceRect: [number, number, number, number] = [bounds.minX, bounds.minY, bounds.width, bounds.height];
       // The same face box in normalized source coordinates (un-mirrored).
@@ -1435,7 +1442,7 @@ export class RealtimeFacialEngine {
       void stats.then(([d, o]) => {
         this.cameraMatchPending = false;
         if (this.disposed || token !== this.personaPrepareToken || !d || !o) return;
-        this.cameraMatch = stepCameraMatch(this.cameraMatch, d, o, 0.35, { steady, hold });
+        this.cameraMatch = stepCameraMatch(this.cameraMatch, d, o, 0.35, { steady, hold, median: realismFlags.get().cameraMatchMedian });
         if (this.cameraMatchWarm > 0) this.cameraMatchWarm--;
         if (this.cameraMatchTrace.length >= 1024) this.cameraMatchTrace.shift();
         this.cameraMatchTrace.push(this.cameraMatch.lodBias);
@@ -2270,7 +2277,8 @@ export class RealtimeFacialEngine {
             keyframeSecondaryId: this.keyframeSecondaryId,
             keyframeMix: this.keyframeMix,
             matrixPose: this.matrixPose ? { ...this.matrixPose } : null,
-            pacing: this.lastPacing ? this.lastPacing.mode : null,
+            pacing: this.lastPacing ? pacingMode(realismFlags.get().videoFramePacing, this.videoElement as unknown as PacedVideo | null) : null,
+            framesOverwritten: this.pacer.framesOverwritten,
             framesSkipped: this.framesSkipped,
             singleGl: this.singleGlThisFrame,
           },

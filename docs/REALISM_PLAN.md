@@ -714,6 +714,59 @@ Build `dist-r5/` (review build of this branch), Chrome on the Intel UHD adapter,
 - Present 2–3 candidate presets with their contact sheets, and let me choose.
 - Collapse the debug flags into a few user-facing settings with sensible names.
 
+### R6 Part 1 report (2026-11-13): R5/R4b blockers, measured; no default changed
+Branch `realism/r6-tuning`, build `dist-r6/` (review build), Chrome on the Intel UHD adapter. The persona in every run is the automated enrollment `realism-review/enrolled/r6-auto` (seven shots of the wearer himself, review-only). Verification: two passes of six configurations on clips A–E (`r6v-<cfg>-1`, `r6v-<cfg>-2`); the laptop was on battery for most of pass 1, so the timings below are pass 2, on mains. The tracker experiments (`r6-t0…t6`) ran on battery and are used only for comparisons within that set.
+
+**Before → after per clip (pass 2, on mains; A / B / C / D / E)**
+
+| | `r4` | + `cameraMatchMedian` | + keyframes and matrix pose | + keyframes, matrix pose, median | `r4` with the segmenter on CPU | + `videoFramePacing` |
+|---|---|---|---|---|---|---|
+| fps | 30.9 / 27.9 / 22.0 / 31.6 / 30.5 | 28.7 / 32.4 / 28.9 / 31.8 / 29.8 | 30.3 / 31.4 / 30.6 / 30.3 / 29.9 | 30.1 / 29.5 / 32.2 / 30.8 / 34.8 | 35.5 / 37.1 / 35.2 / 36.2 / 41.1 | 25.9 / 23.8 / 24.6 / 24.7 / 26.0 |
+| frame p95 (ms) | 72 / 79 / 91 / 73 / 71 | 76 / 72 / 81 / 70 / 77 | 72 / 73 / 74 / 74 / 76 | 74 / 75 / 69 / 72 / 58 | 30 / 31 / 31 / 30 / 29 | 60 / 84 / 82 / 82 / 68 |
+| sharpness gap (output against driver, ±0.15) | −0.14 / 0.26 / 0.43 / −0.11 / −0.21 | −0.24 / 0.01 / 0.15 / −0.35 / −0.27 | −0.05 / 0.77 / 0.68 / −0.30 / −0.23 | −0.10 / 0.11 / 0.07 / −0.33 / −0.26 | −0.24 / 0.21 / 0.19 / −0.29 / −0.25 | −0.17 / 1.24 / 0.14 / −0.26 / −0.21 |
+| output↔persona (SFace) | 0.94 / 0.67 / 0.81 / 0.91 / 0.81 | 0.94 / 0.65 / 0.83 / 0.91 / 0.81 | 0.91 / 0.68 / 0.82 / 0.91 / 0.80 | 0.91 / 0.68 / 0.82 / 0.91 / 0.81 | 0.94 / 0.69 / 0.83 / 0.91 / 0.81 | 0.94 / 0.70 / 0.82 / 0.91 / 0.81 |
+| masks delivered over the clip | 172 / 363 / 559 / 784 / 1115 | 175 / 383 / 604 / 893 / 1222 | 183 / 386 / 611 / 898 / 1225 | 174 / 380 / 598 / 892 / 1226 | 69 / 143 / 227 / 330 / 444 | 146 / 260 / 400 / 598 / 830 |
+
+All four fixes together (`videoFramePacing`, keyframes, matrix pose, `cameraMatchMedian`, segmenter on CPU), clips A / B only: 29.3 / 29.2 fps, frame p95 27 / 31 ms, sharpness gap −0.17 / −0.14, output↔persona 0.91 / 0.71.
+
+- **Identity delta against `r4`:** within ±0.03 for every configuration on every clip (the persona is the wearer, so the margin against the wearer still says nothing).
+- **Persona grid (median, worst 10%):** not run in Part 1; it belongs to the Part 2 sweep.
+- **Contact sheets:** none new in Part 1; the R5 sheets stand for the keyframe switches.
+
+**1. `videoFramePacing`: fixed**
+- The video callback now only marks "new frame" and re-arms itself at once; the loop stays on `requestAnimationFrame` and processes a tick only when a frame is marked (`src/utils/framePacing.ts`). With the flag on, the video element stays in the layout at 1 px instead of `display:none`.
+- Probe on clip A (flag off → on): median gap between processed frames 33 ms → 33 ms (R5: 33 → 67); 628 distinct frames processed and 370 duplicate ticks skipped, against 767 ticks with the flag off.
+- With the GPU segmenter the flag still processes fewer frames than `r4` (555 against 659 on clip A, 24–26 fps): during a 70 ms tracker stall Chrome announces only the newest frame. With the segmenter on CPU the stalls are gone and the paced loop runs at the clip's rate: 29.6 / 29.4 fps on A / B with 511 / 1369 duplicate ticks skipped.
+- Tests: the existing pacing tests were adapted to the new contract (a frame is processed on the animation frame after it is announced) with the same counts asserted, and two were added (a loop slower than the camera processes a frame on every tick; the listener re-arms before the frame is processed).
+
+**2. Keyframe sharpness on clip B: the camera-match loop, not the keyframes**
+- Trace on clip B with keyframes: just after the persona loads, the loop reads the output as four times softer than the camera (4.2 against 16.7). Its two slow averages are seeded by those readings; at one update per 15 frames, with holds during head motion, the error stays negative for about 9 s while the sharpen control integrates to its limit (1.50). Meanwhile the single readings show the output 5–19 times sharper than the camera (102.9 against 12.2 at 9.6 s).
+- The same seeding, with the opposite sign, is the clip B bistability logged in R4b: whether the first readings push toward blur or sharpen decides the rest of the clip.
+- Fix behind `cameraMatchMedian` (off): the error is the median of the last seven readings; a control moves only while the newest reading agrees with the median (anti-windup); no reading is taken for 45 frames after a persona or source change, and the consecutive-frame warm start is not used. Unit tests replay the traced sequence against both loops.
+- Result: with keyframes the gap on B / C falls from 0.77 / 0.68 to 0.11 / 0.07 (pass 1: 0.20 / 0.74 → 0.10 / 0.07); without keyframes from 0.26 / 0.43 to 0.01 / 0.15 (pass 1: 0.56 / 1.60 → 0.12 / 0.15).
+- Open: on A, D and E the median loop leaves the output 0.24–0.37 softer than the camera, the soft end of what the old loop gives there (−0.33 to +0.19 across the R5 and R6 runs). The loop's own readback and the review metric disagree by that much on those clips; this is for the Part 2 sweep, and the reason the flag stays off.
+
+**3. Guided enrollment gates**
+- Frontal pitch band 18° → 9.5° (10° itself would also pass the chin steps' band of 15° ± 5°; a new test checks that no pitch is both frontal and a chin shot). Open-mouth threshold 0.30 → 0.26.
+- Automated run (`realism:enroll`, new `--start-pose`): 7 of 7 shots, every gate passed, and the dialog signed and saved for the first time end to end. Open mouth was taken at 0.27–0.28 (a frozen frame of speech from clip A; with 0.26 a held speech-wide mouth passes, the 600 ms still hold is what separates it from talking).
+
+**4. Tracker p95: the segmentation model on the integrated GPU**
+- Experiments on clips A / B (battery, frame p95): `r4` 140 / 138 ms; segmentation off 40 / 43; segmenter on CPU 38 / 40; tracker on CPU 127 / 172; segmentation every 4th frame 137 / 132; tracker and segmenter on CPU 45 / 44.
+- Each mask occupies the GPU for 60–90 ms; the tracker's own GPU sync on the main thread waits behind it. It is not the readback call: a non-blocking readback (pixel buffer and fence, masks byte-identical) left p95 at 75 ms. Moving only the tracker to CPU does not help, and segmenting less often does not either, because every mask still stalls a frame. Both experiment flags were removed again.
+- With the existing setting `segmentCpu=1` on mains: 35–41 fps and frame p95 29–31 ms on all five clips; **both performance targets are met**. Cost: a mask every ~300 ms instead of every 60–110 ms (about 40% as many). On these clips the mask metrics do not move (ghost hair 0.00 everywhere; hand leak 0.01 on B and 0.04 on C against 0.00 and 0.03), and tone, seam, lip and identity are within noise. None of the clips has a fast occlusion (a hand crossing the face quickly), which is where slower masks would show.
+
+**What still looks fake (ranked)**: unchanged from R5 (eye-ring ghost on clip B in `r4`; orange forehead patch on clip E), plus the output being softer than the camera on A, D and E with the median loop.
+
+**Deviations**
+- Pass 1 timings unused (battery). `kf` in pass 2 was started while the power state read "battery" for a moment; its frame times match the other mains runs.
+- Two passes; the all-fixes configuration and pacing with the CPU segmenter were run once, on clips A and B only.
+- The R6 tracker experiment reports `r6-t2`, `r6-t5` and `r6-t6` name flags that no longer exist.
+
+**Recommendation for Part 2 (nothing changed yet)**
+- Sweep on top of: `segmentCpu=1`, `videoFramePacing`, `matrixHeadPose`, `keyframeCrossfade`, `cameraMatchMedian`.
+- Before `segmentCpu` becomes a default: one clip with a fast occlusion, and a decision whether the delegate should be chosen per machine (GPU where a mask takes under about 15 ms).
+- A live seven-shot enrollment by a second person is still needed to read identity with keyframes.
+
 ---
 
 ## Phase R7 — Neural renderer (separate approval required)
