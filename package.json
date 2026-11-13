@@ -11,7 +11,7 @@
     "build": "vite build && node tools/check-prod-bundle.cjs",
     "build:review": "node tools/build-review.cjs",
     "preview": "vite preview",
-    "test": "npx tsx --test src/utils/faceMath.test.ts src/utils/faceMesh.test.ts src/utils/rigidPose.test.ts src/utils/personaCrop.test.ts src/utils/cameraMatch.test.ts src/utils/restMouth.test.ts src/utils/personaDelight.test.ts src/utils/autoRadius.test.ts src/utils/faceSymmetry.test.ts src/utils/segmentation.test.ts src/utils/foreheadExtension.test.ts src/utils/keyframeBlend.test.ts src/utils/headPose.test.ts src/utils/framePacing.test.ts src/utils/compositePath.test.ts src/utils/enrollment.test.ts src/utils/enrollmentSource.test.ts src/utils/neuralPipelineAudit.test.ts src/utils/assetUrl.test.ts src/utils/imageStatistics.test.ts src/utils/watermark.test.ts src/utils/look.test.ts src/realism/flags.test.ts src/realism/settings.test.ts src/realism/profiler.test.ts tools/realism/metrics.test.ts tools/realism/personaSet.test.ts tools/realism/degrade.test.ts tools/realism/compare.test.ts tools/realism/identity.test.ts tools/realism/sweep.test.ts tools/realism/enrollExport.test.ts electron/resolveDistFile.test.cjs",
+    "test": "npx tsx --test src/utils/faceMath.test.ts src/utils/faceMesh.test.ts src/utils/rigidPose.test.ts src/utils/personaCrop.test.ts src/utils/cameraMatch.test.ts src/utils/restMouth.test.ts src/utils/personaDelight.test.ts src/utils/autoRadius.test.ts src/utils/faceSymmetry.test.ts src/utils/segmentation.test.ts src/utils/foreheadExtension.test.ts src/utils/keyframeBlend.test.ts src/utils/headPose.test.ts src/utils/framePacing.test.ts src/utils/compositePath.test.ts src/utils/enrollment.test.ts src/utils/enrollmentSource.test.ts src/utils/neuralPipelineAudit.test.ts src/utils/assetUrl.test.ts src/utils/imageStatistics.test.ts src/utils/watermark.test.ts src/utils/look.test.ts src/utils/identityShape.test.ts src/realism/flags.test.ts src/realism/settings.test.ts src/realism/profiler.test.ts tools/realism/metrics.test.ts tools/realism/personaSet.test.ts tools/realism/degrade.test.ts tools/realism/compare.test.ts tools/realism/identity.test.ts tools/realism/sweep.test.ts tools/realism/enrollExport.test.ts tools/realism/auditLayout.test.ts electron/resolveDistFile.test.cjs",
     "clean": "rm -rf dist",
     "lint": "tsc --noEmit",
     "desktop:run": "electron .",
@@ -21,7 +21,8 @@
     "realism:enroll": "tsx tools/realism/enroll.ts",
     "realism:still": "tsx tools/realism/still.ts",
     "realism:personas": "tsx tools/realism/personas-select.ts",
-    "realism:compare": "tsx tools/realism/compare.ts"
+    "realism:compare": "tsx tools/realism/compare.ts",
+    "realism:audit": "tsx tools/realism/audit.ts"
   },
   "dependencies": {
     "@mediapipe/tasks-vision": "^1.2.0",

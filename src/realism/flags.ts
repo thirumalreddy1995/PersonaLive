@@ -67,7 +67,12 @@ export type RealismFlagKey =
   | 'videoFramePacing'
   | 'singleGlComposite'
   | 'matrixHeadPose'
-  | 'cameraMatchMedian';
+  | 'cameraMatchMedian'
+  | 'relightIllumination'
+  | 'skinTint'
+  | 'personaProportions'
+  | 'jawExtension'
+  | 'lidPassThrough';
 
 export const REALISM_FLAG_DEFS: ReadonlyArray<RealismFlagDef> = [
   {
@@ -367,6 +372,43 @@ export const REALISM_FLAG_DEFS: ReadonlyArray<RealismFlagDef> = [
     defaultValue: false,
     group: 'shader',
   },
+  {
+    key: 'relightIllumination',
+    label: 'Relight: illumination only (R6b)',
+    description:
+      'Relighting moves only the light: skin-only, large-scale low passes (beard, brows, eyes and lips weighted out) give each face its relative illumination; the persona keeps its own beard, brows, skin tone and lip and nose colour, and baked-in glare is compressed. The mean skin colour moves toward the wearer by the skin tone match.',
+    defaultValue: false,
+    group: 'shader',
+  },
+  {
+    key: 'skinTint',
+    label: 'Tint neck and ears toward the persona (R6b)',
+    description: "The wearer's visible neck and ear skin (segmentation masks) is recoloured toward the shared skin tone under the persona, so the face need not be pulled toward the wearer's tone. Needs relight with illumination only.",
+    defaultValue: false,
+    group: 'overlay',
+  },
+  {
+    key: 'personaProportions',
+    label: 'Persona feature proportions (R6b)',
+    description: "Interior features (nose, mouth and, with persona eyes, eye spacing) take the persona's layout relative to the eyes, mapped by the head pose; the face oval stays on the wearer, and the lips return to the wearer's as the real mouth opens. Needs a few frontal frames to learn the wearer's neutral shape.",
+    defaultValue: false,
+    group: 'mesh',
+  },
+  {
+    key: 'jawExtension',
+    label: 'Beard below the jaw line (R6b)',
+    description: "Where the persona photo has a beard below the jaw line, the lower face rings are pushed outward in the persona UVs and on screen alike, so the beard is drawn over the wearer's jaw instead of ending at the face oval. A clean-shaven persona is unchanged.",
+    defaultValue: false,
+    group: 'mesh',
+    appliesOn: 'persona-reload',
+  },
+  {
+    key: 'lidPassThrough',
+    label: 'Eyelid pass-through with lid closure (R6b)',
+    description: "As the wearer's lids lower (blink or downward gaze) the eye pass-through widens over the upper lid, so the persona's open-eye crease does not stay as a pale arc above a lowered lid.",
+    defaultValue: false,
+    group: 'mouth-eyes',
+  },
 ];
 
 /**
@@ -374,19 +416,19 @@ export const REALISM_FLAG_DEFS: ReadonlyArray<RealismFlagDef> = [
  * the current defaults are. Update this only when a phase report changes defaults.
  */
 export const R0_FLAG_STRING =
-  'speechAnatomy=1,perspectiveForeshortening=1,eyelidKinematics=1,foreheadHarmonize=1,hairlineSoften=1,oralCavity=1,catchlights=1,syntheticSuite=1,shaderUnsharp=1,shaderSubsurface=1,shaderSebum=1,realMouth=0,eyePassThrough=0,closedLipMask=0,rigidForehead=0,webgl2=0,personaCrop=0,cameraMatch=0,relight=0,restMouth=0,softHoles=0,steadyCameraMatch=0,motionBlur=0,relightGlobalTone=0,relightShadowGuard=0,personaDelight=0,autoRadius=0,symmetricDelight=0,segmentation=0,twoBandBlend=0,foreshortenFade=0,personaInpaint=0,cameraMatchSameMask=0,foreheadExtension=0,keyframeCrossfade=0,guidedEnrollment=0,videoFramePacing=0,singleGlComposite=0,matrixHeadPose=0,cameraMatchMedian=0';
+  'speechAnatomy=1,perspectiveForeshortening=1,eyelidKinematics=1,foreheadHarmonize=1,hairlineSoften=1,oralCavity=1,catchlights=1,syntheticSuite=1,shaderUnsharp=1,shaderSubsurface=1,shaderSebum=1,realMouth=0,eyePassThrough=0,closedLipMask=0,rigidForehead=0,webgl2=0,personaCrop=0,cameraMatch=0,relight=0,restMouth=0,softHoles=0,steadyCameraMatch=0,motionBlur=0,relightGlobalTone=0,relightShadowGuard=0,personaDelight=0,autoRadius=0,symmetricDelight=0,segmentation=0,twoBandBlend=0,foreshortenFade=0,personaInpaint=0,cameraMatchSameMask=0,foreheadExtension=0,keyframeCrossfade=0,guidedEnrollment=0,videoFramePacing=0,singleGlComposite=0,matrixHeadPose=0,cameraMatchMedian=0,relightIllumination=0,skinTint=0,personaProportions=0,jawExtension=0,lidPassThrough=0';
 
 /** The R1 defaults, as a flag string: `--flags r1` reproduces the end-of-R1 behaviour. */
 export const R1_FLAG_STRING =
-  'speechAnatomy=0,perspectiveForeshortening=0,eyelidKinematics=0,foreheadHarmonize=1,hairlineSoften=1,oralCavity=0,catchlights=0,syntheticSuite=0,shaderUnsharp=0,shaderSubsurface=0,shaderSebum=0,realMouth=1,eyePassThrough=1,closedLipMask=0,rigidForehead=0,webgl2=0,personaCrop=0,cameraMatch=0,relight=0,restMouth=0,softHoles=0,steadyCameraMatch=0,motionBlur=0,relightGlobalTone=0,relightShadowGuard=0,personaDelight=0,autoRadius=0,symmetricDelight=0,segmentation=0,twoBandBlend=0,foreshortenFade=0,personaInpaint=0,cameraMatchSameMask=0,foreheadExtension=0,keyframeCrossfade=0,guidedEnrollment=0,videoFramePacing=0,singleGlComposite=0,matrixHeadPose=0,cameraMatchMedian=0';
+  'speechAnatomy=0,perspectiveForeshortening=0,eyelidKinematics=0,foreheadHarmonize=1,hairlineSoften=1,oralCavity=0,catchlights=0,syntheticSuite=0,shaderUnsharp=0,shaderSubsurface=0,shaderSebum=0,realMouth=1,eyePassThrough=1,closedLipMask=0,rigidForehead=0,webgl2=0,personaCrop=0,cameraMatch=0,relight=0,restMouth=0,softHoles=0,steadyCameraMatch=0,motionBlur=0,relightGlobalTone=0,relightShadowGuard=0,personaDelight=0,autoRadius=0,symmetricDelight=0,segmentation=0,twoBandBlend=0,foreshortenFade=0,personaInpaint=0,cameraMatchSameMask=0,foreheadExtension=0,keyframeCrossfade=0,guidedEnrollment=0,videoFramePacing=0,singleGlComposite=0,matrixHeadPose=0,cameraMatchMedian=0,relightIllumination=0,skinTint=0,personaProportions=0,jawExtension=0,lidPassThrough=0';
 
 /** The R2 defaults, as a flag string: `--flags r2` reproduces the end-of-R2 behaviour. */
 export const R2_FLAG_STRING =
-  'speechAnatomy=0,perspectiveForeshortening=0,eyelidKinematics=0,foreheadHarmonize=1,hairlineSoften=1,oralCavity=0,catchlights=0,syntheticSuite=0,shaderUnsharp=0,shaderSubsurface=0,shaderSebum=0,realMouth=1,eyePassThrough=1,closedLipMask=1,rigidForehead=1,webgl2=1,personaCrop=1,cameraMatch=1,relight=0,restMouth=0,softHoles=0,steadyCameraMatch=0,motionBlur=0,relightGlobalTone=0,relightShadowGuard=0,personaDelight=0,autoRadius=0,symmetricDelight=0,segmentation=0,twoBandBlend=0,foreshortenFade=0,personaInpaint=0,cameraMatchSameMask=0,foreheadExtension=0,keyframeCrossfade=0,guidedEnrollment=0,videoFramePacing=0,singleGlComposite=0,matrixHeadPose=0,cameraMatchMedian=0';
+  'speechAnatomy=0,perspectiveForeshortening=0,eyelidKinematics=0,foreheadHarmonize=1,hairlineSoften=1,oralCavity=0,catchlights=0,syntheticSuite=0,shaderUnsharp=0,shaderSubsurface=0,shaderSebum=0,realMouth=1,eyePassThrough=1,closedLipMask=1,rigidForehead=1,webgl2=1,personaCrop=1,cameraMatch=1,relight=0,restMouth=0,softHoles=0,steadyCameraMatch=0,motionBlur=0,relightGlobalTone=0,relightShadowGuard=0,personaDelight=0,autoRadius=0,symmetricDelight=0,segmentation=0,twoBandBlend=0,foreshortenFade=0,personaInpaint=0,cameraMatchSameMask=0,foreheadExtension=0,keyframeCrossfade=0,guidedEnrollment=0,videoFramePacing=0,singleGlComposite=0,matrixHeadPose=0,cameraMatchMedian=0,relightIllumination=0,skinTint=0,personaProportions=0,jawExtension=0,lidPassThrough=0';
 
 /** The R3 defaults (end of R3b), as a flag string: `--flags r3` reproduces them (fixed 2% relight radius, no loop). */
 export const R3_FLAG_STRING =
-  'speechAnatomy=0,perspectiveForeshortening=0,eyelidKinematics=0,foreheadHarmonize=1,hairlineSoften=1,oralCavity=0,catchlights=0,syntheticSuite=0,shaderUnsharp=0,shaderSubsurface=0,shaderSebum=0,realMouth=1,eyePassThrough=1,closedLipMask=0,rigidForehead=1,webgl2=1,personaCrop=1,cameraMatch=1,relight=1,restMouth=1,softHoles=1,steadyCameraMatch=1,motionBlur=0,relightGlobalTone=1,relightShadowGuard=1,personaDelight=0,autoRadius=0,symmetricDelight=0,segmentation=0,twoBandBlend=0,foreshortenFade=0,personaInpaint=0,cameraMatchSameMask=0,foreheadExtension=0,keyframeCrossfade=0,guidedEnrollment=0,videoFramePacing=0,singleGlComposite=0,matrixHeadPose=0,cameraMatchMedian=0';
+  'speechAnatomy=0,perspectiveForeshortening=0,eyelidKinematics=0,foreheadHarmonize=1,hairlineSoften=1,oralCavity=0,catchlights=0,syntheticSuite=0,shaderUnsharp=0,shaderSubsurface=0,shaderSebum=0,realMouth=1,eyePassThrough=1,closedLipMask=0,rigidForehead=1,webgl2=1,personaCrop=1,cameraMatch=1,relight=1,restMouth=1,softHoles=1,steadyCameraMatch=1,motionBlur=0,relightGlobalTone=1,relightShadowGuard=1,personaDelight=0,autoRadius=0,symmetricDelight=0,segmentation=0,twoBandBlend=0,foreshortenFade=0,personaInpaint=0,cameraMatchSameMask=0,foreheadExtension=0,keyframeCrossfade=0,guidedEnrollment=0,videoFramePacing=0,singleGlComposite=0,matrixHeadPose=0,cameraMatchMedian=0,relightIllumination=0,skinTint=0,personaProportions=0,jawExtension=0,lidPassThrough=0';
 
 /** The R3c defaults (auto relight radius on, R4 flags off), as a flag string: `--flags r3c`. The loop's thresholds are constants (1.5 / 2.5 since R4). */
 export const R3C_FLAG_STRING = R3_FLAG_STRING.replace('autoRadius=0', 'autoRadius=1');
@@ -397,8 +439,11 @@ export const R4_FLAG_STRING = R3C_FLAG_STRING.replace('segmentation=0', 'segment
 /** The R6 defaults (the "Balanced" preset chosen at the end of R6, plus the guided enrollment in the library), as a flag string: `--flags r6`. With the setting segmentCpu=1 (the app default since R6). */
 export const R6_FLAG_STRING = R4_FLAG_STRING.replace('keyframeCrossfade=0', 'keyframeCrossfade=1').replace('videoFramePacing=0', 'videoFramePacing=1').replace('matrixHeadPose=0', 'matrixHeadPose=1').replace('guidedEnrollment=0', 'guidedEnrollment=1');
 
+/** R6b candidate (not the defaults): r6 with the five identity flags on, for before/after review runs. */
+export const R6B_FLAG_STRING = R6_FLAG_STRING.replace('relightIllumination=0', 'relightIllumination=1').replace('skinTint=0', 'skinTint=1').replace('personaProportions=0', 'personaProportions=1').replace('jawExtension=0', 'jawExtension=1').replace('lidPassThrough=0', 'lidPassThrough=1');
+
 /** Named flag presets accepted by parseRealismFlagString (case-insensitive). */
-export const REALISM_FLAG_PRESETS: Record<string, string> = { r0: R0_FLAG_STRING, r1: R1_FLAG_STRING, r2: R2_FLAG_STRING, r3: R3_FLAG_STRING, r3c: R3C_FLAG_STRING, r4: R4_FLAG_STRING, r6: R6_FLAG_STRING };
+export const REALISM_FLAG_PRESETS: Record<string, string> = { r0: R0_FLAG_STRING, r1: R1_FLAG_STRING, r2: R2_FLAG_STRING, r3: R3_FLAG_STRING, r3c: R3C_FLAG_STRING, r4: R4_FLAG_STRING, r6: R6_FLAG_STRING, r6b: R6B_FLAG_STRING };
 
 export type RealismFlags = Record<RealismFlagKey, boolean>;
 

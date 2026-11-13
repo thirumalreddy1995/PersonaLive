@@ -16,7 +16,7 @@
  * is the fallback, then a Canvas 2D per-triangle affine warp. The renderer survives WebGL
  * context loss (GPU reset, tab backgrounding) by rebuilding its GPU resources on restore.
  */
-import { closedLipMaskForZone, featherBandWeights, toneWeights, type FaceTopology } from './faceMesh.ts';
+import { closedLipMaskForZone, featherBandWeights, skinPaintWeights, toneWeights, type FaceTopology } from './faceMesh.ts';
 import type { PackedMasks } from './segmentation.ts';
 import { KeyframeTextureCache } from './keyframeBlend.ts';
 
@@ -53,6 +53,15 @@ export interface RelightOptions {
    * same frame); the masked blur then fills those pixels from the surrounding skin.
    */
   excludeHair?: number | boolean;
+  /**
+   * R6b (flag relightIllumination): move only the light. Both low passes become skin-only (beard,
+   * brows, eyes and lips weighted out) and large-scale (radiusShare), and the shader applies the
+   * wearer's relative shading to the persona's own colours, so beard, brows, skin tone and lip and
+   * nose colour stay the persona's.
+   */
+  illumination?: boolean;
+  /** R6b: compress specular glare baked into the persona photo (needs illumination). */
+  specular?: boolean;
 }
 
 /** Frames between driver mean-tone readbacks (a small synchronous readPixels of the 1/RELIGHT_SCALE-scale low pass). */
@@ -69,6 +78,12 @@ export const RELIGHT_SCALE = 4;
  * cheek-vs-neck gap sits inside ±3 ΔE of the wearer's own on all three clips.
  */
 export const RELIGHT_RADIUS_SHARE = 0.02;
+/** R6b: low-pass sigma (share of face width) of the skin-only illumination estimate (flag relightIllumination). */
+export const ILLUMINATION_RADIUS_SHARE = 0.1;
+/** R6b: largest neck/ear tint alpha; kept under 0.5 so the review's leak metrics (alpha ≥ 128) never count it as persona pixels. */
+export const SKIN_TINT_MAX = 0.45;
+/** R6b: boundary-feather width on the jaw rings under a persona beard (1 = the built-in five rings). */
+export const JAW_BEARD_FEATHER = 0.55;
 /** Soft pass-through edges: the fade spans this many camera-blur radii (R3 item 4), clamped to 1..12 px. */
 export const SOFT_HOLE_RADII = 1.5;
 
@@ -131,6 +146,13 @@ export interface WarpFrameOptions {
    * `featherPx` screen pixels); omitted = off.
    */
   forehead?: { strength: number; featherPx: number };
+  /**
+   * R6b (flag skinTint): 0..SKIN_TINT_MAX, tints the wearer's visible skin just outside the face
+   * oval (neck and ears, from the segmentation masks) toward the shared skin tone, so the face
+   * does not have to be pulled toward the wearer's tone to meet it. Needs relight with
+   * illumination and the masks; omitted = off.
+   */
+  skinTint?: number;
 }
 
 /** Face-region pixel statistics from an asynchronous readback. */
@@ -226,6 +248,10 @@ uniform float uGlobalTone;
 uniform float uShadowGuard;
 uniform vec3 uMeanChromaP;
 uniform vec3 uMeanChromaD;
+uniform float uIllum;
+uniform vec3 uMeanP;
+uniform vec3 uMeanD;
+uniform float uSpecular;
 uniform vec2 uMotionBlur;
 uniform float uSoftHolesPx;
 uniform sampler2D uSegMask;
@@ -323,7 +349,35 @@ void main() {
     // R5: each keyframe has its own low pass, mixed like the colour so a switch is not a tone step.
     if (uKeyMix > 0.0) pl = mix(pl, texture2D(uPersonaLow2, vUv2), uKeyMix);
     vec4 dl = texture2D(uDriverLow, gl_FragCoord.xy / uResolution);
-    if (pl.a > 0.05 && dl.a > 0.05) {
+    if (uIllum > 0.5) {
+      // R6b (flag relightIllumination): only the light moves over. Both low passes are skin-only
+      // and large-scale, so each divided by its face's mean skin colour is that face's relative
+      // illumination. The persona's own pattern is divided out and the wearer's applied; its
+      // colours (beard, brows, skin tone, lips, nose) stay. The mean skin colour moves toward the
+      // wearer's by the tone match, fully at the boundary and about half in the centre.
+      vec3 P = srgbToLinear(base) * vDelight;
+      vec3 PL = mix(uMeanP, pl.rgb / max(pl.a, 1e-4), smoothstep(0.02, 0.2, pl.a));
+      vec3 DL = mix(uMeanD, dl.rgb / max(dl.a, 1e-4), smoothstep(0.02, 0.2, dl.a));
+      if (uSpecular > 0.5) {
+        // Glare baked into the photo (nose tip, forehead): compress what is far brighter than the
+        // skin around it. Lips (teeth) and eyes are left alone.
+        float rel = luma(P) / max(luma(PL), 0.002);
+        float k = smoothstep(1.25, 1.8, rel) * (1.0 - clamp(vLip, 0.0, 1.0)) * (1.0 - clamp(vEyeFade, 0.0, 1.0));
+        P = mix(P, PL * (1.25 + max(rel - 1.25, 0.0) * 0.2), k);
+      }
+      float shadeP = luma(PL) / max(luma(uMeanP), 0.002);
+      float shadeD = luma(DL) / max(luma(uMeanD), 0.002);
+      float ratio = clamp(shadeD / max(shadeP, 0.05), 0.25, 4.0);
+      float e = clamp(uToneMatch * mix(0.35, 1.0, clamp(vToneWeight, 0.0, 1.0)), 0.0, 1.0);
+      vec3 g = pow(clamp(uMeanD / max(uMeanP, vec3(0.002)), vec3(0.25), vec3(4.0)), vec3(e));
+      // The colour part of the tone match is for skin; beard, hair and brows take only its
+      // brightness, or a neutral beard turns olive when the wearer's skin is lighter and less red.
+      float skinP = smoothstep(0.16, 0.28, (P.r - P.b) / max(P.r + P.g + P.b, 1e-4)) * smoothstep(0.003, 0.015, luma(P));
+      g = mix(vec3(pow(clamp(luma(uMeanD) / max(luma(uMeanP), 0.002), 0.25, 4.0), e)), g, skinP);
+      base = linearToSrgb(clamp(P * ratio * g, 0.0, 1.0));
+      lowCol = linearToSrgb(clamp(PL * ratio * g, 0.0, 1.0));
+      hasLow = 1.0;
+    } else if (pl.a > 0.05 && dl.a > 0.05) {
       // Symmetric de-light (flag symmetricDelight): per-vertex gain removing the photo's asymmetric mid-band light.
       vec3 P = srgbToLinear(base) * vDelight;
       vec3 PL = pl.rgb / pl.a;  // the low passes are stored in linear light (see PAINT_FRAGMENT_ES1)
@@ -444,6 +498,8 @@ void main() {
 const PAINT_VERTEX_ES1 = `
 attribute vec2 aPosition;
 attribute vec2 aUv;
+attribute float aSkin;
+varying float vSkin;
 uniform float uMode;
 uniform vec2 uResolution;
 uniform vec4 uSrcMap;
@@ -458,6 +514,7 @@ void main() {
     gl_Position = vec4(aUv.x * 2.0 - 1.0, aUv.y * 2.0 - 1.0, 0.0, 1.0);
     vTex = aUv;
   }
+  vSkin = aSkin;
 }`;
 const PAINT_FRAGMENT_ES1 = `
 precision highp float;
@@ -465,7 +522,9 @@ uniform sampler2D uTexture;
 uniform sampler2D uSegMask;
 uniform float uSegOn;
 uniform vec4 uSegRect;
+uniform float uSkinMode;
 varying vec2 vTex;
+varying float vSkin;
 void main() {
   // Linear light before the blur, so the low pass is a true mean and not a gamma-space one.
   vec3 c = texture2D(uTexture, clamp(vTex, 0.0, 1.0)).rgb;
@@ -475,7 +534,16 @@ void main() {
     vec2 mu = (vTex - uSegRect.xy) / uSegRect.zw;
     if (mu.x >= 0.0 && mu.x <= 1.0 && mu.y >= 0.0 && mu.y <= 1.0) a = 1.0 - uSegOn * smoothstep(0.3, 0.7, texture2D(uSegMask, mu).r);
   }
-  gl_FragColor = vec4(pow(max(c, vec3(0.0)), vec3(2.2)) * a, a);
+  vec3 lin = pow(max(c, vec3(0.0)), vec3(2.2));
+  if (uSkinMode > 0.5) {
+    // R6b: skin only. Beard, hair and brows are dark and far less red than skin, which keeps its
+    // redness in shadow too; eyes, lips and brows are also weighted out per vertex (aSkin).
+    float s = lin.r + lin.g + lin.b;
+    float red = (lin.r - lin.b) / max(s, 1e-4);
+    float lum = dot(lin, vec3(0.2126, 0.7152, 0.0722));
+    a *= clamp(vSkin, 0.0, 1.0) * smoothstep(0.16, 0.28, red) * smoothstep(0.003, 0.015, lum);
+  }
+  gl_FragColor = vec4(lin * a, a);
 }`;
 
 /** R3 low-pass pipeline, pass 2: separable Gaussian on premultiplied RGBA (15 taps, spaced). */
@@ -494,6 +562,42 @@ void main() {
     wsum += w;
   }
   gl_FragColor = acc / wsum;
+}`;
+
+/**
+ * R6b (flag skinTint): the wearer's visible skin around the face (neck below the jaw, ears),
+ * recoloured toward the shared skin tone and drawn under the persona with a soft falloff. Uses the
+ * camera frame of the relight pass and the segmentation masks; premultiplied output.
+ */
+const TINT_FRAGMENT_ES1 = `
+precision highp float;
+uniform sampler2D uTexture;
+uniform sampler2D uSegMask;
+uniform vec2 uResolution;
+uniform vec4 uSrcMap;
+uniform float uMirror;
+uniform vec4 uSegRect;
+uniform vec4 uFaceBounds;
+uniform vec3 uGain;
+uniform float uStrength;
+void main() {
+  float x = gl_FragCoord.x;
+  float y = uResolution.y - gl_FragCoord.y;
+  float sx = uMirror > 0.5 ? uResolution.x - x : x;
+  vec2 su = vec2((sx - uSrcMap.x) / uSrcMap.z, (y - uSrcMap.y) / uSrcMap.w);
+  vec2 mu = (su - uSegRect.xy) / uSegRect.zw;
+  if (su.x < 0.0 || su.x > 1.0 || su.y < 0.0 || su.y > 1.0 || mu.x < 0.0 || mu.x > 1.0 || mu.y < 0.0 || mu.y > 1.0) discard;
+  vec4 m = texture2D(uSegMask, mu);
+  float skin = max(m.g, m.b) * (1.0 - smoothstep(0.4, 0.7, m.r)) * (1.0 - smoothstep(0.4, 0.7, m.a));
+  vec2 c = uFaceBounds.xy + 0.5 * uFaceBounds.zw;
+  vec2 q = vec2((x - c.x) / max(0.5 * uFaceBounds.z, 1.0), (y - c.y) / max(0.5 * uFaceBounds.w, 1.0));
+  // Outside the face oval, inside a region that reaches the ears and well down the neck.
+  float inner = smoothstep(0.85, 1.05, length(q));
+  float outer = 1.0 - smoothstep(0.8, 1.0, length(vec2(q.x / 1.7, q.y > 0.0 ? q.y / 2.6 : q.y / 1.2)));
+  float a = uStrength * skin * inner * outer;
+  if (a < 0.003) discard;
+  vec3 lin = pow(max(texture2D(uTexture, su).rgb, vec3(0.0)), vec3(2.2)) * uGain;
+  gl_FragColor = vec4(pow(clamp(lin, 0.0, 1.0), vec3(1.0 / 2.2)) * a, a);
 }`;
 
 /** Simple textured quad, used to downsample a source into a small framebuffer for readback. */
@@ -562,6 +666,9 @@ interface KeyEntry {
   lowShare: number;
   lowUv: Float32Array | null;
   mean: [number, number, number] | null;
+  /** R6b: whether the low pass is the skin-only one, and its mean skin colour. */
+  lowIllum: boolean;
+  meanColour: [number, number, number] | null;
 }
 
 interface GLResources {
@@ -576,6 +683,8 @@ interface GLResources {
   eyeFadeBuffer: WebGLBuffer;
   toneBuffer: WebGLBuffer;
   delightBuffer: WebGLBuffer;
+  /** R6b: per-vertex weight in the skin-only illumination low pass (skinPaintWeights). */
+  skinBuffer: WebGLBuffer;
   featherWideBuffer: WebGLBuffer;
   foreshortenBuffer: WebGLBuffer;
   foreheadBuffer: WebGLBuffer;
@@ -622,6 +731,10 @@ interface GLResources {
     uShadowGuard: WebGLUniformLocation | null;
     uMeanChromaP: WebGLUniformLocation | null;
     uMeanChromaD: WebGLUniformLocation | null;
+    uIllum: WebGLUniformLocation | null;
+    uMeanP: WebGLUniformLocation | null;
+    uMeanD: WebGLUniformLocation | null;
+    uSpecular: WebGLUniformLocation | null;
     uMotionBlur: WebGLUniformLocation | null;
     uSoftHolesPx: WebGLUniformLocation | null;
     uSegMask: WebGLUniformLocation | null;
@@ -694,6 +807,8 @@ interface RelightResources {
     uSegMask: WebGLUniformLocation | null;
     uSegOn: WebGLUniformLocation | null;
     uSegRect: WebGLUniformLocation | null;
+    aSkin: number;
+    uSkinMode: WebGLUniformLocation | null;
   };
   blur: {
     program: WebGLProgram;
@@ -705,12 +820,30 @@ interface RelightResources {
   };
   quad: WebGLBuffer;
   driverTexture: WebGLTexture;
+  /** R6b: the neck/ear tint pass (null when it did not compile). */
+  tint: {
+    program: WebGLProgram;
+    aPosition: number;
+    uTexture: WebGLUniformLocation | null;
+    uSegMask: WebGLUniformLocation | null;
+    uResolution: WebGLUniformLocation | null;
+    uSrcMap: WebGLUniformLocation | null;
+    uMirror: WebGLUniformLocation | null;
+    uSegRect: WebGLUniformLocation | null;
+    uFaceBounds: WebGLUniformLocation | null;
+    uGain: WebGLUniformLocation | null;
+    uStrength: WebGLUniformLocation | null;
+  } | null;
   driver: LowPassTarget | null;
   persona: LowPassTarget | null;
   /** Mean chroma (luma-normalised linear RGB) of the persona low pass over the mesh; null until read. */
   personaMean: [number, number, number] | null;
   /** EMA of the driver low pass's mean chroma. */
   driverMean: [number, number, number] | null;
+  /** R6b: mean skin colour (linear RGB) of the skin-only persona low pass; null until read. */
+  personaMeanColour: [number, number, number] | null;
+  /** R6b: EMA of the skin-only driver low pass's mean skin colour. */
+  driverMeanColour: [number, number, number] | null;
   frames: number;
 }
 
@@ -730,6 +863,33 @@ export function meanChroma(pixels: ArrayLike<number>, width: number, height: num
   const lum = (0.2126 * r + 0.7152 * g + 0.0722 * b) / a;
   if (lum < 1e-6) return null;
   return [r / a / lum, g / a / lum, b / a / lum];
+}
+
+/**
+ * R6b: mean colour (linear RGB 0..1) of a premultiplied RGBA8 low-pass target, weighted by its
+ * coverage (the skin weight in illumination mode). Null when (almost) nothing was painted.
+ */
+export function meanColour(pixels: ArrayLike<number>, width: number, height: number): [number, number, number] | null {
+  let r = 0, g = 0, b = 0, a = 0;
+  const n = width * height * 4;
+  for (let i = 0; i < n; i += 4) {
+    const w = pixels[i + 3];
+    if (w < 8) continue;
+    r += pixels[i]; g += pixels[i + 1]; b += pixels[i + 2]; a += w;
+  }
+  if (a < 8 * 16) return null;
+  return [r / a, g / a, b / a];
+}
+
+/**
+ * R6b: per-channel gain for the wearer's neck and ears. The face's mean skin colour sits at
+ * persona^(1 − t) · wearer^t at the boundary (t = tone match); the neck is moved to the same point:
+ * gain = (persona / wearer)^(1 − t), clamped to 0.5..2.
+ */
+export function skinTintGain(persona: readonly number[], wearer: readonly number[], toneMatch: number): [number, number, number] {
+  const k = 1 - Math.min(1, Math.max(0, toneMatch));
+  const g = (i: number) => Math.min(2, Math.max(0.5, Math.pow(Math.max(1e-4, persona[i]) / Math.max(1e-4, wearer[i]), k)));
+  return [g(0), g(1), g(2)];
 }
 
 /** EMA step on a mean-chroma triple. */
@@ -891,6 +1051,8 @@ export class MeshWarpRenderer {
   /** The persona low-pass must be rebuilt (new persona, UVs, texture or topology). */
   private personaLowDirty = true;
   private personaLowShare = RELIGHT_RADIUS_SHARE;
+  /** R6b: whether the persona low pass is the skin-only illumination one. */
+  private personaLowIllum = false;
   /** R5 keyframe cross-fade: one GPU texture per keyframe source, and the pair drawn this frame (null = single persona). */
   private keyCache: KeyframeTextureCache<PersonaSource, KeyEntry> | null = null;
   private keyPair: { a: KeyframeSpec; b: KeyframeSpec | null; mix: number } | null = null;
@@ -1059,6 +1221,7 @@ export class MeshWarpRenderer {
       eyeFadeBuffer: buffer(),
       toneBuffer: buffer(),
       delightBuffer: buffer(),
+      skinBuffer: buffer(),
       featherWideBuffer: buffer(),
       foreshortenBuffer: buffer(),
       foreheadBuffer: buffer(),
@@ -1105,6 +1268,10 @@ export class MeshWarpRenderer {
         uShadowGuard: u('uShadowGuard'),
         uMeanChromaP: u('uMeanChromaP'),
         uMeanChromaD: u('uMeanChromaD'),
+        uIllum: u('uIllum'),
+        uMeanP: u('uMeanP'),
+        uMeanD: u('uMeanD'),
+        uSpecular: u('uSpecular'),
         uMotionBlur: u('uMotionBlur'),
         uSoftHolesPx: u('uSoftHolesPx'),
         uSegMask: u('uSegMask'),
@@ -1146,6 +1313,8 @@ export class MeshWarpRenderer {
           uSegMask: gl.getUniformLocation(paint, 'uSegMask'),
           uSegOn: gl.getUniformLocation(paint, 'uSegOn'),
           uSegRect: gl.getUniformLocation(paint, 'uSegRect'),
+          aSkin: gl.getAttribLocation(paint, 'aSkin'),
+          uSkinMode: gl.getUniformLocation(paint, 'uSkinMode'),
         },
         blur: {
           program: blur,
@@ -1157,10 +1326,13 @@ export class MeshWarpRenderer {
         },
         quad,
         driverTexture,
+        tint: this.compileTint(gl),
         driver: null,
         persona: null,
         personaMean: null,
         driverMean: null,
+        personaMeanColour: null,
+        driverMeanColour: null,
         frames: 0,
       };
       this.personaLowDirty = true;
@@ -1234,7 +1406,8 @@ export class MeshWarpRenderer {
     const ph = Math.max(1, Math.ceil(this.personaSize.height / RELIGHT_SCALE));
     const share = o.radiusShare ?? RELIGHT_RADIUS_SHARE;
     const pair = this.keyPair;
-    const personaStale = !pair && (this.personaLowDirty || !rl.persona || rl.persona.width !== pw || rl.persona.height !== ph || share !== this.personaLowShare);
+    const illum = !!o.illumination;
+    const personaStale = !pair && (this.personaLowDirty || !rl.persona || rl.persona.width !== pw || rl.persona.height !== ph || share !== this.personaLowShare || illum !== this.personaLowIllum);
     if (!pair) rl.persona = this.ensureTarget(gl, rl.persona, pw, ph);
 
     gl.disable(gl.BLEND);
@@ -1245,15 +1418,18 @@ export class MeshWarpRenderer {
         const e = keys.get(spec.image);
         const w = Math.max(1, Math.ceil(e.size.width / RELIGHT_SCALE));
         const h = Math.max(1, Math.ceil(e.size.height / RELIGHT_SCALE));
-        const stale = !e.low || e.low.width !== w || e.low.height !== h || e.lowShare !== share || e.lowUv !== spec.uv;
+        const stale = !e.low || e.low.width !== w || e.low.height !== h || e.lowShare !== share || e.lowUv !== spec.uv || e.lowIllum !== illum;
         e.low = this.ensureTarget(gl, e.low, w, h);
         if (stale) {
           this.paintMesh(gl, r, rl, e.low, 1, o, e.tex, uvBuffer);
           this.blurTarget(gl, rl, e.low, lowPassSigma(uvWidth(spec.uv) * e.size.width, share));
           e.lowShare = share;
           e.lowUv = spec.uv;
+          e.lowIllum = illum;
           e.mean = null;
+          e.meanColour = null;
         }
+        if (illum && !e.meanColour && e.low) e.meanColour = this.readMeanColour(gl, e.low);
         return e;
       };
       const ea = prepare(pair.a, r.uvBuffer);
@@ -1269,6 +1445,8 @@ export class MeshWarpRenderer {
       this.blurTarget(gl, rl, rl.persona, lowPassSigma(this.personaUvWidth * this.personaSize.width, share));
       this.personaLowDirty = false;
       this.personaLowShare = share;
+      this.personaLowIllum = illum;
+      rl.personaMeanColour = illum ? this.readMeanColour(gl, rl.persona) : null;
       // The mean chroma barely depends on the sigma: read it once per persona, not on every radius change.
       if (!o.globalTone) rl.personaMean = null;
       else if (!rl.personaMean) rl.personaMean = this.readMean(gl, rl.persona);
@@ -1276,6 +1454,14 @@ export class MeshWarpRenderer {
     this.paintMesh(gl, r, rl, rl.driver, 0, o);
     this.blurTarget(gl, rl, rl.driver, lowPassSigma(o.faceWidthPx, share));
     rl.frames++;
+    if (illum) {
+      if (!rl.driverMeanColour || rl.frames % MEAN_TONE_EVERY === 0) {
+        const m = this.readMeanColour(gl, rl.driver);
+        if (m) rl.driverMeanColour = blendMean(rl.driverMeanColour, m, MEAN_TONE_ALPHA);
+      }
+    } else {
+      rl.driverMeanColour = null;
+    }
     this.driverFresh = o.source;
     if (o.globalTone) {
       if (!rl.personaMean && rl.persona && !pair) rl.personaMean = this.readMean(gl, rl.persona);
@@ -1289,6 +1475,73 @@ export class MeshWarpRenderer {
     gl.viewport(0, 0, W, H);
     gl.enable(gl.BLEND);
     return true;
+  }
+
+  /** R6b: reads a low-pass target back and returns its mean colour (linear RGB, coverage-weighted). */
+  private readMeanColour(gl: WebGLRenderingContext, target: LowPassTarget): [number, number, number] | null {
+    const size = target.width * target.height * 4;
+    if (!target.pixels || target.pixels.length !== size) target.pixels = new Uint8Array(size);
+    gl.bindFramebuffer(gl.FRAMEBUFFER, target.fbo[0]);
+    gl.readPixels(0, 0, target.width, target.height, gl.RGBA, gl.UNSIGNED_BYTE, target.pixels);
+    return meanColour(target.pixels, target.width, target.height);
+  }
+
+  /** R6b: compiles the neck/ear tint program; null (tint off) if this GPU rejects it. */
+  private compileTint(gl: WebGLRenderingContext | WebGL2RenderingContext): RelightResources['tint'] {
+    try {
+      const p = this.compileProgram(gl, BASE_VERTEX_ES1, TINT_FRAGMENT_ES1);
+      const u = (n: string) => gl.getUniformLocation(p, n);
+      return {
+        program: p,
+        aPosition: gl.getAttribLocation(p, 'aPosition'),
+        uTexture: u('uTexture'),
+        uSegMask: u('uSegMask'),
+        uResolution: u('uResolution'),
+        uSrcMap: u('uSrcMap'),
+        uMirror: u('uMirror'),
+        uSegRect: u('uSegRect'),
+        uFaceBounds: u('uFaceBounds'),
+        uGain: u('uGain'),
+        uStrength: u('uStrength'),
+      };
+    } catch (err) {
+      console.warn('Skin tint pass unavailable on this GPU.', err);
+      return null;
+    }
+  }
+
+  /**
+   * R6b (flag skinTint): draws the wearer's neck and ear skin, recoloured toward the shared skin
+   * tone, into the (cleared) persona layer before the persona. Needs this frame's relight passes
+   * (camera frame on rl.driverTexture), the masks on unit 3 and both mean skin colours.
+   */
+  private drawSkinTint(gl: WebGLRenderingContext | WebGL2RenderingContext, r: GLResources, opts: WarpFrameOptions, personaMean: [number, number, number] | null) {
+    const rl = r.relight;
+    const t = rl?.tint;
+    const o = opts.relight;
+    const strength = Math.min(SKIN_TINT_MAX, Math.max(0, opts.skinTint ?? 0));
+    if (!rl || !t || !o || strength <= 0 || !this.segBound || !personaMean || !rl.driverMeanColour) return;
+    // At full region weight the blend (1 − a)·camera + a·camera·g' must equal camera·gain, so g' = 1 + (gain − 1) / a.
+    const gain = skinTintGain(personaMean, rl.driverMeanColour, o.toneMatch).map((g) => Math.min(3, Math.max(0.2, 1 + (g - 1) / strength)));
+    const fb = opts.faceBounds ?? [0, 0, this._canvas.width, this._canvas.height];
+    gl.useProgram(t.program);
+    gl.bindBuffer(gl.ARRAY_BUFFER, rl.quad);
+    gl.enableVertexAttribArray(t.aPosition);
+    gl.vertexAttribPointer(t.aPosition, 2, gl.FLOAT, false, 0, 0);
+    gl.activeTexture(gl.TEXTURE0);
+    gl.bindTexture(gl.TEXTURE_2D, rl.driverTexture);
+    gl.uniform1i(t.uTexture, 0);
+    gl.uniform1i(t.uSegMask, 3);
+    gl.uniform2f(t.uResolution, this._canvas.width, this._canvas.height);
+    gl.uniform4f(t.uSrcMap, o.srcMap[0], o.srcMap[1], Math.max(1, o.srcMap[2]), Math.max(1, o.srcMap[3]));
+    gl.uniform1f(t.uMirror, o.mirror ? 1 : 0);
+    gl.uniform4f(t.uSegRect, this.segRect[0], this.segRect[1], Math.max(1e-4, this.segRect[2]), Math.max(1e-4, this.segRect[3]));
+    gl.uniform4f(t.uFaceBounds, fb[0], fb[1], fb[2], fb[3]);
+    gl.uniform3f(t.uGain, gain[0], gain[1], gain[2]);
+    gl.uniform1f(t.uStrength, strength);
+    gl.enable(gl.BLEND);
+    gl.blendFunc(gl.ONE, gl.ONE_MINUS_SRC_ALPHA);
+    gl.drawArrays(gl.TRIANGLE_STRIP, 0, 4);
   }
 
   /** Reads a low-pass target back (small: 1/RELIGHT_SCALE scale) and returns its mean chroma. */
@@ -1313,6 +1566,12 @@ export class MeshWarpRenderer {
     gl.bindBuffer(gl.ARRAY_BUFFER, uvBuffer ?? r.uvBuffer);
     gl.enableVertexAttribArray(rl.paint.aUv);
     gl.vertexAttribPointer(rl.paint.aUv, 2, gl.FLOAT, false, 0, 0);
+    if (rl.paint.aSkin >= 0) {
+      gl.bindBuffer(gl.ARRAY_BUFFER, r.skinBuffer);
+      gl.enableVertexAttribArray(rl.paint.aSkin);
+      gl.vertexAttribPointer(rl.paint.aSkin, 1, gl.FLOAT, false, 0, 0);
+    }
+    gl.uniform1f(rl.paint.uSkinMode, o.illumination ? 1 : 0);
     gl.uniform1f(rl.paint.uMode, mode);
     gl.uniform2f(rl.paint.uResolution, this._canvas.width, this._canvas.height);
     gl.uniform4f(rl.paint.uSrcMap, o.srcMap[0], o.srcMap[1], Math.max(1, o.srcMap[2]), Math.max(1, o.srcMap[3]));
@@ -1403,6 +1662,7 @@ export class MeshWarpRenderer {
     gl.deleteBuffer(r.eyeFadeBuffer);
     gl.deleteBuffer(r.toneBuffer);
     gl.deleteBuffer(r.delightBuffer);
+    gl.deleteBuffer(r.skinBuffer);
     gl.deleteBuffer(r.featherWideBuffer);
     gl.deleteBuffer(r.foreshortenBuffer);
     gl.deleteBuffer(r.foreheadBuffer);
@@ -1414,6 +1674,7 @@ export class MeshWarpRenderer {
     if (r.relight) {
       gl.deleteProgram(r.relight.paint.program);
       gl.deleteProgram(r.relight.blur.program);
+      if (r.relight.tint) gl.deleteProgram(r.relight.tint.program);
       gl.deleteBuffer(r.relight.quad);
       gl.deleteTexture(r.relight.driverTexture);
       if (r.relight.driver) this.deleteTarget(gl, r.relight.driver);
@@ -1487,12 +1748,15 @@ export class MeshWarpRenderer {
     gl.bindBuffer(gl.ARRAY_BUFFER, r.toneBuffer);
     gl.bufferData(gl.ARRAY_BUFFER, toneWeights(topology), gl.STATIC_DRAW);
     gl.bindBuffer(gl.ARRAY_BUFFER, r.featherWideBuffer);
-    gl.bufferData(gl.ARRAY_BUFFER, featherBandWeights(topology), gl.STATIC_DRAW);
+    gl.bufferData(gl.ARRAY_BUFFER, this.featherBands && this.featherBands.length === topology.vertexCount * 2 ? this.featherBands : featherBandWeights(topology), gl.STATIC_DRAW);
     gl.bindBuffer(gl.ARRAY_BUFFER, r.foreshortenBuffer);
     gl.bufferData(gl.ARRAY_BUFFER, new Float32Array(topology.vertexCount).fill(1), gl.DYNAMIC_DRAW);
     // R4b: [extension feather, hairline coordinate] per vertex; zeros without the extension (uForeheadExt stays 0).
     gl.bindBuffer(gl.ARRAY_BUFFER, r.foreheadBuffer);
     gl.bufferData(gl.ARRAY_BUFFER, topology.forehead ?? new Float32Array(topology.vertexCount * 2), gl.STATIC_DRAW);
+    // R6b: skin weights for the illumination low pass.
+    gl.bindBuffer(gl.ARRAY_BUFFER, r.skinBuffer);
+    gl.bufferData(gl.ARRAY_BUFFER, skinPaintWeights(topology), gl.STATIC_DRAW);
     this.personaLowDirty = true;
     if (!this.eyeFadeWeights || this.eyeFadeWeights.length !== topology.vertexCount) {
       this.eyeFadeWeights = new Float32Array(topology.vertexCount);
@@ -1562,6 +1826,21 @@ export class MeshWarpRenderer {
   }
 
   /** Per-vertex eye pass-through weights (see eyeFadeWeights); scaled per frame by WarpFrameOptions.eyeFade. */
+  /**
+   * R6b (flag jawExtension): per-vertex [wide, narrow] feather bands replacing the topology's; null
+   * restores them. Band x = 0 puts a vertex in the outer band, where the R4 masks keep the persona
+   * on the wearer's face skin only (the pushed jaw rings: never onto the background, neck or a hand).
+   */
+  private featherBands: Float32Array | null = null;
+  setFeatherBands(bands: Float32Array | null) {
+    this.featherBands = bands;
+    const gl = this.gl;
+    if (gl && this.resources && this.glReady && this.topology) {
+      gl.bindBuffer(gl.ARRAY_BUFFER, this.resources.featherWideBuffer);
+      gl.bufferData(gl.ARRAY_BUFFER, bands && bands.length === this.topology.vertexCount * 2 ? bands : featherBandWeights(this.topology), gl.STATIC_DRAW);
+    }
+  }
+
   /** R6 (setting boundaryFeather): per-vertex boundary feather replacing the topology's; null restores it. WebGL paths only. */
   private boundaryFeather: Float32Array | null = null;
   setBoundaryFeather(weights: Float32Array | null) {
@@ -1610,7 +1889,7 @@ export class MeshWarpRenderer {
         (image) => {
           const tex = gl.createTexture()!;
           this.uploadTexture(gl, tex, image);
-          return { tex, size: sourceSize(image), low: null, lowShare: -1, lowUv: null, mean: null };
+          return { tex, size: sourceSize(image), low: null, lowShare: -1, lowUv: null, mean: null, lowIllum: false, meanColour: null };
         },
         (e) => {
           gl.deleteTexture(e.tex);
@@ -1818,6 +2097,10 @@ export class MeshWarpRenderer {
     // R3: the low-pass passes run first (they switch programs, framebuffers and attribute 0).
     this.driverFresh = null;
     const relit = opts.relight ? this.relightPasses(gl, r, opts.relight) : false;
+    // R6b: the wearer's neck and ears, tinted toward the shared skin tone, go under the persona.
+    if (relit && opts.skinTint && opts.relight?.illumination) {
+      this.drawSkinTint(gl, r, opts, keyA ? keyA.meanColour : r.relight?.personaMeanColour ?? null);
+    }
     gl.useProgram(r.program);
     gl.bindBuffer(gl.ARRAY_BUFFER, r.positionBuffer);
     gl.enableVertexAttribArray(loc.aPosition);
@@ -1901,6 +2184,16 @@ export class MeshWarpRenderer {
     const md = (globalTone && rl?.driverMean) || [1, 1, 1];
     gl.uniform3f(loc.uMeanChromaP, mp[0], mp[1], mp[2]);
     gl.uniform3f(loc.uMeanChromaD, md[0], md[1], md[2]);
+    // R6b: illumination-only relighting needs both mean skin colours.
+    const meanP = keyA ? keyA.meanColour : rl?.personaMeanColour ?? null;
+    const meanD = rl?.driverMeanColour ?? null;
+    const illum = !!opts.relight?.illumination && !!meanP && !!meanD;
+    gl.uniform1f(loc.uIllum, illum ? 1 : 0);
+    gl.uniform1f(loc.uSpecular, illum && opts.relight?.specular ? 1 : 0);
+    const mpc = (illum && meanP) || [1, 1, 1];
+    const mdc = (illum && meanD) || [1, 1, 1];
+    gl.uniform3f(loc.uMeanP, mpc[0], mpc[1], mpc[2]);
+    gl.uniform3f(loc.uMeanD, mdc[0], mdc[1], mdc[2]);
     if (relit && rl?.driver && personaLow) {
       gl.activeTexture(gl.TEXTURE1);
       gl.bindTexture(gl.TEXTURE_2D, rl.driver.tex[0]);

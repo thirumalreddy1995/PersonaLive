@@ -158,6 +158,10 @@ export interface TransformationSettings {
   cameraBlend?: number;
   /** R6: width of the feather at the face boundary relative to the built-in one (1 = five mesh rings; 0.6 narrower, 1.5 wider). Overrides the camera blend's feather when set. */
   boundaryFeather?: number;
+  /** R6b (flag personaProportions): 0..1 share of the persona's interior proportions (default 0.8). */
+  featureBlend?: number;
+  /** R6b (flag skinTint): alpha of the neck/ear tint, 0..0.45 (default 0.45). */
+  skinTintStrength?: number;
   /** R6: output/camera sharpness ratio the camera-match loop aims for (1 = match the camera). */
   cameraMatchSharpness?: number;
   /** R6: output/camera noise ratio the camera-match loop aims for (1 = match the camera). */

@@ -135,6 +135,15 @@ reproduces the R4 defaults. The user-facing `cameraBlend` setting (0..1, `src/ut
 look toward the Camera-matched preset (`boundaryFeather` 1 → 1.5, lip floor at least 0.3 × blend); an
 explicit `--settings boundaryFeather=…` overrides its feather.
 
+R6b identity flags (all off; `--flags r6b` = `r6` with all five on):
+- `relightIllumination`: relighting moves only the light. Skin-only, large-scale low passes (beard, brows, eyes and lips weighted out) give each face its relative illumination; the persona keeps its own beard, brows, skin tone and lip and nose colour, and glare baked into the photo is compressed. The mean skin colour moves toward the wearer's by `skinToneMatch` (0.3 was used for the R6b review).
+- `skinTint`: the wearer's neck and ears (segmentation masks) are tinted toward the shared skin tone under the persona (`--settings skinTintStrength=0..0.45`; the alpha stays under 0.5, so the leak metrics never count it).
+- `personaProportions`: interior features take the persona's layout relative to the eyes (`featureBlend`, default 0.8), after a second of frontal relaxed frames teaches the wearer's neutral shape.
+- `jawExtension`: reloads the persona. A persona beard below the jaw line is carried over the wearer's jaw (lower rings pushed out in screen and UV alike, up to 0.35 IOD, less on a foreshortened side) with a narrow feather there.
+- `lidPassThrough`: the eye pass-through widens over the upper lid as the lid lowers.
+
+The persona photo in every review: `report.json` records the photo the persona came from (`app.personaPhoto`, a path inside the gitignored folders), and every contact-sheet row starts with it. `npm run realism:audit -- --runs <before>,<after> --labels before,after --clip A,B --out <name>` writes full-resolution audit pages (persona photo | camera | each run's output, one row per capture time) to `realism-review/out/<name>/`. Use `--reference <file>` for runs made before the field existed.
+
 `--settings temporalSmoothing=20,blendStrength=100` overrides the inspector settings for the run (the
 same keys as `TransformationSettings`; `?rs=` on the page URL does the same in a browser). The rigid
 forehead can be tuned the same way: `rigidPoseMinCutoff` / `rigidPoseBeta` (One Euro on the head

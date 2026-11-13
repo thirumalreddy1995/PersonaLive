@@ -125,3 +125,18 @@ test('the r6 preset is the Balanced defaults chosen at the end of R6', () => {
   // Relighting stays on: the R0 5-zone gain it replaced was removed in R6.
   assert.equal(defaultRealismFlags().relight, true);
 });
+
+test('the R6b identity flags are off by default and in every shipped preset, and on in r6b', () => {
+  const keys = ['relightIllumination', 'skinTint', 'personaProportions', 'jawExtension', 'lidPassThrough'] as const;
+  for (const key of keys) {
+    assert.equal(defaultRealismFlags()[key], false, key);
+    for (const preset of ['r0', 'r1', 'r2', 'r3', 'r3c', 'r4', 'r6']) assert.equal(parseRealismFlagString(preset).flags[key], false, `${preset} ${key}`);
+  }
+  const { flags, errors } = parseRealismFlagString('r6b');
+  assert.deepEqual(errors, []);
+  assert.equal(Object.keys(flags).length, REALISM_FLAG_DEFS.length, 'r6b preset covers every flag');
+  for (const key of keys) assert.equal(flags[key], true, `r6b ${key}`);
+  // Otherwise r6b is r6.
+  const r6 = parseRealismFlagString('r6').flags;
+  for (const def of REALISM_FLAG_DEFS) if (!(keys as readonly string[]).includes(def.key)) assert.equal(flags[def.key], r6[def.key], def.key);
+});

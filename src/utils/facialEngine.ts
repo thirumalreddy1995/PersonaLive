@@ -52,6 +52,24 @@ import { CameraMatchState, initialCameraMatch, stepCameraMatch, CAMERA_MATCH_WAR
 import { RestMouthCalibrator, lipFadeWindow } from './restMouth.ts';
 import { resolveLook } from './look.ts';
 import {
+  LidClosure,
+  NeutralShapeCalibrator,
+  PROPORTION_MAX_SHIFT,
+  STABLE_POINTS,
+  applyJawExtension,
+  applyProportions,
+  beardDepths,
+  fitAffine,
+  hasBeard,
+  jawPlan,
+  lidPassThroughWeights,
+  normalizeShape,
+  proportionOffsets,
+  proportionWeights,
+  upperLidBands,
+  type JawPlan,
+} from './identityShape.ts';
+import {
   applyEyelidKinematics,
   eyeFadeWeights,
   lipFadeForMar,
@@ -61,6 +79,7 @@ import {
   applySpeechAnatomy,
   boundaryFeatherWeights,
   buildFaceTopology,
+  featherBandWeights,
   computeKinematics,
   FaceTopology,
   LandmarkKinematics,
@@ -77,7 +96,7 @@ import {
   FACE_TESSELLATION,
   TrackedFace,
 } from './faceTracker.ts';
-import { MeshWarpRenderer, pairedFaceStats, readbackWindow, type FaceStats } from './meshWarpRenderer.ts';
+import { ILLUMINATION_RADIUS_SHARE, JAW_BEARD_FEATHER, MeshWarpRenderer, SKIN_TINT_MAX, pairedFaceStats, readbackWindow, type FaceStats } from './meshWarpRenderer.ts';
 import { OralCavityRenderer, extractOralApertureMetrics } from './oralCavityRenderer.ts';
 import { MultiReferenceBank, type ReferenceKeyframe } from './multiReferenceBank.ts';
 import { CranialBoundaryBlender } from './cranialBoundaryBlender.ts';
@@ -181,6 +200,25 @@ export class RealtimeFacialEngine {
   private overlayLayer: HTMLCanvasElement;
   private overlayCtx: CanvasRenderingContext2D;
   private frameIndex = 0;
+  // R6b identity (flags personaProportions, jawExtension, lidPassThrough).
+  /** The wearer's neutral shape in the eye frame, learned from frontal relaxed frames. */
+  private neutralShape = new NeutralShapeCalibrator();
+  /** The persona photo's landmarks in the eye frame. */
+  private personaShapeNorm: Float32Array | null = null;
+  private proportionW: { topology: FaceTopology; realEyes: boolean; w: Float32Array } | null = null;
+  private proportionOff = new Float32Array(468 * 2);
+  private wearerNeutral = new Float32Array(468 * 2);
+  private shapeScratch = new Float32Array(468 * 2);
+  /** Proportions fade in over ~1 s once the neutral shape is known. */
+  private proportionRamp = 0;
+  private jawPlanCache: JawPlan | null = null;
+  /** Pushed jaw UVs → the persona's own UVs, so the foreshortening fade measures the real geometry. */
+  private jawUvBase = new WeakMap<Float32Array, Float32Array>();
+  /** Beard depth below each lower-jaw point of the persona photo (IOD units); null = no beard or flag off. */
+  private jawDepths: Float32Array | null = null;
+  private lidClosure = new LidClosure();
+  private lidBands: { topology: FaceTopology; radius: number; base: Float32Array; bands: { left: Float32Array; right: Float32Array }; weights: Float32Array } | null = null;
+  private lidLast: [number, number] = [-1, -1];
   /** frameIndex when the debug counters were last reset, so framesRendered is per replay. */
   private frameIndexAtReset = 0;
 
@@ -364,7 +402,9 @@ export class RealtimeFacialEngine {
           changed.includes('personaInpaint') ||
           // R5: real keyframes are loaded with the persona, and their stored pose depends on the pose source.
           changed.includes('keyframeCrossfade') ||
-          changed.includes('matrixHeadPose')) &&
+          changed.includes('matrixHeadPose') ||
+          // R6b: the beard depth and the jaw UVs are measured with the persona.
+          changed.includes('jawExtension')) &&
         this.personaImage
       )
         void this.preparePersona();
@@ -431,6 +471,10 @@ export class RealtimeFacialEngine {
     this.videoElement = video;
     this.videoKind = kind;
     this.resetTracking();
+    // R6b: a new source may be a different wearer.
+    this.neutralShape.reset();
+    this.proportionRamp = 0;
+    this.lidClosure.reset();
     // R3b: a new source gets a neutral camera match that re-measures on the first frames.
     this.cameraMatch = initialCameraMatch();
     this.cameraMatchPending = false;
@@ -663,6 +707,23 @@ export class RealtimeFacialEngine {
         const ub = pointBounds(new Float32Array(uv.subarray(0, 468 * 2)));
         this.delightBands = vertexBandLuma(px.data, tw, th, uv, Math.max(1, ub.width * tw));
       }
+      // R6b (flag personaProportions): the persona's feature layout in the eye frame.
+      const lmPx = new Float32Array(468 * 2);
+      for (let i = 0; i < 468; i++) {
+        lmPx[i * 2] = face.landmarks[i * 2] * img.naturalWidth;
+        lmPx[i * 2 + 1] = face.landmarks[i * 2 + 1] * img.naturalHeight;
+      }
+      this.personaShapeNorm = normalizeShape(lmPx);
+      this.proportionRamp = 0;
+      // R6b (flag jawExtension): how far the beard reaches below the jaw, and the UVs pushed to follow it.
+      this.jawDepths = null;
+      if (realismFlags.get().jawExtension) {
+        const depths = this.measureBeard(texture, uv);
+        if (depths && hasBeard(depths)) {
+          this.jawDepths = depths;
+          uv = this.extendJawUv(uv, texture);
+        }
+      }
       // The flag flipped while this preparation ran: the one started by the flip prepares for the current topology.
       if (foreheadOn !== this.foreheadOn) return;
       this.personaRatios = personaRatios;
@@ -679,6 +740,8 @@ export class RealtimeFacialEngine {
         this.personaUvExt = null;
       }
       this.warp.setPersona(texture, uv);
+      // R6b: the jaw feather follows this persona's beard (or goes back to the plain one).
+      this.applyBoundaryFeather();
       if (foreheadOn) this.applyForeheadMapping();
       this.currentKeyframeSource = texture;
       this.currentKeyframeId = null;
@@ -834,7 +897,10 @@ export class RealtimeFacialEngine {
         });
         const { faces } = await this.tracker.detectImage(img);
         if (this.disposed || faces.length === 0) continue;
-        const { texture, uv } = this.photoTexture(img, faces[0].landmarks);
+        const prepared = this.photoTexture(img, faces[0].landmarks);
+        const texture = prepared.texture;
+        // R6b (flag jawExtension): every keyframe follows the persona photo's beard depth.
+        const uv = this.jawDepths ? this.extendJawUv(prepared.uv, texture) : prepared.uv;
         const size = texture instanceof HTMLImageElement ? { width: texture.naturalWidth, height: texture.naturalHeight } : { width: texture.width, height: texture.height };
         out.push({
           id: ref.id,
@@ -854,6 +920,119 @@ export class RealtimeFacialEngine {
     return out;
   }
 
+  /** R6b: the jaw extension plan on the base mesh (indices below 468, valid on the extended topology too). */
+  private jawPlanFor(): JawPlan {
+    if (!this.jawPlanCache) this.jawPlanCache = jawPlan(this.baseTopology);
+    return this.jawPlanCache;
+  }
+
+  /** R6b (flag jawExtension): beard depths below the jaw of a prepared persona texture, from its UVs. */
+  private measureBeard(texture: HTMLImageElement | HTMLCanvasElement, uv: Float32Array): Float32Array | null {
+    const w = texture instanceof HTMLImageElement ? texture.naturalWidth : texture.width;
+    const h = texture instanceof HTMLImageElement ? texture.naturalHeight : texture.height;
+    if (!w || !h) return null;
+    const c = document.createElement('canvas');
+    c.width = w;
+    c.height = h;
+    const cctx = c.getContext('2d', { willReadFrequently: true });
+    if (!cctx) return null;
+    cctx.drawImage(texture, 0, 0, w, h);
+    const data = cctx.getImageData(0, 0, w, h).data;
+    const pts = new Float32Array(468 * 2);
+    for (let i = 0; i < 468; i++) {
+      pts[i * 2] = uv[i * 2] * w;
+      pts[i * 2 + 1] = uv[i * 2 + 1] * h;
+    }
+    return beardDepths((x, y) => {
+      const xi = Math.round(x);
+      const yi = Math.round(y);
+      if (xi < 0 || yi < 0 || xi >= w || yi >= h) return null;
+      const o = (yi * w + xi) * 4;
+      return [data[o], data[o + 1], data[o + 2]];
+    }, pts);
+  }
+
+  /** R6b (flag jawExtension): a copy of `uv` with the lower face rings pushed out by the beard depth (in the texture's pixels). */
+  private extendJawUv(uv: Float32Array, texture: HTMLImageElement | HTMLCanvasElement): Float32Array {
+    const depths = this.jawDepths;
+    if (!depths) return uv;
+    const w = texture instanceof HTMLImageElement ? texture.naturalWidth : texture.width;
+    const h = texture instanceof HTMLImageElement ? texture.naturalHeight : texture.height;
+    const out = Float32Array.from(uv);
+    const px = new Float32Array(468 * 2);
+    for (let i = 0; i < 468; i++) {
+      px[i * 2] = uv[i * 2] * w;
+      px[i * 2 + 1] = uv[i * 2 + 1] * h;
+    }
+    applyJawExtension(px, this.jawPlanFor(), depths);
+    for (let i = 0; i < 468; i++) {
+      out[i * 2] = px[i * 2] / w;
+      out[i * 2 + 1] = px[i * 2 + 1] / h;
+    }
+    this.jawUvBase.set(out, uv);
+    return out;
+  }
+
+  /**
+   * R6b (flag personaProportions): learns the wearer's neutral shape from frontal relaxed frames
+   * and moves the interior vertices toward the persona's layout, mapped by the current head pose.
+   */
+  private applyPersonaProportions(k: LandmarkKinematics, lipFade: number, smile: number) {
+    const s = this.settings;
+    const rest = this.restMouth.rest ?? 0.03;
+    const relaxed = Math.abs(k.yaw) < 10 && Math.abs(k.pitch) < 12 && k.earLeft > 0.18 && k.earRight > 0.18 && k.mar < rest + 0.04 && smile < 0.3;
+    if (relaxed) {
+      const n = normalizeShape(this.smoothed, 468, this.shapeScratch);
+      if (n) this.neutralShape.add(n);
+    }
+    if (!this.neutralShape.ready || !this.personaShapeNorm) {
+      this.proportionRamp = 0;
+      return;
+    }
+    const neutral = this.neutralShape.shape(this.wearerNeutral);
+    if (!neutral) return;
+    const A = fitAffine(neutral, this.warpPositions, STABLE_POINTS);
+    if (!A) return;
+    proportionOffsets(this.personaShapeNorm, neutral, 468, PROPORTION_MAX_SHIFT, this.proportionOff);
+    const realEyes = s.eyeGazeSync;
+    if (!this.proportionW || this.proportionW.topology !== this.topology || this.proportionW.realEyes !== realEyes) {
+      this.proportionW = { topology: this.topology, realEyes, w: proportionWeights(this.topology, realEyes) };
+    }
+    this.proportionRamp = Math.min(1, this.proportionRamp + 1 / 30);
+    applyProportions(this.warpPositions, this.proportionOff, this.proportionW.w, this.topology.lipWeights, lipFade, [A[0], A[1], A[2], A[3]], clamp(s.featureBlend ?? 0.8, 0, 1) * this.proportionRamp);
+  }
+
+  /**
+   * R6b (flag lidPassThrough): widens the eye pass-through over the upper lid as each lid lowers.
+   * Uploads new weights only when a lid moved noticeably; restores the plain ring when off.
+   */
+  private updateLidPassThrough(on: boolean, k: LandmarkKinematics) {
+    const radius = this.settings.eyePassThroughRadius;
+    if (!on) {
+      if (this.lidLast[0] >= 0) {
+        this.warp.setEyeFade(eyeFadeWeights(this.topology, radius));
+        this.lidLast = [-1, -1];
+      }
+      return;
+    }
+    const [cl, cr] = this.lidClosure.update(k.earLeft, k.earRight, k.gazeY);
+    if (!this.lidBands || this.lidBands.topology !== this.topology || this.lidBands.radius !== radius) {
+      this.lidBands = {
+        topology: this.topology,
+        radius,
+        base: eyeFadeWeights(this.topology, radius),
+        bands: upperLidBands(this.topology, radius),
+        weights: new Float32Array(this.topology.vertexCount),
+      };
+      this.lidLast = [-1, -1];
+    }
+    if (this.lidLast[0] < 0 || Math.abs(cl - this.lidLast[0]) > 0.03 || Math.abs(cr - this.lidLast[1]) > 0.03) {
+      lidPassThroughWeights(this.lidBands.base, this.lidBands.bands, cl, cr, this.lidBands.weights);
+      this.warp.setEyeFade(this.lidBands.weights);
+      this.lidLast = [cl, cr];
+    }
+  }
+
   /** A keyframe's UVs for the current topology; the same array every frame (its identity marks a change for the renderer). */
   private keyframeUv(kf: ReferenceKeyframe): Float32Array {
     const key = `${kf.id}:${this.foreheadOn ? 'ext' : 'base'}`;
@@ -865,10 +1044,37 @@ export class RealtimeFacialEngine {
     return uv;
   }
 
-  /** R6 (settings cameraBlend / boundaryFeather): the scaled boundary feather for the current topology; 1 keeps the topology's own. */
+  /**
+   * R6 (settings cameraBlend / boundaryFeather): the scaled boundary feather for the current
+   * topology; 1 keeps the topology's own. R6b (flag jawExtension): where the persona has a beard
+   * below the jaw, the jaw rings take a much narrower feather, so the beard is opaque over the
+   * wearer's jaw and fades only at its own outer edge.
+   */
   private applyBoundaryFeather() {
     const width = resolveLook(this.settings).boundaryFeather;
-    this.warp.setBoundaryFeather(width === 1 ? null : boundaryFeatherWeights(this.topology, width));
+    const depths = realismFlags.get().jawExtension ? this.jawDepths : null;
+    if (width === 1 && !depths) {
+      this.warp.setBoundaryFeather(null);
+      return;
+    }
+    const w = boundaryFeatherWeights(this.topology, width);
+    let bands: Float32Array | null = null;
+    if (depths) {
+      const narrow = boundaryFeatherWeights(this.topology, JAW_BEARD_FEATHER);
+      bands = featherBandWeights(this.topology);
+      const plan = this.jawPlanFor();
+      for (let k = 0; k < plan.vertex.length; k++) {
+        const v = plan.vertex[k];
+        const d = depths[plan.oval[k]] ?? 0;
+        if (d > 0.05) {
+          w[v] = Math.max(w[v], narrow[v] * Math.min(1, d / 0.2));
+          // Outer band: the masks keep the pushed beard on the wearer's face skin (not the background, neck or a hand).
+          bands[v * 2] = 0;
+        }
+      }
+    }
+    this.warp.setBoundaryFeather(w);
+    this.warp.setFeatherBands(bands);
   }
 
   private getSource(): { source: HTMLVideoElement | HTMLCanvasElement; width: number; height: number; mirror: boolean } | null {
@@ -1316,23 +1522,41 @@ export class RealtimeFacialEngine {
     this.prevHeadCenter = hc;
     const headSpeed = Math.hypot(this.headVelocity.x, this.headVelocity.y);
 
-    const bounds = pointBounds(this.warpPositions.subarray(0, 468 * 2));
-    const strength = clamp(s.blendStrength / 100, 0, 1);
-    const drawPersonaEyes = !s.eyeGazeSync || (k.earLeft < 0.18 && k.earRight < 0.18);
     // "Keep my real mouth": fade the persona lip band as the mouth opens (R1 §2); with restMouth
     // (R3 item 1) the thresholds sit above the wearer's learned resting aperture.
     const fadeWindow = lipFadeWindow(flags.restMouth ? this.restMouth.rest : null);
     const lipFade = flags.realMouth && s.keepRealMouth ? lipFadeForMar(k.mar, resolveLook(s).lipFadeFloor, fadeWindow.start, fadeWindow.end) : 0;
+    // R4 §4: foreshortening from the tracked mesh against the persona's own (un-pushed) UVs, before
+    // the R6b proportion and jaw changes, which squash some triangles on purpose and must not fade them.
+    const fsUv = this.warp.personaUvs ? this.jawUvBase.get(this.warp.personaUvs) ?? this.warp.personaUvs : null;
+    const foreshorten =
+      flags.foreshortenFade && fsUv
+        ? (this.foreshorten = copyColumnWeights(foreshortenWeights(this.warpPositions, fsUv, this.baseTopology.triangles, this.topology.vertexCount, this.foreshorten ?? undefined)))
+        : undefined;
+    // R6b: the persona's interior proportions, then its beard below the jaw line (before the bounds and the forehead rings).
+    if (flags.personaProportions) {
+      const smile = ((bs.mouthSmileLeft ?? 0) + (bs.mouthSmileRight ?? 0)) / 2;
+      this.applyPersonaProportions(k, lipFade, smile);
+    }
+    if (flags.jawExtension && this.jawDepths) applyJawExtension(this.warpPositions, this.jawPlanFor(), this.jawDepths);
+
+    const bounds = pointBounds(this.warpPositions.subarray(0, 468 * 2));
+    const strength = clamp(s.blendStrength / 100, 0, 1);
+    const drawPersonaEyes = !s.eyeGazeSync || (k.earLeft < 0.18 && k.earRight < 0.18);
     // Eye pass-through ring: only while the wearer's real eyes are showing (R1 §6).
     const eyeFade = flags.eyePassThrough && !drawPersonaEyes ? 1 : 0;
+    // R6b: the ring widens over the upper lid as the lid lowers.
+    this.updateLidPassThrough(flags.lidPassThrough && eyeFade > 0, k);
     // Closed-lip mask (R2): persona lips end at the wearer's lip contour while the mouth is closed.
     const closedLipMask = flags.closedLipMask && s.keepRealMouth ? 1 : 0;
     this.lastLipFade = lipFade;
 
     const cameraMatchOn = flags.cameraMatch && this.warp.supportsReadback;
     this.warp.pollReadbacks();
-    // R3c: the relight radius comes from the auto loop (flag autoRadius) or the setting.
-    const radiusShare = flags.autoRadius && relightOn ? this.autoRadius.radius : clamp(s.relightRadius, 0.02, 0.2);
+    // R3c: the relight radius comes from the auto loop (flag autoRadius) or the setting; R6b's
+    // illumination-only relighting uses its own large-scale radius.
+    const illumination = flags.relightIllumination && relightOn;
+    const radiusShare = illumination ? ILLUMINATION_RADIUS_SHARE : flags.autoRadius && relightOn ? this.autoRadius.radius : clamp(s.relightRadius, 0.02, 0.2);
     if (relightOn && flags.symmetricDelight && this.delightBands && Math.abs(radiusShare - this.delightRadius) > 0.001) {
       this.warp.setDelight(symmetricDelightGains(this.delightBands[0], lumaAtScale(this.delightBands, radiusShare)));
       this.delightRadius = radiusShare;
@@ -1359,8 +1583,10 @@ export class RealtimeFacialEngine {
             faceWidthPx: k.faceWidth,
             toneMatch: clamp(s.skinToneMatch, 0, 1),
             radiusShare,
-            globalTone: flags.relightGlobalTone,
+            globalTone: flags.relightGlobalTone && !illumination,
             shadowGuard: flags.relightShadowGuard,
+            illumination,
+            specular: illumination,
             // R4b: hair leaves the driver low pass only as far as the extension is in, so an inactive extension renders as R4.
             excludeHair: this.foreheadOn && this.segActive ? this.foreheadStrength : 0,
           }
@@ -1372,16 +1598,14 @@ export class RealtimeFacialEngine {
         : undefined,
       twoBand: flags.twoBandBlend && relightOn,
       forehead,
+      skinTint: flags.skinTint && illumination ? clamp(s.skinTintStrength ?? SKIN_TINT_MAX, 0, SKIN_TINT_MAX) : undefined,
       // R4b: the weights come from the base triangles only; the extension rings copy their column (see copyColumnWeights).
-      foreshorten:
-        flags.foreshortenFade && this.warp.personaUvs
-          ? (this.foreshorten = copyColumnWeights(foreshortenWeights(this.warpPositions, this.warp.personaUvs, this.baseTopology.triangles, this.topology.vertexCount, this.foreshorten ?? undefined)))
-          : undefined,
+      foreshorten,
     });
     this.masksDirty = false;
 
     // R3c: the auto-radius readbacks sit between the camera-match ones.
-    if (flags.autoRadius && relightOn && this.warp.supportsReadback && !this.autoRadiusPending && this.frameIndex % AUTO_RADIUS_EVERY === 7) {
+    if (flags.autoRadius && relightOn && !illumination && this.warp.supportsReadback && !this.autoRadiusPending && this.frameIndex % AUTO_RADIUS_EVERY === 7) {
       this.stepAutoRadiusLoop(layout, source, k, bounds, flags.steadyCameraMatch && headSpeed > CAMERA_MATCH_HOLD_SPEED * k.faceWidth);
     }
 

@@ -1,7 +1,7 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import { CAMERA_MATCH_EVERY, CAMERA_MATCH_LIMITS, CAMERA_MATCH_SETTLE_FRAMES, CAMERA_MATCH_WARM_UPDATES, STEADY_DEADBAND, cameraMatchDue, cameraMatchDueSettled, initialCameraMatch, stepCameraMatch } from './cameraMatch.ts';
-import { RELIGHT_RADIUS_SHARE, blendMean, blurTaps, derivativesPreamble, faceStatsFromPixels, lowPassSigma, meanChroma, pairedFaceStats, softHoleRadiusPx, toGlslEs3, uvWidth } from './meshWarpRenderer.ts';
+import { RELIGHT_RADIUS_SHARE, blendMean, blurTaps, derivativesPreamble, faceStatsFromPixels, lowPassSigma, meanChroma, meanColour, pairedFaceStats, skinTintGain, softHoleRadiusPx, toGlslEs3, uvWidth } from './meshWarpRenderer.ts';
 
 const stats = (laplacianVariance: number, noiseMad: number, samples = 5000) => ({ laplacianVariance, noiseMad, samples });
 
@@ -146,6 +146,33 @@ test('R3 relight helpers: low-pass sigma, blur taps, soft-hole radius, UV width 
   // The ES3 conversion keeps the version line first and the defines right after it.
   const es3 = toGlslEs3('precision highp float;\nvoid main() {}', 'fragment', '#define HAS_DERIVATIVES 1\n');
   assert.ok(es3.startsWith('#version 300 es\n#define HAS_DERIVATIVES 1\n'));
+});
+
+test('meanColour is the coverage-weighted linear colour of a premultiplied low pass (R6b)', () => {
+  const w = 8, h = 4;
+  const px = new Uint8Array(w * h * 4);
+  // Left half: colour (0.8, 0.4, 0.2) at half skin weight (premultiplied); right half unpainted.
+  for (let i = 0; i < w * h; i++) {
+    const painted = i % w < 4;
+    px[i * 4] = painted ? 102 : 255;
+    px[i * 4 + 1] = painted ? 51 : 255;
+    px[i * 4 + 2] = painted ? 25.5 : 255;
+    px[i * 4 + 3] = painted ? 128 : 0;
+  }
+  const m = meanColour(px, w, h)!;
+  assert.ok(Math.abs(m[0] - 0.8) < 0.01 && Math.abs(m[1] - 0.4) < 0.01 && Math.abs(m[2] - 0.2) < 0.01, `mean ${m}`);
+  assert.equal(meanColour(new Uint8Array(w * h * 4), w, h), null, 'nothing painted');
+});
+
+test('skinTintGain moves the wearer to the shared tone: none at full tone match, all the way at zero (R6b)', () => {
+  const persona = [0.3, 0.15, 0.1];
+  const wearer = [0.4, 0.25, 0.18];
+  assert.deepEqual(skinTintGain(persona, wearer, 1), [1, 1, 1]);
+  const full = skinTintGain(persona, wearer, 0);
+  for (let i = 0; i < 3; i++) assert.ok(Math.abs(full[i] - Math.max(0.5, persona[i] / wearer[i])) < 1e-9);
+  const half = skinTintGain(persona, wearer, 0.5);
+  assert.ok(Math.abs(half[0] - Math.sqrt(0.3 / 0.4)) < 1e-9);
+  assert.deepEqual(skinTintGain([1, 1, 1], [0.01, 0.01, 0.01], 0), [2, 2, 2], 'clamped');
 });
 
 test('meanChroma averages the painted (premultiplied) low pass and normalises by luma', () => {

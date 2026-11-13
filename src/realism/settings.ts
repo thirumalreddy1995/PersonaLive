@@ -25,6 +25,8 @@ const NUMERIC_KEYS: ReadonlyArray<SettingKey> = [
   'skinToneMatch',
   'relightRadius',
   'cameraBlend',
+  'featureBlend',
+  'skinTintStrength',
   'boundaryFeather',
   'cameraMatchSharpness',
   'cameraMatchNoise',

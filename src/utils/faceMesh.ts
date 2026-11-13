@@ -201,6 +201,26 @@ export function boundaryFeatherWeights(topology: FaceTopology, width: number): F
   return out;
 }
 
+/** Eyebrow landmarks (subject's right, then left). */
+export const BROW_LANDMARKS: ReadonlyArray<number> = [70, 63, 105, 66, 107, 55, 65, 52, 53, 46, 300, 293, 334, 296, 336, 285, 295, 282, 283, 276];
+
+/**
+ * R6b (flag relightIllumination): per-vertex weight of a vertex in the skin-only illumination low
+ * pass. 0 on the eye rings and the ring around them, on the lip band and on the brows (their colour
+ * is not the light on the skin); 1 elsewhere, extension vertices included. Beard and hair are left
+ * out per pixel by colour in the paint shader.
+ */
+export function skinPaintWeights(topology: FaceTopology): Float32Array {
+  const out = new Float32Array(topology.vertexCount).fill(1);
+  const n = Math.min(topology.vertexCount, 468);
+  for (let v = 0; v < n; v++) {
+    const e = topology.eyeRingDistance[v];
+    if ((e >= 0 && e <= 1) || topology.lipWeights[v] > 0) out[v] = 0;
+  }
+  for (const v of BROW_LANDMARKS) if (v < out.length) out[v] = 0;
+  return out;
+}
+
 export const WIDE_FEATHER_RINGS = 5;
 export const NARROW_FEATHER_RINGS = 1.5;
 

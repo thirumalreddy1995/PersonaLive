@@ -47,6 +47,7 @@ import { parseSettingsString } from '../../src/realism/settings.ts';
 import type { RealismDebugState, SerializedBurst, SerializedCapture } from '../../src/realism/debug.ts';
 import * as M from './metrics.ts';
 import { SheetRow, blank, blit, compositeOnChecker, contactSheet, crop, decodeImageFile, decodePngDataUrl, drawText, imageDataUrl, scaleImage, writeDataUrlPng, writePng } from './png.ts';
+import { referenceRect } from './auditLayout.ts';
 import { REVIEW_DIR, ROOT, describeLoad, driveAppShell, hookState, launchBrowser, sleep, startPreview, systemLoad, waitForHookState, webglRenderer } from './session.ts';
 import { regionsSheet } from './regions.ts';
 import { PersonaEntry, loadPersonaSet } from './personaSet.ts';
@@ -413,6 +414,8 @@ interface CaptureOptions {
   pageErrors: string[];
   /** Persona photo for the identity guard; null skips it. */
   personaPhoto: string | null;
+  /** R6b: the persona's own photo, shown as the first column of every contact-sheet row (null = none). */
+  referencePhoto: string | null;
 }
 
 async function captureClip(page: Page, args: Args, o: CaptureOptions): Promise<ClipReport> {
@@ -474,6 +477,15 @@ async function captureClip(page: Page, args: Args, o: CaptureOptions): Promise<C
   const identityPairs: Array<{ output: string; driver: string }> = [];
   const identityOn = !!o.personaPhoto && identityAvailable();
   if (identityOn) fs.mkdirSync(identityDir, { recursive: true });
+  // R6b: what "A" looks like, next to every row (an unreadable photo just leaves the column out).
+  let reference: M.RgbaImage | null = null;
+  if (o.referencePhoto) {
+    try {
+      reference = decodeImageFile(o.referencePhoto);
+    } catch {
+      reference = null;
+    }
+  }
   for (const c of captures) {
     const tag = `t${c.t.toFixed(2).replace('.', '_')}`;
     let files: FrameReport['files'] = null;
@@ -550,10 +562,12 @@ async function captureClip(page: Page, args: Args, o: CaptureOptions): Promise<C
     const regions = M.faceRegions(lms, output.width, output.height);
     const box = M.expandRect(regions.ovalBox, 1.5, 1.45);
     const outputCrop = crop(output, box);
-    const tiles = [
-      { label: 'driver', image: scaleImage(crop(driver, box), 2) },
-      { label: 'output', image: scaleImage(outputCrop, 2) },
-    ];
+    const tiles: Array<{ label: string; image: M.RgbaImage }> = [];
+    if (reference) {
+      const rr = referenceRect(reference.width, reference.height, box.w / Math.max(1, box.h));
+      tiles.push({ label: 'persona photo', image: scaleImage(crop(reference, rr), (box.h * 2) / Math.max(1, rr.h)) });
+    }
+    tiles.push({ label: 'driver', image: scaleImage(crop(driver, box), 2) }, { label: 'output', image: scaleImage(outputCrop, 2) });
     if (overlay) tiles.push({ label: 'persona layer', image: scaleImage(compositeOnChecker(crop(overlay, box)), 2) });
     sheetRows.push({ label: `${c.t.toFixed(2)}s`, tiles });
     const d = Math.abs(c.t - duration / 2);
@@ -917,6 +931,9 @@ async function main() {
         app.pendingBypassUses = await page.evaluate(() => window.__personaLiveRealism?.pendingBypassUses() ?? 0);
         if (app.pendingBypassUses) console.log(`  consent: pending record activated through the review build (logged use ${app.pendingBypassUses})`);
       }
+      // R6b: the persona's own photo, recorded for the audit sheets (a path inside the gitignored folders, never the image).
+      const referencePhoto = enrolled ? path.join(args.enrolled!, enrolled.shots[0].file) : localPhoto;
+      app.personaPhoto = referencePhoto ? path.relative(ROOT, referencePhoto) : null;
       const clipReports: Record<string, unknown> = { ...((existing.clips as Record<string, unknown>) ?? {}) };
       for (const clip of clips) {
         const report = await captureClip(page, args, {
@@ -930,6 +947,7 @@ async function main() {
           defaultFrames: 8,
           pageErrors,
           personaPhoto: !args.identity ? null : enrolled ? path.join(args.enrolled!, enrolled.shots[0].file) : defaultPersonaPhoto(args.personaPhoto),
+          referencePhoto,
         });
         printSummary(clip.label, report.summary);
         const { tile: _tile, ...rest } = report;
@@ -982,6 +1000,7 @@ async function main() {
             defaultFrames: 4,
             pageErrors,
             personaPhoto: args.identity ? persona.file : null,
+            referencePhoto: persona.file,
           });
           printSummary(`${persona.id}/${clip.label}`, report.summary);
           entry.clips[clip.label] = roundDeep(report.summary);

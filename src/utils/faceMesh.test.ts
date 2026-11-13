@@ -8,7 +8,9 @@ import {
   applySmileBias,
   applySpeechAnatomy,
   boundaryFeatherWeights,
+  BROW_LANDMARKS,
   buildFaceTopology,
+  skinPaintWeights,
   closedLipMaskForZone,
   computeKinematics,
   eyeFadeWeights,
@@ -86,6 +88,16 @@ test('feather weights are 0 on the face oval and 1 in the interior', () => {
   assert.equal(topo.featherWeights[LM.MOUTH.upperInner], 1);
   const ring1 = topo.featherWeights.filter((w) => w > 0 && w < 1).length;
   assert.ok(ring1 > 20, 'there should be a soft transition ring');
+});
+
+test('skinPaintWeights leaves eyes, lips and brows out of the illumination low pass (R6b)', () => {
+  const topo = buildFaceTopology(TESSELLATION, OVAL, 468);
+  const w = skinPaintWeights(topo);
+  assert.equal(w.length, topo.vertexCount);
+  for (const v of [33, 133, 159, 145, 263, 362, 386, 374]) assert.equal(w[v], 0, `eye vertex ${v}`);
+  for (const v of [13, 14, 61, 291, 0, 17]) assert.equal(w[v], 0, `lip vertex ${v}`);
+  for (const v of BROW_LANDMARKS) assert.equal(w[v], 0, `brow vertex ${v}`);
+  for (const v of [1, 10, 50, 280, 152, 234, 454]) assert.equal(w[v], 1, `skin vertex ${v}`);
 });
 
 test('boundaryFeatherWeights: width 1 is the built-in feather, narrower and wider stretch the same curve (R6)', () => {

@@ -926,6 +926,79 @@ For this pair, with very different face shapes and facial hair, items a–h will
 - This session ran at 23–24 fps with frame p95 about 49 ms, against 29–30 fps and 30 ms earlier the same day. Not investigated.
 - This machine (HP EliteBook 640 G9, i5-1235U) has only the Intel UHD GPU and no NVIDIA device or driver, so R7 work must run on the machine with the RTX 500 Ada.
 
+## Phase R6b — Identity fixes from the visual audit (2D, any laptop)
+
+R7 is on hold. The goal is a convincing browser app on a standard laptop (this one: Intel UHD, no sidecar). Branch `realism/r6b-identity`. Every change sits behind a flag, all off by default; `--flags r6b` turns all five on.
+
+### What was built
+- **Persona photo in every review:**
+  - `report.json` records `app.personaPhoto` (a path in the gitignored folders), and every contact-sheet row starts with that photo.
+  - New `npm run realism:audit` writes full-resolution pages: persona photo | camera | each run's output.
+  - Pure layout in `tools/realism/auditLayout.ts`, with tests.
+- **`relightIllumination`** (shader and paint pass):
+  - Both low passes are skin-only and large-scale: 10% of face width, with eyes, lips and brows weighted out per vertex and beard, hair and dark pixels by colour.
+  - Each face's relative illumination is its low pass divided by its mean skin colour. The persona's own pattern is divided out and the wearer's applied, so the persona keeps its beard, brows, skin tone and lip and nose colour.
+  - The mean skin colour moves toward the wearer's by `skinToneMatch`: fully at the boundary, about half in the centre. Its colour part acts on skin-like pixels only, otherwise a neutral beard turns olive.
+  - Glare much brighter than the surrounding skin is compressed, except on the lips and eyes.
+- **`skinTint`:** the wearer's neck and ear skin (from the masks), just outside the face, is drawn under the persona and moved toward the shared skin tone. Its alpha stays at or under 0.45, so the leak metrics never count it.
+- **`personaProportions`:**
+  - The interior takes the persona's layout relative to the eyes (eye frame, mirror-invariant). It uses the wearer's neutral shape, learned from frontal relaxed frames, and a per-frame affine fitted on stable points.
+  - The outer oval stays on the wearer. With real eyes the eye rings stay too, the inner lip ring stays on the real mouth, and the outer lip contour moves half way.
+- **`jawExtension`** (reloads the persona):
+  - The persona photo's beard depth below the jaw is measured. The lower rings are pushed out by up to 0.18 IOD in screen and UV alike, tapering at the ends of the jaw and fading out as the head turns (about 35°). The jaw rings take a narrow feather.
+  - Those rings count as the masks' outer band, so the beard stays on the wearer's face skin, never the background, neck or a hand.
+- **`lidPassThrough`:** the eye pass-through widens by 2.5 rings over the upper lid with lid closure, or with downward gaze.
+- **Foreshortening fix:** the R4 foreshortening fade is now computed on the tracked mesh against the persona's own UVs, before the R6b mesh changes; the deliberate changes had cut holes at the nostrils and the jaw.
+- **Tests:** 231 pass (17 new for the R6b pure logic and the review layout).
+
+### Before → after
+- **Setup:** both directions, same frozen build `dist-r6b`, laptop **on battery** throughout (Windows status 1).
+- **Configurations:** "before" = defaults (`r6`); "after" = `--flags r6b --settings skinToneMatch=0.3`.
+- **Runs:**
+  - clip author → second person: `r6b-before-me2bro` / `r6b-after5-me2bro`;
+  - second person's stills → clip author (`G.mp4`): `r6b-before-bro2me` / `r6b-after5-bro2me`.
+
+| Clip | fps | frame p95 (ms) | output↔persona | output↔wearer | margin | neck ΔE gap | hand leak |
+|---|---|---|---|---|---|---|---|
+| A | 27.3 → 29.0 | 42 → 36 | .44 → .45 | .70 → .55 | −.26 → −.10 | −1.2 → −10.2 | 0 → 0 |
+| B | 29.2 → 28.3 | 37 → 40 | .40 → .35 | .69 → .68 | −.29 → −.33 | −1.4 → −1.6 | 1.2% → 0.4% |
+| C | 29.1 → 17.4* | 35 → 59* | .43 → .38 | .67 → .60 | −.24 → −.23 | −1.4 → −2.1 | 0.6% → 0.5% |
+| E | 28.9 → 15.5* | 37 → 65* | .43 → .41 | .64 → .62 | −.20 → −.20 | −1.9 → −3.3 | 0 → 1.0% |
+| G (reverse) | 25.1 → 29.9 | 43 → 29 | .44 → .52 | .69 → .62 | −.25 → −.10 | 0.5 → 0.0 | 0 → 0 |
+
+\* The laptop throttled on battery during C and E of the final run.
+- **Speed:** frame cost is unchanged. The previous pass of the same flags ran C and E at 28.5 / 29.0 fps, and the warp stage costs 2.4–3.0 ms with or without the flags. Timings on mains are still to be taken.
+- **Noise:** identity moves by about ±0.05 between two "after" passes (C margin −.17 / −.23).
+- **Tone metrics:** the neck and ear gaps flag the deliberate tone difference. The face now keeps the persona's darker tone; on A the ears stay visibly lighter.
+- **Sheets:** `realism-review/out/r6b-audit5-me2bro/{A,B,C,E}-{1,2}.png` and `r6b-audit5-bro2me/G-{1,2}.png` (gitignored).
+
+**By eye:**
+- **Clip author → second person:** the output now carries the second person's full dark beard over the jaw and chin, his skin tone, lips and nose colour. On frontal frames it reads much more like him than before, which was plainly the wearer.
+- **Reverse:** the wearer's face interior (moustache, lips, eyes, lighter skin) now shows. The wearer's own heavy beard outside the face oval stays, so the result reads as the persona framed by the wearer's beard.
+
+### What still looks fake (ranked)
+1. **Head shape is the wearer's:** silhouette, hairline and ears (2D ceiling). With the persona's beard and tone the lower face reads as the persona, so the mix can look uncanny.
+2. **Face darker than the ears and neck** on well-lit frontal frames (A): the tint closes part of the gap only.
+3. **The beard:**
+   - a uniform dark mass with little hair texture;
+   - it ends at the wearer's jaw, so the neck below is not covered;
+   - a hard edge where the masks' jaw/neck line is irregular on a tilted head (C 7.3 s);
+   - a notch on a turned head (B 1.75 s).
+4. **Look-ups:** persona lips magenta and nostril rims pink (B 11.8 s, E 12.1 s).
+5. **Turns:** the R6 seam line by the far eye (B 1.75 s, 3.8 s), not addressed in R6b.
+6. **Masks lag fast motion:**
+   - pale bands beside the cheek where the tint lands on the wall (C 2.2 s, 9.8 s);
+   - a faint persona ghost over knuckles under the chin (C 2.2 s).
+7. **Glare compression** can leave a flat pale patch on the nose bridge (B 15.8 s).
+8. **Eyelid crease arcs** on downward gaze are weaker but not gone (B 13.8 s).
+
+### Deviations
+- **Battery throughout:** timings are comparable only within the same window, and the C and E after runs throttled. The 30 fps check on mains is still to be done.
+- **Persona grid:** not run.
+- **Tone match:** 0.3 for the after runs (the default stays 1). The flags stay off by default until a measured comparison on mains and a look at the sheets.
+- **Jaw depth:** limited to the wearer's jaw silhouette (0.18 IOD), because the masks cannot tell a neck from a hand; a full beard onto the neck stays a 2D limit.
+- **Install incident:** during verification, `npm ci` emptied `node_modules` while Vite servers started outside this session held lightningcss open, and the `npm install` fallback then failed (EBUSY). The modules were restored by installing from the lockfile into a scratch folder and copying in only the missing files. The running servers were not touched.
+
 ---
 
 ## Phase R7 — Neural renderer (separate approval required)
