@@ -789,7 +789,7 @@ The machine ran at about 19 fps instead of 29 from 16:50 to about 18:25 with not
 
 The preset clip runs fell in the slow window (18–19 fps), which the camera-match and relight loops see as fewer updates; their sharpness on B and C swings between runs (Identity-forward B: 0.10 here, 2.06 in the timing check; Camera-matched B: 1.49 here, 0.07 in the timing check). Treat single sharpness values on B/C as ±1.
 
-- **Identity delta against `r4` (same persona, same wearer; Part 1 used the wearer as their own persona, so there is no carried-over baseline):** Balanced −0.09 on A, within ±0.02 elsewhere; Identity-forward −0.09 on A, −0.01 to +0.02 elsewhere; Camera-matched −0.07 to −0.14 on every clip. The A loss is shared by every configuration on the new base (also −0.06/−0.07 with the median loop), so it comes from the base (keyframe choice on a frontal clip is the first suspect), not from the presets; by eye every row on the A sheet reads as the persona.
+- **Identity delta against `r4` (same persona, same wearer; Part 1 used the wearer as their own persona, so there is no carried-over baseline):** Balanced −0.09 on A, within ±0.02 elsewhere; Identity-forward −0.09 on A, −0.01 to +0.02 elsewhere; Camera-matched −0.07 to −0.14 on every clip. The A loss is shared by every configuration on the new base (also −0.06/−0.07 with the median loop), so it comes from the base (keyframe choice on a frontal clip is the first suspect), not from the presets. (This report said here that every row on the A sheet reads as the persona by eye. That was wrong: see the R6 visual audit below.)
 - **Persona grid (28 personas, A + B; median / worst 10%):**
 
 | | `r4` | Balanced | Identity-forward | Camera-matched | Balanced on the median loop (dropped) |
@@ -874,6 +874,58 @@ The user chose **Balanced**.
 4. Camera-match loop: the steady loop's clip B bistability on enrolled personas, and the median loop's failure on sharp single photos; a loop that converges fast without winding up is still needed.
 5. Segmenter delegate per machine (GPU where a mask takes under about 15 ms); CPU masks need the machine at full speed (hand leak rose to 17% on clip B while the laptop was throttled).
 
+### R6 visual audit (2026-11-13, after live testing): the output reads as the wearer
+The user tested the app live and found the output "very fake, like a filter". This audit looked at the full-resolution output frames, not the reports.
+
+- **Setup:** review build of `main` (`dist-main`), default settings, mains power.
+  - **Direction a:** the clip author as wearer on clips A, B, C and E; the persona is the second person's live seven-shot enrollment (`r7a-me2bro`).
+  - **Direction b, reverse:** the second person's seven enrollment photos, held 3 s each, as the driver clip (`realism-review/clips/G.mp4`); the persona is the clip author's automated seven-shot enrollment (`r7a-bro2me`).
+  - **What was inspected:** native-resolution face crops, camera next to output, in `realism-review/out/r7-audit/` (gitignored).
+- **Correction:** the R6 Part 2 report says that "by eye every row on the A sheet reads as the persona". That was wrong. Those sheets had no persona photo beside them; next to it, every output reads as the wearer.
+  - The identity guard showed this throughout: output↔wearer 0.68–0.70 against output↔persona 0.38–0.43, in both directions. Comparing presets with each other hid the absolute picture.
+  - The natural-look metrics (neck ΔE, seam, sharpness) reward output that copies the wearer.
+
+**What looks fake, ranked.** The pair: the persona has a full dark beard and a wider, heavier face; the wearer has a light beard and a slimmer face.
+1. **It is not the persona.** Face outline, jaw, chin, ears, hairline, eyes and lips are the wearer's, and the persona's full beard is gone. Only a mid-scale skin texture and a darker moustache band carry over. In reverse the output is the second person with a smoother, flatter upper face, closer to a beauty filter than a different person.
+2. **Moustache:** grey, wispy moustache strands over the wearer's lip (C 2.2 s, E 3.7 s).
+3. **Nose:** an orange-red, shiny tip in most frames; a white specular dot on turns (B 1.75 s); pink nostril rims when looking up (B 11.8 s, E 12.1 s).
+4. **Lips:** magenta, swollen lips on pouts and look-ups (B 9.8 s, 11.8 s; E 12.1 s); a vertical cut at the lip corner and a green tint under the lower lip (B 1.75 s, 11.8 s).
+5. **Eyes:** the persona's eyelid crease drawn as a pale arc above the wearer's lowered lid (B 5.8 s, 13.8 s); a hard, near-vertical line from the brow past the eye on turns (B 1.75 s); light rings at the eye pass-through edge.
+6. **Skin:** interior skin smoother and flatter than the camera, an airbrushed look, strongest in reverse.
+7. **Profiles:** the profile (B 7.8 s) is the wearer, because the persona fades out by design beyond the enrollment poses.
+
+**Causes checked**
+- **Relighting (R3) causes items 1–4.**
+  - **How:** the shader keeps the persona's fine detail (persona ÷ its own low pass) and multiplies it by the wearer's low-pass brightness and colour. So everything broader than the relight radius (2–8% of face width) becomes the wearer's: beard, brows, skin tone, under-eye shading, lip and nose colour. The persona's dark moustache hairs become skin-bright strands.
+  - **Test** (`r7a-norelight`, A and B): with relighting off, the persona's beard and moustache come back and the lower face reads as the persona by eye. Output↔wearer falls 0.70 → 0.57 on A (margin −0.26 → −0.13), but output↔persona only moves 0.43 → 0.44, and the face is 13 ΔE darker than the neck.
+- **Not the masks.** The segmenter labels a beard as face skin, not hair (masks at A 10.3 s and G 2.5 s), and the persona inpaint replaced only 0.3–0.9% of the oval.
+- **Geometry.** The mesh follows the wearer's landmarks, so face shape, eye spacing and the shapes of nose and lips are the wearer's. The recogniser weighs these heavily, which is why switching relighting off barely moved output↔persona.
+- **Eyes and lips.** "Keep my real eyes" and "Keep my real mouth" show the wearer's eyes and lips by design. Turning both off (`r7a-norelight-own`) changes output↔persona by under 0.01.
+
+**Fixable in the 2D pipeline**
+- a. **Relighting transfers the wearer's albedo, not just the light.** Estimate the illumination from the wearer's skin pixels only (face-skin mask, beard and brows excluded), at a larger scale, as a ratio to a neutral frontal reference of the wearer. Apply it to the persona's own low pass, so the persona keeps its beard, brows, skin tone and lip and nose colour.
+- b. **Skin tone.** Instead of pulling the face toward the wearer, tint the wearer's visible neck and ears (skin masks outside the oval) toward the persona, using the existing boundary blend.
+- c. **Specular highlights baked into the persona photo** (white dot, shiny orange nose): find and remove them when the persona loads.
+- d. **The per-channel detail term adds the persona's lip and nostril colour on top of the wearer's** (magenta lips, pink nostrils, green chin). Use luminance-only detail, take colour from the tone-matched persona, and clamp it in dark areas.
+- e. **Seams on turns** (the hard line by the eye, the lip-corner cut): isolate in the keyframe UV and cross-fade path (limitation 1 above).
+- f. **Ghost eyelid arcs:** widen the eye pass-through with the lid opening, or move the crease with the lid.
+- g. **Beard edge at the face oval:** extend the mesh below the jaw, like the forehead extension, so a persona beard carries over the wearer's jawline.
+- h. **Interior geometry from the persona:** drive the persona's own landmark shape with the wearer's motion inside the face (eye spacing, nose, lip shape), and keep the outer oval on the wearer's.
+- i. **Review:** sheets always carry the persona photo, and the identity guard's output↔wearer and output↔persona values are reported next to the deltas.
+
+**2D ceiling (R7)**
+- The head and face silhouette, jaw width, cheek volume, hairline, ears and neck stay the wearer's; a wider or heavier persona cannot appear without generating pixels outside the wearer's silhouette.
+- Persona features beyond the face oval cannot appear, for example a full beard under the chin and onto the neck.
+- Turns beyond the ±25° enrollment shots, and profiles.
+- Expression-dependent shape and wrinkles between the seven shots; eyelids and creases following gaze; the mouth interior with the persona's teeth.
+- Shading on the persona's own 3D shape.
+
+For this pair, with very different face shapes and facial hair, items a–h will make it less filter-like but the ceiling binds: the 2D pipeline will not make the second person recognisable on the wearer.
+
+**Notes**
+- This session ran at 23–24 fps with frame p95 about 49 ms, against 29–30 fps and 30 ms earlier the same day. Not investigated.
+- This machine (HP EliteBook 640 G9, i5-1235U) has only the Intel UHD GPU and no NVIDIA device or driver, so R7 work must run on the machine with the RTX 500 Ada.
+
 ---
 
 ## Phase R7 — Neural renderer (separate approval required)
@@ -881,6 +933,8 @@ The user chose **Balanced**.
 **Why it's separate:** after R1–R6 the 2D warp should look convincing at video-call size with steady framing. It still can't create pixels the reference photos don't contain, so large head turns and big expressions will show the limits. Getting past that needs a neural portrait-animation model (LivePortrait class). That runs in real time only with TensorRT on an NVIDIA GPU, so it can't run in the browser.
 
 **Before starting:** ask me first, then write `docs/sidecar-design.md` and wait for approval.
+
+**Status (2026-11-13):** `docs/sidecar-design.md` is written for review; nothing is implemented. Its first step is a benchmark gate on the RTX 500 Ada machine. The development laptop has no NVIDIA GPU.
 
 ### Design constraints (summary)
 - **Server:** an optional local Python sidecar, bound to `127.0.0.1` with a per-session token. No disk writes, no outbound network.
