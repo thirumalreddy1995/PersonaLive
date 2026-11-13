@@ -767,6 +767,95 @@ All four fixes together (`videoFramePacing`, keyframes, matrix pose, `cameraMatc
 - Before `segmentCpu` becomes a default: one clip with a fast occlusion, and a decision whether the delegate should be chosen per machine (GPU where a mask takes under about 15 ms).
 - A live seven-shot enrollment by a second person is still needed to read identity with keyframes.
 
+### R6 Part 2 report (2026-11-13): sweep and three candidate presets; no default changed yet
+Branch `realism/r6-tuning`, review build `dist-r6/`, Chrome on the Intel UHD adapter, mains power for every run. Wearer: the clip author on clips A–F (F, new: 14.7 s with a hand crossing the face fast). Persona for the clip runs: a second person, enrolled live at the webcam with the guided enrollment (`realism:enroll --live`, seven shots, every gate passed, signed and saved in the dialog; exported review-only to `realism-review/enrolled/brother`; his real open mouth measured 0.87, far above the 0.26 gate). Cross-identity check: the 28-persona single-photo grid on clips A and B.
+
+The machine ran at about 19 fps instead of 29 from 16:50 to about 18:25 with nothing else using the CPU (power plan Balanced, mains; most likely thermal or power limiting after five hours of runs). Timings from that window are not used: the frame-time rows below come from a separate check on clips A and B after it had passed (`r6t-*`), and the Balanced grid was run again (`r6h-bal-2`).
+
+**Before → after per clip (`r4` = mean of two passes; presets one pass; A / B / C / D / E / F)**
+
+| | `r4` | Balanced | Identity-forward | Camera-matched |
+|---|---|---|---|---|
+| fps (A / B, timing check) | 26.0 / 30.2 | 29.3 / 29.5 | 29.3 / 29.6 | 29.8 / 29.5 |
+| frame p95 ms (A / B, timing check) | 103 / 68 | 33 / 31 | 31 / 31 | 29 / 30 |
+| tracker p95 ms (A / B) | 101 / 65 | 30 / 28 | 27 / 28 | 27 / 27 |
+| output↔persona (SFace) | .51 / .37 / .45 / .50 / .43 / .52 | .42 / .37 / .43 / .49 / .43 / .51 | .42 / .36 / .45 / .52 / .43 / .52 | .37 / .30 / .36 / .42 / .36 / .44 |
+| identity margin (persona − wearer) | −.15 / −.33 / −.19 / −.17 / −.20 / .01 | −.29 / −.34 / −.23 / −.17 / −.20 / −.10 | −.28 / −.30 / −.19 / −.11 / −.21 / .01 | −.41 / −.48 / −.35 / −.33 / −.38 / −.26 |
+| sharpness gap (±0.15) | −.24 / .26 / .40 / −.18 / −.09 / .62 | −.03 / .52 / .43 / −.22 / −.12 / 1.65 | .09 / .10 / .23 / −.07 / .08 / .11 | .06 / 1.49 / 1.32 / −.17 / −.06 / −.32 |
+| neck ΔE gap (±3) | −2.00 / −.55 / −1.53 / −1.89 / −2.32 / −1.82 | −.96 / −1.31 / −1.29 / −1.97 / −1.96 / −2.42 | −1.00 / −1.27 / −1.65 / −2.41 / −1.64 / −2.24 | −.64 / −.37 / −.93 / −1.59 / −1.24 / −1.42 |
+| ears ΔE gap (±3) | .78 / .08 / −.27 / −.29 / −.38 / .16 | .53 / .18 / −.67 / −.23 / −.33 / .40 | .80 / .23 / −.44 / −.46 / −.05 / .11 | .29 / .01 / −.46 / −.12 / −.28 / .21 |
+| seam-step gap (±1) | −.30 / −.04 / −.20 / −.23 / .07 / .10 | −.07 / .18 / −.16 / −.22 / .04 / .01 | −.05 / .06 / −.25 / −.27 / .09 / .07 | −.05 / −.02 / −.07 / −.08 / .06 / −.04 |
+| texture slide gap px | .02 / .43 / −.04 / .00 / .01 / −.01 | −.02 / .05 / −.06 / .06 / −.06 / −.01 | .02 / −.08 / .00 / .00 / −.02 / −.19 | .03 / .20 / −.05 / .00 / .12 / −.03 |
+
+The preset clip runs fell in the slow window (18–19 fps), which the camera-match and relight loops see as fewer updates; their sharpness on B and C swings between runs (Identity-forward B: 0.10 here, 2.06 in the timing check; Camera-matched B: 1.49 here, 0.07 in the timing check). Treat single sharpness values on B/C as ±1.
+
+- **Identity delta against `r4` (same persona, same wearer; Part 1 used the wearer as their own persona, so there is no carried-over baseline):** Balanced −0.09 on A, within ±0.02 elsewhere; Identity-forward −0.09 on A, −0.01 to +0.02 elsewhere; Camera-matched −0.07 to −0.14 on every clip. The A loss is shared by every configuration on the new base (also −0.06/−0.07 with the median loop), so it comes from the base (keyframe choice on a frontal clip is the first suspect), not from the presets; by eye every row on the A sheet reads as the persona.
+- **Persona grid (28 personas, A + B; median / worst 10%):**
+
+| | `r4` | Balanced | Identity-forward | Camera-matched | Balanced on the median loop (dropped) |
+|---|---|---|---|---|---|
+| fps / frame p95 ms (median) | 27.2 / 85 | 29.5 / 29 (slow run: 19.0 / 59) | 29.2 / 32 | 29.4 / 30 | 29.4 / 31 |
+| output↔persona per persona-clip (higher better) | .234 / .106 | .237 / .093 (.226 / .074) | .225 / .078 | .204 / .074 | .259 / .126 |
+| identity margin deficit (lower better) | .364 / .516 | .377 / .532 (.407 / .617) | .413 / .561 | .442 / .622 | .372 / .492 |
+| output↔wearer (lower better) | .594 / .717 | .624 / .699 (.654 / .757) | .635 / .730 | .652 / .746 | .611 / .682 |
+| identity per persona against `r4` (median; better / worse by > 0.02) | – | 0.000 (5 / 7) | −0.012 (2 / 11) | −0.031 (2 / 17) | +0.007 (8 / 4) |
+| \|sharpness gap\| face/ring | .182 / 1.015 | .290 / 3.052 (.173 / 1.457) | .246 / 1.760 | .226 / .983 | 1.321 / 3.358 |
+| \|sharpness gap\| interior | .184 / .996 | .250 / 2.844 (.224 / 1.344) | .274 / 1.253 | .261 / 1.085 | 1.094 / 3.875 |
+| \|neck ΔE\| | 1.353 / 2.467 | 1.501 / 2.291 (1.370 / 2.314) | 1.512 / 2.338 | 1.428 / 2.153 | 1.688 / 2.761 |
+| \|ears ΔE\| | .641 / 1.925 | .705 / 2.039 (.642 / 1.491) | 1.034 / 2.489 | .575 / 1.253 | .725 / 2.114 |
+| seam-step gap | .051 / .475 | .062 / .407 (.032 / .287) | .074 / .481 | .067 / .188 | .094 / .521 |
+| texture slide gap px | .329 / .598 | .005 / .203 (.021 / .106) | .027 / .125 | .010 / .142 | .056 / .190 |
+| flicker delta | −.081 / .334 | .032 / .207 (−.043 / .239) | .006 / .212 | −.020 / .160 | .032 / .196 |
+| ghost hair share | .001 / .001 | .002 / .024 (.031 / .096) | .003 / .053 | .002 / .022 | .003 / .039 |
+| hand leak share | .000 / .000 | .001 / .002 (.000 / .108) | .001 / .008 | .001 / .001 | .001 / .002 |
+| lip error % | 1.15 / 2.23 | 1.24 / 2.07 (1.48 / 2.43) | 1.43 / 2.12 | 1.27 / 2.17 | 1.28 / 3.32 |
+
+  Balanced: `r6h-bal-2` at full speed, the slow-window run `r6h-bal` in brackets. Identity-forward's grid ran partly in the slow window (10th-percentile fps 18.4); the slow Balanced run lost 0.01 of per-persona identity against the full-speed one, so part of Identity-forward's −0.012 may be that. The worst 10% of the sharpness gap is set by a few sharp photos and moves by 2× between runs (p21 alone reads 28.8 in `r6h-bal-2`). The median-loop Balanced run is the most recognisable (+0.007, 8 better / 4 worse) because its output is sharper than the camera (gap 1.32): on this grid sharpness buys recognisability at the cost of the face looking pasted on.
+- **Contact sheets** (gitignored): `realism-review/out/r6-sheets/clip-A.png` … `clip-F.png` (rows: driver, `r4`, Balanced, Identity-forward, Camera-matched, Balanced on the median loop) and `grid-A-1…4.png`, `grid-B-1…4.png` (rows: personas; columns: `r4`, Balanced, Identity-forward, Camera-matched).
+
+**1. The median camera-match loop is dropped from the base**
+- On the grid every preset built on `cameraMatchMedian` left the output far sharper than the camera: face/ring gap median 0.80–1.43 against 0.18 for `r4`, worst 10% 2.5–4.2 against 1.0.
+- One factor at a time on six personas (p01, p02, p04, p09, p21, p23; clips A, B; `r6i-*`), median \|gap\| / fps / frame p95: `r4` 0.21 / 29.2 / 75; + median loop 0.59 / 31.6 / 74; + pacing 0.64 / 24.5 / 78; + CPU segmenter 0.16 / 36.5 / 30; + CPU segmenter and pacing 0.14 / 29.6 / 30; + CPU segmenter and median loop 1.95.
+- The median loop fails on sharp single photos (p04, p09, p21, p01), mostly on clip B: it restarts from no blur after every source change, waits 45 frames, and its anti-windup holds whenever the newest reading disagrees with the median, which on these personas is often; it ends at blur ~2 where they need ~4. Pacing alone loses frames to the GPU segmenter's stalls (Part 1) and is fine with the CPU segmenter.
+- The steady loop stays, with its clip B bistability on enrolled personas (Part 1 §2) still open; the flag stays off. A loop that converges fast on sharp photos and does not wind up on soft first readings is an R7-or-later item.
+
+**2. One-at-a-time sweep (`r6s-*`, clips A–E, persona `r6-auto` = the wearer, on the median-loop base)**
+- Run-to-run noise between two identical base runs: sharpness up to 0.25, neck 0.1 ΔE.
+- `skinToneMatch` 0.5 / 0.75 (1): neck median −0.84 / −1.05 (−1.00); 0.5 helps E (−1.00 → −0.39) and costs D's ears (−0.84 → −1.60).
+- `cameraMatchSharpness` 1.25 / 1.5: median gap −0.17 → −0.12 / −0.07, C overshoots to +0.33 / +0.43. Dropped with the median loop (on the steady loop it would only sharpen further).
+- `cameraMatchNoise` 0.5 / 1.5: 1.5 lifts the sharpness metric (median −0.17 → +0.07, C +0.64); 0.5 no change.
+- `lipFadeFloor` 0.3 / 0.6 and `eyePassThroughRadius` 0 / 2: no metric difference beyond noise; radius 2 adds texture slide on B (+0.29 against −0.05).
+- `boundaryFeather` 0.6 / 1.5: 1.5 nearly halves the neck gap on C and D (−1.10 → −0.66, −1.65 → −0.97), ears and seam better, output softer (median sharpness −0.17 → −0.37); 0.6 worse on every tone metric (dropped).
+- fps 29.2–29.7 everywhere except three runs (`eye2`, `feather60`, `feather150` clip A) at ~19 fps while clip F was being recorded on the same machine.
+- Not swept: `hairlineFeather` and the forehead stretch limits act only with `foreheadExtension`, which stays off.
+
+**3. Clip F (fast occlusion) and the CPU segmenter**
+- Masks delivered over clip F alone (runs with F first): 41 with the CPU segmenter (one every ~360 ms) against 99 with the GPU segmenter on the same base (`r6c-bal-3F`, `r6c-balgpu-1`); the GPU run drops to 25 fps with frame p95 64 ms (CPU: 29.6 fps, 33 ms).
+- Hand leak on F: 0.1–0.4% of the face (CPU, normal speed) against 0.3–1.1% for `r4` and 0 for the GPU segmenter on the new base; ghost hair 0 everywhere. On B the CPU masks leave 0.5–1.6% hand leak and up to 0.3% ghost hair (timing check) against 0 for `r4`. In the slow window, with masks arriving half as often, B reached 17% hand leak in one run: the CPU segmenter needs the machine at full speed.
+- On the F sheet the thumb at 4.8 s is covered by the persona only in the Balanced run that fell in the slow window; the other presets show it.
+
+**What still looks fake (ranked)**
+1. Mouth on turns and look-ups (B 5.8 s, 9.8 s, 11.8 s; E 12.1 s): a vertical cut through the moustache and lip, and a magenta lip over a dark chin, on Balanced and Identity-forward; less on Camera-matched, much weaker in `r4` at the same times. Keyframe crossfade between references whose mouths differ is the suspect (not verified).
+2. Frontal speech (A 15.6–18.2 s): a darker, doubled moustache band on all three presets, the wearer's lips showing through under the persona's moustache.
+3. Single-photo grid personas, the same in every column: warped eye region (p03, p05), orange crease streaks (p13), white sclera at strong yaw on B.
+4. Output sharpness on clip B with the enrolled persona swings between runs (steady loop).
+Better than `r4`: its orange nose and cheeks on A and E are much weaker in all three presets.
+
+**Deviations**
+- The approved sweep base included `cameraMatchMedian`; the grid showed it breaks sharp single-photo personas, so the presets were re-run without it (§1). The candidate runs on the median base (`r6c-*`, `r6g-bal|idf|cam`) are kept as evidence.
+- The machine slowed down from 16:50 to about 18:25 (see top); preset clip runs are one pass and fell in that window; the timing check covers A and B only.
+- The sweep used the wearer as their own persona (the second person enrolled afterwards), so its identity rows say nothing about recognisability.
+- `skinToneMatch` 0.75 and `eyePassThroughRadius` 0 (Identity-forward) were chosen from the sweep, where neither moved identity beyond noise.
+
+**Candidate presets (for the user's choice; nothing collapsed or changed yet)**
+- Common base: flags `r4` + `videoFramePacing`, `matrixHeadPose`, `keyframeCrossfade` (steady camera-match loop, `cameraMatchMedian` off); setting `segmentCpu=1`.
+- **Balanced:** the base alone.
+- **Identity-forward:** base + `skinToneMatch=0.75`, `eyePassThroughRadius=0`.
+- **Camera-matched:** base + `boundaryFeather=1.5`, `lipFadeFloor=0.3`.
+- **Recommendation: Balanced as the default.** Against `r4` it keeps identity on the grid (per-persona median 0.000) and on the enrolled clips except A (−0.09, shared by every preset), takes frame p95 from 68–103 ms to 29–33 ms at the clip's frame rate, cuts texture slide (grid 0.33 → 0.005 px) and the seam step, and leaves skin tone within budget (grid neck worst 10% 2.47 → 2.29; median 1.35 → 1.50). Identity-forward is not measurably more recognisable than Balanced (enrolled clips −0.01 to +0.03 against Balanced; grid −0.012 against `r4`) and its ears are worse. Camera-matched has the best tone and seam numbers but costs identity everywhere (−0.07 to −0.14 on the enrolled clips, 17 of 28 grid personas worse), so it fails "recognisable first" as a default; it could be offered as an opt-in "blend into the camera" setting.
+- Before any default changes: the clip A identity loss of the new base (keyframe choice on a frontal clip is the first suspect), the mouth cut on turns, and a per-machine segmenter delegate (GPU where a mask takes under about 15 ms; CPU masks need the machine at full speed).
+- After the choice: collapse the debug flags into a few user-facing settings (the plan's last R6 item).
+
 ---
 
 ## Phase R7 — Neural renderer (separate approval required)
