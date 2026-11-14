@@ -169,6 +169,9 @@ export const UserGuideModal: React.FC<UserGuideModalProps> = ({
                   <p className="text-slate-400 leading-relaxed">
                     For a steadier face on head turns, use <strong>"Guided capture at the webcam"</strong> in the library: start the camera first, then the person whose face will be used sits at it, reads the consent text, types their own name and confirms they are the person at the camera, and is guided through seven reference photos (straight ahead, turned left and right, chin up and down, mouth open, smiling). Each photo is checked live for pose, sharpness and exposure; the signed consent record covers exactly those seven photos.
                   </p>
+                  <p className="text-slate-400 leading-relaxed">
+                    <strong>"Stronger Likeness"</strong>, under the chosen face in the inspector, keeps more of that person: their own beard, brows, skin tone and jaw line instead of yours. It is on for guided webcam captures, whose photos are taken in your room's even light, and off for uploaded photos, where harsh or coloured studio light can show as a tone step at the neck. You can switch it for each face; the skin tone slider keeps a separate value while it is on.
+                  </p>
                 </div>
 
                 <div className="bg-slate-950 p-4 rounded-xl border border-slate-800 space-y-2">

@@ -107,7 +107,8 @@ import { OralCavityRenderer, extractOralApertureMetrics } from './oralCavityRend
 import { MultiReferenceBank, type ReferenceKeyframe } from './multiReferenceBank.ts';
 import { CranialBoundaryBlender } from './cranialBoundaryBlender.ts';
 import { WATERMARK_TEXT, watermarkMetrics } from './watermark.ts';
-import { realismFlags } from '../realism/flags.ts';
+import { realismFlags, type RealismFlags } from '../realism/flags.ts';
+import { changedFlagKeys, effectiveRealismFlags, resolveSkinToneMatch, strongerLikenessFor } from '../realism/likeness.ts';
 import { FrameProfiler } from '../realism/profiler.ts';
 import {
   isRealismDebugEnabled,
@@ -180,6 +181,10 @@ export class RealtimeFacialEngine {
   private demoCtx: CanvasRenderingContext2D;
 
   // Persona & Identity Bank
+  /** "Stronger likeness" for the current persona: the R6b identity flags on top of the stored flags (src/realism/likeness.ts). */
+  private likeness = false;
+  /** The effective flags the last flag change was applied for. */
+  private appliedFlags: RealismFlags = realismFlags.get();
   private personaId: string | null = null;
   private personaImage: HTMLImageElement | null = null;
   private personaMean: [number, number, number] = [128, 128, 128];
@@ -384,7 +389,7 @@ export class RealtimeFacialEngine {
 
     this.baseTopology = buildFaceTopology(FACE_TESSELLATION, FACE_OVAL, 468);
     this.topology = this.baseTopology;
-    this.warp = new MeshWarpRenderer(w, h, realismFlags.get().webgl2);
+    this.warp = new MeshWarpRenderer(w, h, this.flags().webgl2);
     this.applyForeheadTopology();
     this.rigid.configure(rigidOptions(settings));
     this.status.renderer = this.warp.usesWebGL2 ? 'webgl2' : this.warp.usesWebGL ? 'webgl' : 'canvas2d';
@@ -411,43 +416,55 @@ export class RealtimeFacialEngine {
       this.filters.push(new OneEuroFilter(params.minCutoff, params.beta, 1.0));
     }
 
-    // Flags that change how the persona is prepared take effect by re-preparing it.
-    this.flagsUnsubscribe = realismFlags.subscribe((_flags, changed) => {
-      if (
-        (changed.includes('syntheticSuite') ||
-          changed.includes('personaCrop') ||
-          changed.includes('personaDelight') ||
-          changed.includes('symmetricDelight') ||
-          changed.includes('personaInpaint') ||
-          // R5: real keyframes are loaded with the persona, and their stored pose depends on the pose source.
-          changed.includes('keyframeCrossfade') ||
-          changed.includes('matrixHeadPose') ||
-          // R6b: the beard depth, the jaw UVs and the seam weights are measured with the persona.
-          changed.includes('jawExtension') ||
-          changed.includes('seamFade') ||
-          // R6b: the photo's lighting is measured and normalised with the persona.
-          changed.includes('photoLighting')) &&
-        this.personaImage
-      )
-        void this.preparePersona();
-      if (changed.includes('videoFramePacing')) this.pacer.reset();
-      if (changed.includes('autoRadius')) {
-        this.autoRadius = initialAutoRadius();
-        this.autoRadiusTrace = [];
-      }
-      if (changed.includes('foreheadExtension')) {
-        this.applyForeheadTopology();
-        if (this.personaImage) void this.preparePersona();
-      }
-      if (changed.includes('segmentation') || changed.includes('personaInpaint') || changed.includes('foreheadExtension')) this.ensureSegmenter();
-      if (changed.includes('cameraMatch')) {
-        this.cameraMatch = initialCameraMatch();
-        this.cameraMatchTrace = [];
-      }
-    });
+    this.flagsUnsubscribe = realismFlags.subscribe(() => this.syncFlags(true));
     if (isRealismDebugEnabled()) {
       this.profiler.measure = true;
       setRealismEngine(this.createDebugApi());
+    }
+  }
+
+  /** The flags this frame renders with: the stored flags plus, with Stronger likeness on, the R6b identity flags. */
+  private flags(): RealismFlags {
+    return effectiveRealismFlags(realismFlags.get(), this.likeness);
+  }
+
+  /**
+   * Applies a change of the effective flags (a stored flag, or Stronger likeness on a persona
+   * switch or toggle). Flags that change how the persona is prepared take effect by re-preparing
+   * it; `reloadPersona` is false when a new persona is about to be prepared anyway.
+   */
+  private syncFlags(reloadPersona: boolean) {
+    const next = this.flags();
+    const changed = changedFlagKeys(this.appliedFlags, next);
+    this.appliedFlags = next;
+    if (changed.length === 0) return;
+    const reprepare =
+      changed.includes('syntheticSuite') ||
+      changed.includes('personaCrop') ||
+      changed.includes('personaDelight') ||
+      changed.includes('symmetricDelight') ||
+      changed.includes('personaInpaint') ||
+      // R5: real keyframes are loaded with the persona, and their stored pose depends on the pose source.
+      changed.includes('keyframeCrossfade') ||
+      changed.includes('matrixHeadPose') ||
+      // R6b: the beard depth, the jaw UVs and the seam weights are measured with the persona.
+      changed.includes('jawExtension') ||
+      changed.includes('seamFade') ||
+      // R6b: the photo's lighting is measured and normalised with the persona.
+      changed.includes('photoLighting') ||
+      // R4b: the persona is prepared for the extended topology.
+      changed.includes('foreheadExtension');
+    if (changed.includes('foreheadExtension')) this.applyForeheadTopology();
+    if (reprepare && this.personaImage && reloadPersona) void this.preparePersona();
+    if (changed.includes('videoFramePacing')) this.pacer.reset();
+    if (changed.includes('autoRadius')) {
+      this.autoRadius = initialAutoRadius();
+      this.autoRadiusTrace = [];
+    }
+    if (changed.includes('segmentation') || changed.includes('personaInpaint') || changed.includes('foreheadExtension')) this.ensureSegmenter();
+    if (changed.includes('cameraMatch')) {
+      this.cameraMatch = initialCameraMatch();
+      this.cameraMatchTrace = [];
     }
   }
 
@@ -527,6 +544,15 @@ export class RealtimeFacialEngine {
   }
 
   public setPersona(persona: AuthorizedPersona | null) {
+    // Stronger likeness is chosen per persona. Toggling it on the persona already shown re-prepares
+    // that persona when a load-time flag changes; a new persona is prepared below anyway.
+    const likeness = strongerLikenessFor(persona);
+    if (likeness !== this.likeness) {
+      this.likeness = likeness;
+      const shown = !!persona && persona.id === this.personaId && this.status.persona === 'ready';
+      this.syncFlags(shown);
+      if (shown) return;
+    }
     this.personaPrepareToken++;
     if (!persona) {
       this.personaId = null;
@@ -579,7 +605,7 @@ export class RealtimeFacialEngine {
       this.warp.setEyeFade(eyeFadeWeights(this.topology, settings.eyePassThroughRadius));
     }
     if (resolveLook(prev).boundaryFeather !== resolveLook(settings).boundaryFeather) this.applyBoundaryFeather();
-    if (prev.personaTextureSize !== settings.personaTextureSize && this.personaImage && realismFlags.get().personaCrop) {
+    if (prev.personaTextureSize !== settings.personaTextureSize && this.personaImage && this.flags().personaCrop) {
       void this.preparePersona();
     }
     if (prev.foreheadRecalibrate !== settings.foreheadRecalibrate) this.hairline.recalibrate();
@@ -696,7 +722,7 @@ export class RealtimeFacialEngine {
       const warnings: string[] = [];
       let personaRatios: number[] | null = null;
       let personaRatiosMeasured: Array<number | null> | null = null;
-      const inpaintOn = realismFlags.get().personaInpaint;
+      const inpaintOn = this.flags().personaInpaint;
       if (inpaintOn || foreheadOn) {
         // R4b (flag foreheadExtension): the same segmentation gives the persona's hairline ratios, and hair on its forehead is filled.
         const res = await this.inpaintPersona(texture, uv, { inpaint: inpaintOn, forehead: foreheadOn });
@@ -719,7 +745,7 @@ export class RealtimeFacialEngine {
       this.delightBands = null;
       this.delightRadius = -1;
       this.warp.setDelight(null);
-      if (realismFlags.get().symmetricDelight) {
+      if (this.flags().symmetricDelight) {
         const tw = texture instanceof HTMLImageElement ? texture.naturalWidth : texture.width;
         const th = texture instanceof HTMLImageElement ? texture.naturalHeight : texture.height;
         const c = document.createElement('canvas');
@@ -741,7 +767,7 @@ export class RealtimeFacialEngine {
       this.proportionRamp = 0;
       // R6b (flag jawExtension): how far the beard reaches below the jaw, and the UVs pushed to follow it.
       this.jawDepths = null;
-      if (realismFlags.get().jawExtension) {
+      if (this.flags().jawExtension) {
         const depths = this.measureBeard(texture, uv);
         if (depths && hasBeard(depths)) {
           this.jawDepths = depths;
@@ -764,7 +790,7 @@ export class RealtimeFacialEngine {
         this.personaUvExt = null;
       }
       // R6b (flag seamFade): where this photo's side UVs fall off its face skin.
-      if (realismFlags.get().seamFade) this.seamWeights.set(uv, this.measureSeam(texture, uv));
+      if (this.flags().seamFade) this.seamWeights.set(uv, this.measureSeam(texture, uv));
       this.warp.setPersona(texture, uv);
       // R6b: the jaw feather follows this persona's beard (or goes back to the plain one).
       this.applyBoundaryFeather();
@@ -791,14 +817,14 @@ export class RealtimeFacialEngine {
       this.keyframeMix = 0;
       this.keyframeSecondaryId = null;
       this.warp.clearKeyframes();
-      if (realismFlags.get().syntheticSuite) {
+      if (this.flags().syntheticSuite) {
         const suite = MultiReferenceBank.synthesizeSuiteFromMaster(img, face.landmarks, this.personaMean);
         for (const kf of suite) {
           this.referenceBank.addKeyframe(kf);
         }
       }
       // R5 §1 (flag keyframeCrossfade): the enrollment shots become real keyframes, one GPU texture each.
-      if (realismFlags.get().keyframeCrossfade && this.personaRefs.length > 1 && this.warp.supportsKeyframePair) {
+      if (this.flags().keyframeCrossfade && this.personaRefs.length > 1 && this.warp.supportsKeyframePair) {
         const keyframes = await this.loadReferenceKeyframes(this.personaRefs);
         if (this.disposed || token !== this.personaPrepareToken) return;
         if (keyframes.length > 1) {
@@ -856,7 +882,7 @@ export class RealtimeFacialEngine {
     } else {
       this.framesSkipped++;
     }
-    const paced = realismFlags.get().videoFramePacing;
+    const paced = this.flags().videoFramePacing;
     const v = this.videoElement;
     const video = paced && v && v.readyState >= 2 && v.videoWidth > 0 ? (v as unknown as PacedVideo) : null;
     this.pacer.schedule(video, paced, this.loop);
@@ -875,7 +901,7 @@ export class RealtimeFacialEngine {
     let uv = landmarks;
     let delightRange: number | null = null;
     let lighting: LightingAssessment | null = null;
-    if (realismFlags.get().personaCrop) {
+    if (this.flags().personaCrop) {
       const plan = planCrop(landmarks, img.naturalWidth, img.naturalHeight, this.settings.personaTextureSize);
       const crop = document.createElement('canvas');
       crop.width = plan.width;
@@ -887,7 +913,7 @@ export class RealtimeFacialEngine {
       texture = crop;
       uv = cropUvs(landmarks, img.naturalWidth, img.naturalHeight, plan);
     }
-    if (realismFlags.get().photoLighting) {
+    if (this.flags().photoLighting) {
       // R6b: the photo's side light and coloured fill are measured and divided out with a per-photo
       // strength (an evenly lit photo is left as it is); replaces the R3b de-light below.
       const lit = document.createElement('canvas');
@@ -906,7 +932,7 @@ export class RealtimeFacialEngine {
         lctx.putImageData(pixels, 0, 0);
         texture = lit;
       }
-    } else if (realismFlags.get().personaDelight) {
+    } else if (this.flags().personaDelight) {
       const lit = document.createElement('canvas');
       lit.width = texture instanceof HTMLImageElement ? texture.naturalWidth : texture.width;
       lit.height = texture instanceof HTMLImageElement ? texture.naturalHeight : texture.height;
@@ -934,7 +960,7 @@ export class RealtimeFacialEngine {
    * was taken) position it in the bank. A shot whose face cannot be found is skipped.
    */
   private async loadReferenceKeyframes(refs: PersonaReference[]): Promise<ReferenceKeyframe[]> {
-    const useMatrix = realismFlags.get().matrixHeadPose;
+    const useMatrix = this.flags().matrixHeadPose;
     const out: ReferenceKeyframe[] = [];
     for (const ref of refs) {
       try {
@@ -951,7 +977,7 @@ export class RealtimeFacialEngine {
         const texture = prepared.texture;
         // R6b (flag jawExtension): every keyframe follows the persona photo's beard depth.
         const uv = this.jawDepths ? this.extendJawUv(prepared.uv, texture) : prepared.uv;
-        if (realismFlags.get().seamFade) this.seamWeights.set(uv, this.measureSeam(texture, uv));
+        if (this.flags().seamFade) this.seamWeights.set(uv, this.measureSeam(texture, uv));
         const size = texture instanceof HTMLImageElement ? { width: texture.naturalWidth, height: texture.naturalHeight } : { width: texture.width, height: texture.height };
         out.push({
           id: ref.id,
@@ -1129,7 +1155,7 @@ export class RealtimeFacialEngine {
   private applyBoundaryFeather(turn = this.jawTurnApplied) {
     this.jawTurnApplied = turn;
     const width = resolveLook(this.settings).boundaryFeather;
-    const depths = realismFlags.get().jawExtension ? this.jawDepths : null;
+    const depths = this.flags().jawExtension ? this.jawDepths : null;
     if (width === 1 && (!depths || turn <= 0)) {
       this.warp.setBoundaryFeather(null);
       this.warp.setFeatherBands(null);
@@ -1209,7 +1235,7 @@ export class RealtimeFacialEngine {
     }
     profiler.end('track');
     // R4 §1: segment the source every N frames into the EMA masks.
-    const segFlags = realismFlags.get();
+    const segFlags = this.flags();
     const segEvery = Math.max(1, Math.round(settings.segmentEvery ?? 2));
     if (segFlags.segmentation && src && layout && this.segmenter.idle && this.frameIndex % segEvery === 0) {
       profiler.begin('segment');
@@ -1260,7 +1286,7 @@ export class RealtimeFacialEngine {
     this.lastMetrics = metrics;
     this.lastPose = pose;
     this.lastMar = kinematics?.mar ?? 0;
-    if (kinematics && realismFlags.get().restMouth) this.restMouth.push(kinematics.mar, timestamp, kinematics.yaw, kinematics.pitch);
+    if (kinematics && this.flags().restMouth) this.restMouth.push(kinematics.mar, timestamp, kinematics.yaw, kinematics.pitch);
 
     // --- 3. Compose base frame --------------------------------------------------------------
     const drawBase = (x: number, y: number, w: number, h: number) => {
@@ -1277,7 +1303,7 @@ export class RealtimeFacialEngine {
       profiler.begin('overlay');
       // R5 §4 (flag singleGlComposite): the camera frame goes under the persona inside the WebGL canvas.
       singleGl = useSingleGlComposite({
-        flag: realismFlags.get().singleGlComposite,
+        flag: this.flags().singleGlComposite,
         viewMode: settings.viewMode,
         overlayReady: true,
         webgl: this.warp.supportsBaseComposite,
@@ -1416,7 +1442,7 @@ export class RealtimeFacialEngine {
       this.smoothed[i * 2 + 1] = this.filters[i * 2 + 1].filter(y, timestamp);
     }
     // Rigid-pose forehead: the upper face follows the smoothed head pose instead of jittery points.
-    if (realismFlags.get().rigidForehead && transform) {
+    if (this.flags().rigidForehead && transform) {
       if (this.rigid.update(transform, this.rawPx, timestamp, layout.mirror)) this.rigid.apply(this.smoothed, timestamp);
     }
   }
@@ -1513,7 +1539,7 @@ export class RealtimeFacialEngine {
       applySmileBias(this.warpPositions, s.manualSmileBias, k.faceWidth);
     }
 
-    const flags = realismFlags.get();
+    const flags = this.flags();
 
     // 2. Anatomical speech constraints: stabilizes upper lip and mustache structure
     if (flags.speechAnatomy) applySpeechAnatomy(this.warpPositions, k.mar, k.faceHeight);
@@ -1701,7 +1727,7 @@ export class RealtimeFacialEngine {
             mirror: layout.mirror,
             faceWidthPx: k.faceWidth,
             // R6b (flag photoLighting): a colour cast in the persona photo raises its hue match.
-            toneMatch: clamp(Math.max(s.skinToneMatch, flags.photoLighting ? this.personaLighting?.cast ?? 0 : 0), 0, 1),
+            toneMatch: clamp(Math.max(resolveSkinToneMatch(s, this.likeness), flags.photoLighting ? this.personaLighting?.cast ?? 0 : 0), 0, 1),
             toneBudget: illumination ? Math.max(0, s.toneBudget ?? TONE_BUDGET_DEFAULT) : 0,
             radiusShare,
             globalTone: flags.relightGlobalTone && !illumination,
@@ -1779,7 +1805,7 @@ export class RealtimeFacialEngine {
         this.cameraMatch = stepCameraMatch(this.cameraMatch, d, o, 0.35, {
           steady,
           hold,
-          median: realismFlags.get().cameraMatchMedian,
+          median: this.flags().cameraMatchMedian,
           sharpnessTarget: this.settings.cameraMatchSharpness ?? 1,
           noiseTarget: this.settings.cameraMatchNoise ?? 1,
         });
@@ -1797,7 +1823,7 @@ export class RealtimeFacialEngine {
    */
   /** Starts the segmentation worker once a flag that needs it is on (and the tracker has loaded). */
   private ensureSegmenter() {
-    const f = realismFlags.get();
+    const f = this.flags();
     if (!(f.segmentation || f.personaInpaint || f.foreheadExtension) || this.status.model !== 'ready') return;
     void this.segmenter.load(this.settings.segmentCpu ? 'CPU' : 'GPU', this.masks, () => {
       this.masksDirty = true;
@@ -1810,7 +1836,7 @@ export class RealtimeFacialEngine {
    * shader (segmentation masks, hairline feather), so the Canvas 2D fallback keeps the base mesh.
    */
   private applyForeheadTopology() {
-    const on = realismFlags.get().foreheadExtension && this.warp.usesWebGL;
+    const on = this.flags().foreheadExtension && this.warp.usesWebGL;
     if (on && !this.extTopology) this.extTopology = extendTopology(this.baseTopology);
     const topology = on ? this.extTopology! : this.baseTopology;
     const changed = topology !== this.topology || on !== this.foreheadOn;
@@ -2077,7 +2103,7 @@ export class RealtimeFacialEngine {
    */
   /** True when the persona layer needs a 2D pass this frame (the geometric hairline fades, used without segmentation masks). */
   private overlayNeeds2dPasses(): boolean {
-    const flags = realismFlags.get();
+    const flags = this.flags();
     const segDrives = this.segActive && (this.settings.segmentationStrength ?? 1) > 0.5;
     const stackedFades = !segDrives && this.foreheadStrength === 0;
     return stackedFades && (flags.foreheadHarmonize || flags.hairlineSoften);
@@ -2095,7 +2121,7 @@ export class RealtimeFacialEngine {
     const H = this.overlayLayer.height;
     octx.clearRect(0, 0, W, H);
     octx.drawImage(this.warp.canvas, 0, 0, W, H);
-    const flags = realismFlags.get();
+    const flags = this.flags();
     // R4: with segmentation masks driving the hairline, the geometric passes are the fallback only.
     const segDrives = this.segActive && (this.settings.segmentationStrength ?? 1) > 0.5;
     // R4b: with the forehead extension in, the hairline ring's feather is the only transition.
@@ -2172,7 +2198,7 @@ export class RealtimeFacialEngine {
 
     // Forehead/hairline harmonization runs on the transparent overlay layer (composeOverlayLayer).
 
-    const flags = realismFlags.get();
+    const flags = this.flags();
 
     // 1. Anatomical Intra-Oral Dental & Depth Synthesis Engine
     const apertureMetrics = flags.oralCavity ? extractOralApertureMetrics(pts) : null;
@@ -2508,7 +2534,7 @@ export class RealtimeFacialEngine {
           mar: this.lastMar,
           lipFade: this.lastLipFade,
           rigidPose: this.rigid.lastPose ? poseAngles(this.rigid.lastPose.q) : null,
-          cameraMatch: realismFlags.get().cameraMatch ? { ...this.cameraMatch } : null,
+          cameraMatch: this.flags().cameraMatch ? { ...this.cameraMatch } : null,
           cameraMatchTrace: [...this.cameraMatchTrace],
           restMar: this.restMouth.rest,
           personaDelightRange: this.personaDelightRange,
@@ -2516,10 +2542,10 @@ export class RealtimeFacialEngine {
             ? (({ asymmetry, asymmetryL, asymmetryAb, hue, chroma, strength, cast }) => ({ asymmetry, asymmetryL, asymmetryAb, hue, chroma, strength, cast }))(this.personaLighting)
             : null,
           toneFloor: this.warp.toneFloor,
-          autoRadius: this.illumLoopActive ? { ...this.illumRadius } : realismFlags.get().autoRadius ? { ...this.autoRadius } : null,
+          autoRadius: this.illumLoopActive ? { ...this.illumRadius } : this.flags().autoRadius ? { ...this.autoRadius } : null,
           autoRadiusTrace: [...this.autoRadiusTrace],
           autoRadiusLast: this.autoRadiusLast,
-          relightRadius: this.illumLoopActive ? this.illumRadius.radius : realismFlags.get().autoRadius ? this.autoRadius.radius : this.settings.relightRadius,
+          relightRadius: this.illumLoopActive ? this.illumRadius.radius : this.flags().autoRadius ? this.autoRadius.radius : this.settings.relightRadius,
           symmetricDelight: !!this.delightBands,
           segmentation: { ready: this.segmenter.ready, active: this.segActive, updates: this.segUpdates, backend: this.segmenter.backend, error: this.segmenter.error, lastMs: this.segmenter.lastMs, lastPackMs: this.segmenter.lastPackMs, bitmapMs: this.segmenter.bitmapMs, inferMs: this.segmenter.inferMs, readMs: this.segmenter.readMs, roundTripMs: this.segmenter.roundTripMs, submits: this.segmenter.submits },
           personaInpaintShare: this.personaInpaintShare,
@@ -2549,7 +2575,7 @@ export class RealtimeFacialEngine {
             keyframeSecondaryId: this.keyframeSecondaryId,
             keyframeMix: this.keyframeMix,
             matrixPose: this.matrixPose ? { ...this.matrixPose } : null,
-            pacing: this.lastPacing ? pacingMode(realismFlags.get().videoFramePacing, this.videoElement as unknown as PacedVideo | null) : null,
+            pacing: this.lastPacing ? pacingMode(this.flags().videoFramePacing, this.videoElement as unknown as PacedVideo | null) : null,
             framesOverwritten: this.pacer.framesOverwritten,
             framesSkipped: this.framesSkipped,
             singleGl: this.singleGlThisFrame,
@@ -2561,7 +2587,8 @@ export class RealtimeFacialEngine {
           videoDuration: v && Number.isFinite(v.duration) ? v.duration : null,
           videoEnded: v ? v.ended : false,
           profile: this.profiler.summary(),
-          flags: realismFlags.get(),
+          flags: this.flags(),
+          strongerLikeness: this.likeness,
         };
       },
       scheduleCaptures: (times) => {

@@ -928,7 +928,7 @@ For this pair, with very different face shapes and facial hair, items a–h will
 
 ## Phase R6b — Identity fixes from the visual audit (2D, any laptop)
 
-R7 is on hold. The goal is a convincing browser app on a standard laptop (this one: Intel UHD, no sidecar). Branch `realism/r6b-identity`. Every change sits behind a flag, all off by default; `--flags r6b` turns all of them on (five here, six after the polish round below added `seamFade`).
+R7 is on hold. The goal is a convincing browser app on a standard laptop (this one: Intel UHD, no sidecar). Branch `realism/r6b-identity`. Every change sits behind a flag, all off by default; `--flags r6b` turns all of them on (five here, six after the polish round below added `seamFade`, seven after round 3 added `photoLighting`). They ship as the per-persona "Stronger likeness" switch, on for guided enrollments (close-out below).
 
 ### What was built
 - **Persona photo in every review:**
@@ -1214,6 +1214,49 @@ The user's go: adaptive lighting per persona, so that harshly lit or colour-cast
 - The load-time harshness measure was dropped for the runtime loop (above). The user asked for a load-time measure; only the side-light and colour-cast parts are measured at load.
 - New settings: `toneBudget` and `illuminationRadius` (which fixes the radius instead of the loop).
 - The defaults were not flipped, because the verification did not pass. The flip is prepared but not applied.
+
+### R6b close-out (2026-11-14): "Stronger likeness", per persona
+
+The user chose option (b): ship the R6b pipeline as a per-persona switch rather than as the default for every photo, with no further grid round.
+
+**Defaults:**
+- **Guided webcam enrollments:** Stronger likeness is on.
+- **Uploaded photos:** it is off, so they keep the r6 look.
+- **Flags:** every flag default and preset (`r0`…`r6b`) is unchanged.
+
+**What was built:**
+- **The switch** (`src/realism/likeness.ts`, pure, 6 unit tests plus one in the enrollment tests):
+  - `AuthorizedPersona.strongerLikeness` holds the user's choice for that persona.
+  - Unset, it is on for a persona with reference shots (only the guided enrollment makes them) and off for a single photo.
+  - While it is on, the engine renders with the stored flags plus the seven R6b flags (`effectiveRealismFlags`). A test checks that r6 plus the switch equals the `r6b` preset.
+  - The switch only adds flags: debug and review overrides still apply, and no base or guardrail flag changes.
+- **Skin tone:** while the switch is on, skin tone match uses its own setting, `likenessSkinToneMatch` (unset = 0.3). The slider edits that value for a likeness persona, so moving it never changes the look of uploaded photos, and the reverse.
+- **Engine:**
+  - Every flag read goes through the effective flags.
+  - A flag change, from the store or from the switch, re-prepares the persona when a load-time flag changes (`jawExtension`, `seamFade`, `photoLighting`). This takes about 3 s on this laptop.
+  - Switching to a new persona applies the switch without preparing the old persona again.
+- **Inspector:** "Stronger Likeness" sits under the chosen face. Its note depends on the persona: "on by default for guided webcam captures", or for a photo, that harsh or coloured light can show as a tone step at the neck.
+- **Docs:** the user guide and the README describe the switch.
+- **Review tool:**
+  - `realism:capture --likeness auto|on|off`. Without it, a run that names `--flags` renders exactly those flags, and a run without `--flags` captures the app as it ships.
+  - `report.json` records `app.strongerLikeness` and `app.strongerLikenessActive`; the debug state carries `strongerLikeness`.
+
+**Checks:**
+- **Smoke run** (frozen review build `dist-r6g`, mains): clip A, the second person's enrollment on the clip author, no `--flags` (`r6g-smoke-auto`). The switch came on by itself.
+  - Identity margin −0.23 (round 3's r6b: −0.23).
+  - Neck gap −3.58 (−3.7); ears +1.58; seam step −0.13.
+  - Hand leak 0; 29.8 fps, frame p95 31.1 ms.
+- **Toggle check** on the same build, through the review hook (the path the inspector uses):
+  - The guided persona started with 7 of 7 flags on. Off gave 0 of 7, on gave 7 of 7 again, each re-prepared and back to "ready" in about 3 s.
+  - A single photo started at 0 of 7, with no page errors.
+- **Verification:** `npm ci`, 249 tests pass, lint and build pass, and `check-prod-bundle` passes.
+
+**What the user accepts with the default on guided enrollments** (round 3 numbers, enrolled pair, clips A–F, measured with tone match 1; it is 0.3 now and barely different):
+- Neck tone fails on A, D and E (−3.1 to −3.7 ΔE against a tolerance of 3).
+- The SFace margin is level with r6 on A, D and F and 0.06–0.14 below on B, C and E.
+- By eye it reads more like the persona: the second person's full beard and tone, and natural lips on look-ups.
+
+**Deviation:** the working rule says a default changes only after a measured comparison passes. The guided-enrollment default is the user's decision on round 3's measurement, which did not pass the tone gate.
 
 ---
 

@@ -135,7 +135,13 @@ reproduces the R4 defaults. The user-facing `cameraBlend` setting (0..1, `src/ut
 look toward the Camera-matched preset (`boundaryFeather` 1 → 1.5, lip floor at least 0.3 × blend); an
 explicit `--settings boundaryFeather=…` overrides its feather.
 
-R6b identity flags (all off; `--flags r6b` = `r6` with all seven on):
+R6b identity flags (all off as flags; `--flags r6b` = `r6` with all seven on). In the app they ship as the per-persona
+"Stronger likeness" switch (`src/realism/likeness.ts`): on by default for a guided enrollment (a persona with reference
+shots), off for an uploaded photo, with its own skin tone match (`likenessSkinToneMatch`, default 0.3). The capture
+tool's `--likeness auto|on|off` sets it on the loaded personas; without it a run that names `--flags` renders exactly
+those flags (off), and a run without `--flags` captures the app as it ships (auto, so `--enrolled` renders as r6b with
+tone match 0.3). `report.json` records the mode (`app.strongerLikeness`) and, for the default persona, whether it was on
+(`app.strongerLikenessActive`).
 - `relightIllumination`: relighting moves only the light.
   - Skin-only, large-scale low passes (beard, brows, eyes and lips weighted out) give each face its relative illumination. The persona keeps its own beard, brows, skin tone and lip and nose colour.
   - Brightness follows the wearer's mostly (65% in the centre, 90% at the boundary: it is mostly the camera's exposure). The hue moves toward the wearer's by `skinToneMatch` (0.3 in the R6b review), on skin only.
@@ -149,7 +155,7 @@ R6b identity flags (all off; `--flags r6b` = `r6` with all seven on):
 - `photoLighting`: reloads the persona. Adaptive lighting per persona, in three parts:
   - At load, a 2nd-order skin shading field is fitted on the photo and mirrored across the face through the mesh's symmetric landmark pairs. Its left/right difference (side light, coloured fill) is divided out with a per-photo strength: none below 4 ΔE of asymmetry, full from 10.
   - A colour cast (mean skin hue far from skin, or oversaturated light) raises that persona's skin-tone match.
-  - At run time the illumination relight's radius follows its own loop. It starts at 10% of face width and steps down toward 3.5% while the output's cheek tone or side shading is out of line with the wearer's (the R3c readbacks; it steps faster the further out it is). A harshly lit photo's cheekbone highlights and shadows are then divided out at a finer scale.
+  - At run time the illumination relight's radius follows its own loop. It starts at 10% of face width and steps down toward 5% while the output's cheek tone or side shading is out of line with the wearer's (the R3c readbacks; it steps faster the further out it is). A harshly lit photo's cheekbone highlights and shadows are then divided out at a finer scale.
   - `report.json` records the photo measurement as `photoLighting`, and `autoRadius` holds the loop.
 - Tone budget (with `relightIllumination`; `--settings toneBudget=2.5`, 0 = off): the face's mean skin is kept within that many ΔE00 of the wearer's, and its large-scale skin colour within about the same at each place. Beard, brows, lips and finer detail ride on top unchanged. `report.json` records the end-of-clip floor as `toneFloor`. `--settings illuminationRadius=0.05` fixes the radius instead of the loop.
 - `jawExtension` also fades the push and its feather on tilts (8°–18° of roll, 20°–35° of pitch). In the lower face, the persona leaves wherever the masks call a pixel body skin at least as likely as face skin, so a hand under the chin stays in front of the beard.

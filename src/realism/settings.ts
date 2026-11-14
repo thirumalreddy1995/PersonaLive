@@ -23,6 +23,7 @@ const NUMERIC_KEYS: ReadonlyArray<SettingKey> = [
   'rigidPoseMinCutoff',
   'rigidPoseBeta',
   'skinToneMatch',
+  'likenessSkinToneMatch',
   'relightRadius',
   'cameraBlend',
   'featureBlend',

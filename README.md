@@ -46,6 +46,7 @@ Open http://localhost:3000, sign in with the demo credentials (`admin@personaliv
 | Movement Smoothness | 1-Euro filter cutoff: responsive ↔ steady |
 | Smile & Expression Warmth | Lifts or lowers the mapped mouth corners |
 | Keep My Real Eyes | Leaves the eye holes open so your own eyes/blinks show (off = persona eyes are painted in) |
+| Stronger Likeness | Per face: keeps the chosen face's own beard, brows, skin tone and jaw line (on by default for guided webcam captures, off for uploaded photos) |
 | Match My Room Lighting | Adapts the persona's brightness and colour cast to your camera |
 | Video Quality | Output canvas size: 1920×1080, 1280×720 or 960×540 |
 | Record / Snapshot | Records the output canvas to WebM (download from **Recordings**) or saves a PNG |

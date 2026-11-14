@@ -112,7 +112,10 @@ export interface RealismDebugState {
   videoDuration: number | null;
   videoEnded: boolean;
   profile: ProfileSummary;
+  /** The flags the engine renders with: the stored flags plus the R6b identity flags while Stronger likeness is on. */
   flags: RealismFlags;
+  /** "Stronger likeness" for the current persona (src/realism/likeness.ts); absent in builds before it. */
+  strongerLikeness?: boolean;
 }
 
 export interface RealismFrameCapture {
@@ -317,6 +320,8 @@ export interface LoadPersonaSpec {
    * pose and expression each was taken at. They share the persona's consent record.
    */
   references?: Array<{ label: string; dataUrl: string; pose: HeadPose; matrixPose?: HeadPose | null; expression: { mar: number; smile: number; browElevation: number } }>;
+  /** "Stronger likeness" for this persona; unset = the app's default (on with reference shots, off for one photo). */
+  strongerLikeness?: boolean;
 }
 
 export interface RealismWindowHook {
@@ -607,6 +612,7 @@ export function installRealismWindowHook(app?: RealismAppHooks): RealismWindowHo
           matrixPose: r.matrixPose ?? null,
           expression: r.expression,
         })),
+        ...(typeof spec.strongerLikeness === 'boolean' ? { strongerLikeness: spec.strongerLikeness } : {}),
         createdAt: timestamp.slice(0, 10),
         qualityScore: 0,
         metrics: {

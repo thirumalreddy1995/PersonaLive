@@ -309,6 +309,7 @@ export default function App() {
           subjectCategory={subjectCategory}
           onChangeSubjectCategory={handleChangeSubjectCategory}
           onUpdateSettings={handleUpdateSettings}
+          onUpdatePersona={handleUpdatePersona}
           onOpenLibrary={() => openLibrary('enroll')}
           onOpenConsentLogs={() => openLibrary('library')}
         />

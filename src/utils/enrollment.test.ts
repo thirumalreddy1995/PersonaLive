@@ -16,6 +16,7 @@ import {
   toLuma,
 } from './enrollment.ts';
 import { consentPending } from '../types/index.ts';
+import { strongerLikenessFor } from '../realism/likeness.ts';
 
 const step = (id: string) => ENROLLMENT_STEPS.find((s) => s.id === id)!;
 const good: EnrollmentSample = { faceVisible: true, yaw: 0, pitch: 0, mar: 0.05, smile: 0.1, sharpness: 20, meanLuma: 120, clippedShare: 0.01 };
@@ -216,6 +217,9 @@ test('enrollmentPersona: frontal photo, all references in plan order, and only w
   assert.equal(persona.consent, consent);
   assert.equal(persona.metrics.resolution, '1280 × 720 px');
   assert.equal(consentPending(persona.consent), false);
+  // A guided enrollment opens with Stronger likeness on (no user choice stored yet).
+  assert.equal(persona.strongerLikeness, undefined);
+  assert.equal(strongerLikenessFor(persona), true);
 
   assert.equal(enrollmentComplete(all), true);
   assert.equal(enrollmentComplete(all.slice(0, 6)), false);

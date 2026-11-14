@@ -29,6 +29,11 @@ export interface AuthorizedPersona {
    * same consent record (their hashes are in `consent.imageHashes`).
    */
   references?: PersonaReference[];
+  /**
+   * "Stronger likeness" (the R6b identity pipeline) for this persona, as the user set it. Unset:
+   * on for a guided webcam enrollment, off for an uploaded photo (src/realism/likeness.ts).
+   */
+  strongerLikeness?: boolean;
 }
 
 /** One enrollment shot with the pose and expression measured when it was taken. */
@@ -152,6 +157,8 @@ export interface TransformationSettings {
   rigidShapeOffset: boolean;
   /** R3 relighting tone match, 0..1: 0 keeps the persona's complexion everywhere, 1 matches the wearer's at the face boundary. */
   skinToneMatch: number;
+  /** The same tone match for personas with "Stronger likeness" on, 0..1 (unset = 0.3; src/realism/likeness.ts). */
+  likenessSkinToneMatch?: number;
   /** R3 relighting low-pass sigma as a share of face width (0.02 measured on the persona grid; 5% let harshly lit personas keep their own shading, the plan's 6–10% darkened the cheeks). */
   relightRadius: number;
   /** R6 "Camera blend", 0..1: 0 is the Balanced look (default), 1 the Camera-matched preset (wider boundary feather, more of the wearer's lips at rest; src/utils/look.ts). */

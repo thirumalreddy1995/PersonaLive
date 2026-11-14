@@ -25,6 +25,10 @@
  *   --enrolled <dir>          an enrollment exported by realism:enroll (enrollment.json and its shots): loaded as a
  *                             review-only persona with its reference keyframes, in place of the default persona
  *   --flags <string>          realism flag overrides, e.g. "oralCavity=0,syntheticSuite=off" or the preset "r0"
+ *   --likeness <auto|on|off>  "Stronger likeness" on the loaded personas (the R6b identity flags with their own skin tone
+ *                             match): auto = the app's default (on for an enrollment with reference shots, off for one
+ *                             photo). Default: off when --flags is given, so the named flags are exactly what renders;
+ *                             auto otherwise
  *   --settings <string>       transformation settings overrides, e.g. "temporalSmoothing=20,blendStrength=100"
  *   --run <name>              output folder name (default: <date>-<flags>)
  *   --times <s,s,...>         capture timestamps in seconds (default: 8 evenly spaced; 4 in grid mode)
@@ -44,6 +48,7 @@ import path from 'node:path';
 import { Browser, Page } from 'playwright';
 import { defaultRealismFlags, describeRealismFlags, parseRealismFlagString } from '../../src/realism/flags.ts';
 import { parseSettingsString } from '../../src/realism/settings.ts';
+import { type LikenessMode, reviewLikeness } from '../../src/realism/likeness.ts';
 import type { RealismDebugState, SerializedBurst, SerializedCapture } from '../../src/realism/debug.ts';
 import * as M from './metrics.ts';
 import { SheetRow, blank, blit, compositeOnChecker, contactSheet, crop, decodeImageFile, decodePngDataUrl, drawText, imageDataUrl, scaleImage, writeDataUrlPng, writePng } from './png.ts';
@@ -67,6 +72,7 @@ interface Args {
   frames: boolean;
   regions: boolean;
   flags: string;
+  likeness: LikenessMode | null;
   settings: string;
   run: string | null;
   times: number[] | null;
@@ -87,6 +93,7 @@ function parseArgs(argv: string[]): Args {
     frames: false,
     regions: false,
     flags: '',
+    likeness: null,
     settings: '',
     run: null,
     times: null,
@@ -130,6 +137,12 @@ function parseArgs(argv: string[]): Args {
       case '--flags':
         args.flags = next();
         break;
+      case '--likeness': {
+        const m = next();
+        if (m !== 'auto' && m !== 'on' && m !== 'off') throw new Error('--likeness takes auto, on or off');
+        args.likeness = m;
+        break;
+      }
       case '--settings':
         args.settings = next();
         break;
@@ -866,6 +879,7 @@ async function main() {
   if (parsed.errors.length) throw new Error(`Bad --flags: ${parsed.errors.join('; ')}`);
   const flagValues = { ...defaultRealismFlags(), ...parsed.flags };
   const flagString = describeRealismFlags(flagValues);
+  const strongerLikeness = reviewLikeness(args.likeness, args.flags.trim() !== '');
   const parsedSettings = parseSettingsString(args.settings);
   if (parsedSettings.errors.length) throw new Error(`Bad --settings: ${parsedSettings.errors.join('; ')}`);
   const runName = args.run ?? `${new Date().toISOString().slice(0, 10)}-${flagString === 'defaults' ? 'defaults' : flagString.replace(/[^a-z0-9]+/gi, '_')}`;
@@ -874,7 +888,8 @@ async function main() {
   const reportFile = path.join(outDir, 'report.json');
   const existing: Record<string, unknown> = fs.existsSync(reportFile) ? JSON.parse(fs.readFileSync(reportFile, 'utf8')) : {};
 
-  console.log(`clips ${clips.map((c) => c.label).join(', ')}; ${personas ? `${personas.length} personas; ` : ''}flags: ${flagString}; run: ${runName}`);
+  const likenessLabel = strongerLikeness === undefined ? 'auto' : strongerLikeness ? 'on' : 'off';
+  console.log(`clips ${clips.map((c) => c.label).join(', ')}; ${personas ? `${personas.length} personas; ` : ''}flags: ${flagString}; stronger likeness: ${likenessLabel}; run: ${runName}`);
 
   let server: { url: string; child: ChildProcess } | null = null;
   let browser: Browser | null = null;
@@ -897,7 +912,7 @@ async function main() {
     const load = systemLoad();
     console.log(`system load at start: ${describeLoad(load)}`);
     const reviewBuild = await page.evaluate(() => window.__personaLiveRealism?.reviewBuild ?? false);
-    const app: Record<string, unknown> & { persona: string } = { url, browser: args.browser, canvas: [state.canvasWidth, state.canvasHeight], persona: args.persona ?? 'default', settingsOverrides: parsedSettings.settings, settings: liveSettings, system: load, reviewBuild, gpuRenderer, highPerformanceGpu: args.highPerformanceGpu };
+    const app: Record<string, unknown> & { persona: string } = { url, browser: args.browser, canvas: [state.canvasWidth, state.canvasHeight], persona: args.persona ?? 'default', settingsOverrides: parsedSettings.settings, settings: liveSettings, system: load, reviewBuild, gpuRenderer, highPerformanceGpu: args.highPerformanceGpu, strongerLikeness: likenessLabel };
 
     if (!personas) {
       // --- Default persona: full frame dump per clip ----------------------------------------------
@@ -917,6 +932,7 @@ async function main() {
           role: 'Exported enrollment (realism review)',
           consent: 'pending' as const,
           references: enrolled.shots.map((s) => ({ label: s.label, dataUrl: shotUrl(s.file), pose: s.pose, matrixPose: s.matrixPose, expression: s.expression })),
+          strongerLikeness,
         });
         if (before?.personaStatus === 'ready') await waitForHookState(page, 'persona reload', (s) => s?.personaStatus !== 'ready', 10000).catch(() => null);
         await waitForHookState(page, 'enrolled persona ready', (s) => ['ready', 'no-face', 'error'].includes(s?.personaStatus ?? ''), 120000);
@@ -936,6 +952,7 @@ async function main() {
           id: 'persona-local-review',
           role: 'Local persona (realism review)',
           consent: 'pending' as const,
+          strongerLikeness,
         });
         await waitForHookState(page, 'local persona ready', (s) => ['ready', 'no-face', 'error'].includes(s?.personaStatus ?? ''), 120000);
         app.persona = `local:${path.basename(localPhoto)}`;
@@ -944,6 +961,9 @@ async function main() {
       }
       // R6b: the persona's own photo, recorded for the audit sheets (a path inside the gitignored folders, never the image).
       const referencePhoto = enrolled ? path.join(args.enrolled!, enrolled.shots[0].file) : localPhoto;
+      // Whether the engine renders the loaded persona with Stronger likeness (the R6b flags on top of --flags).
+      app.strongerLikenessActive = (await hookState(page))?.strongerLikeness ?? null;
+      if (app.strongerLikenessActive) console.log('  stronger likeness: on (R6b identity flags on top of the run flags)');
       app.personaPhoto = referencePhoto ? path.relative(ROOT, referencePhoto) : null;
       const clipReports: Record<string, unknown> = { ...((existing.clips as Record<string, unknown>) ?? {}) };
       for (const clip of clips) {
@@ -981,6 +1001,7 @@ async function main() {
           category: persona.category,
           dataUrl,
           id: `persona-test-${persona.id}`,
+          strongerLikeness,
         });
         // Wait for the engine to leave the previous "ready" state, then become ready for this photo.
         if (before?.personaStatus === 'ready') await waitForHookState(page, 'persona reload', (s) => s?.personaStatus !== 'ready', 10000).catch(() => null);

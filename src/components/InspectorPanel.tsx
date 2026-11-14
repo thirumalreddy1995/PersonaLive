@@ -15,6 +15,7 @@ import {
   Aperture,
   ChevronDown,
   ChevronRight,
+  Fingerprint,
 } from 'lucide-react';
 import {
   AuthorizedPersona,
@@ -27,6 +28,7 @@ import {
 import { UserRound } from 'lucide-react';
 import { realismFlags } from '../realism/flags.ts';
 import { resolveLook } from '../utils/look.ts';
+import { isGuidedEnrollment, resolveSkinToneMatch, skinToneMatchKey, strongerLikenessFor } from '../realism/likeness.ts';
 
 interface InspectorPanelProps {
   activePersona: AuthorizedPersona | null;
@@ -38,6 +40,8 @@ interface InspectorPanelProps {
   subjectCategory: PersonaCategory;
   onChangeSubjectCategory: (category: PersonaCategory) => void;
   onUpdateSettings: (newSettings: Partial<TransformationSettings>) => void;
+  /** Saves a change to a persona (Stronger likeness is chosen per persona). */
+  onUpdatePersona: (persona: AuthorizedPersona) => void;
   onOpenLibrary: () => void;
   onOpenConsentLogs: () => void;
 }
@@ -51,6 +55,7 @@ export const InspectorPanel: React.FC<InspectorPanelProps> = ({
   subjectCategory,
   onChangeSubjectCategory,
   onUpdateSettings,
+  onUpdatePersona,
   onOpenLibrary,
 }) => {
   // R4b: the forehead recalibration control shows only while the forehead extension flag is on.
@@ -62,6 +67,9 @@ export const InspectorPanel: React.FC<InspectorPanelProps> = ({
   // R6: the fine-tuning controls sit behind "Advanced"; the defaults are the measured Balanced look.
   const [advancedOpen, setAdvancedOpen] = React.useState(false);
   const cameraBlend = settings.cameraBlend ?? 0;
+  // Stronger likeness (the R6b identity pipeline): per persona, on by default for guided enrollments.
+  const likeness = strongerLikenessFor(activePersona);
+  const skinToneMatch = resolveSkinToneMatch(settings, likeness);
   const personaState = status?.persona ?? 'none';
   const matchingPersonas = personas.filter((p) => p.category === subjectCategory);
   const hiddenCount = personas.length - matchingPersonas.length;
@@ -183,6 +191,29 @@ export const InspectorPanel: React.FC<InspectorPanelProps> = ({
               </div>
             </div>
           </div>
+        )}
+
+        {activePersona && (
+          <label className="flex items-center justify-between cursor-pointer p-2 rounded-lg bg-slate-900/60 hover:bg-slate-900 transition-colors">
+            <span className="flex items-center gap-2 text-slate-200">
+              <Fingerprint className="w-3.5 h-3.5 text-sky-400" />
+              <span>
+                Stronger Likeness
+                <span className="block text-[10px] text-slate-500 font-normal">
+                  Keeps this face's own beard, brows, skin tone and jaw line.
+                  {isGuidedEnrollment(activePersona)
+                    ? ' On by default for guided webcam captures.'
+                    : ' Best with evenly lit photos; harsh or coloured light can show as a tone step at the neck.'}
+                </span>
+              </span>
+            </span>
+            <input
+              type="checkbox"
+              checked={likeness}
+              onChange={(e) => onUpdatePersona({ ...activePersona, strongerLikeness: e.target.checked })}
+              className="accent-sky-500 w-4 h-4 rounded cursor-pointer"
+            />
+          </label>
         )}
       </div>
 
@@ -312,17 +343,18 @@ export const InspectorPanel: React.FC<InspectorPanelProps> = ({
             <div className="px-2 pb-1 space-y-1">
               <div className="flex items-center justify-between text-[10px] text-slate-500">
                 <span>Skin tone match: chosen face ↔ my camera</span>
-                <span className="text-slate-300">{Math.round(settings.skinToneMatch * 100)}%</span>
+                <span className="text-slate-300">{Math.round(skinToneMatch * 100)}%</span>
               </div>
               <input
                 type="range"
                 min="0"
                 max="1"
                 step="0.05"
-                value={settings.skinToneMatch}
-                onChange={(e) => onUpdateSettings({ skinToneMatch: Number(e.target.value) })}
+                value={skinToneMatch}
+                onChange={(e) => onUpdateSettings({ [skinToneMatchKey(likeness)]: Number(e.target.value) })}
                 className="w-full accent-sky-500 cursor-pointer h-1.5 bg-slate-800 rounded-lg"
               />
+              {likeness && <p className="text-[10px] text-slate-500">Stronger likeness keeps its own value (30% to start).</p>}
             </div>
           )}
 

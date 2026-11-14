@@ -458,7 +458,11 @@ export const R4_FLAG_STRING = R3C_FLAG_STRING.replace('segmentation=0', 'segment
 /** The R6 defaults (the "Balanced" preset chosen at the end of R6, plus the guided enrollment in the library), as a flag string: `--flags r6`. With the setting segmentCpu=1 (the app default since R6). */
 export const R6_FLAG_STRING = R4_FLAG_STRING.replace('keyframeCrossfade=0', 'keyframeCrossfade=1').replace('videoFramePacing=0', 'videoFramePacing=1').replace('matrixHeadPose=0', 'matrixHeadPose=1').replace('guidedEnrollment=0', 'guidedEnrollment=1');
 
-/** R6b candidate (not the defaults): r6 with the seven identity flags on, for before/after review runs. */
+/**
+ * R6b: r6 with the seven identity flags on, for review runs. Not the defaults: in the app these flags
+ * ship as the per-persona "Stronger likeness" switch (src/realism/likeness.ts), on by default for
+ * guided enrollments.
+ */
 export const R6B_FLAG_STRING = R6_FLAG_STRING.replace('relightIllumination=0', 'relightIllumination=1').replace('skinTint=0', 'skinTint=1').replace('personaProportions=0', 'personaProportions=1').replace('jawExtension=0', 'jawExtension=1').replace('lidPassThrough=0', 'lidPassThrough=1').replace('seamFade=0', 'seamFade=1').replace('photoLighting=0', 'photoLighting=1');
 
 /** Named flag presets accepted by parseRealismFlagString (case-insensitive). */
